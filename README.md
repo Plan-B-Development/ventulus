@@ -2,7 +2,7 @@
 
 *Formerly Control-OFC (`control-ofc-gui`).*
 
-**Latest release:** v4.3.0 (as Control-OFC) — 2026-10-09. Pairs with `ventulusd` ≥ v3.0.0; version numbers carry on from Control-OFC. Individual features gate on newer daemons and say so in the app when one is missing.
+**Latest release:** v5.0.0 — 2026-10-10. Pairs with `ventulusd` ≥ v3.0.0; version numbers carry on from Control-OFC. Individual features gate on newer daemons and say so in the app when one is missing.
 
 Desktop fan control interface for Linux. Communicates with the [`ventulusd`](https://github.com/Plan-B-Development/ventulusd) service to monitor temperatures, manage fan speeds, and apply custom fan curves.
 
