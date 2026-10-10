@@ -1,0 +1,432 @@
+"""Direct unit tests for the Controls page's candidate-building logic.
+
+These derivations used to live inline in ``ControlsPage._on_edit_members`` /
+``_on_configure_aio``, reachable only by constructing a page and driving a modal
+dialog. They are pure, and one of them decides ``ControlMember.member_label`` —
+a **safety input**, since ``infer_member_role`` and the daemon's
+``member_is_pump_or_cpu`` both match "cpu"/"pump"/"aio" against it to apply the
+DEC-095/162 30% CPU/pump floor. Testing them headlessly is the point of the
+extraction (audit 2026-07-29, rule-6 finding).
+"""
+
+from __future__ import annotations
+
+from ventulus.api.models import AmdGpuCapability, Capabilities, FanReading, HwmonHeader
+from ventulus.services.controls_view import (
+    assigned_elsewhere_map,
+    build_member_candidates,
+    build_radiator_candidates,
+    build_sensor_choices,
+    role_preserving_label,
+)
+
+
+def _fan(fan_id: str, source: str = "hwmon", rpm: int | None = 900) -> FanReading:
+    return FanReading(id=fan_id, source=source, rpm=rpm)
+
+
+def _header(header_id: str, **kw) -> HwmonHeader:
+    return HwmonHeader(id=header_id, **kw)
+
+
+# The AMD GPU capability a profile can drive (PMFW), and one it cannot.
+_PMFW = AmdGpuCapability(present=True, fan_control_method="pmfw_curve", fan_write_supported=True)
+_RDNA_READ_ONLY = AmdGpuCapability(present=True, fan_control_method="read_only")
+
+
+def _names(mapping: dict[str, str]):
+    """An AppState-style resolver backed by a dict, defaulting to the id."""
+    return lambda fan_id: mapping.get(fan_id, fan_id)
+
+
+class TestBuildMemberCandidates:
+    def test_read_only_hwmon_header_is_never_offered(self):
+        """DEC-102: assigning a read-only header produced a 1 Hz EACCES storm."""
+        fans = [_fan("h1"), _fan("h2")]
+        headers = [
+            _header("h1", is_writable=True),
+            _header("h2", is_writable=False),
+        ]
+        rows = build_member_candidates(
+            fans,
+            headers,
+            capabilities=Capabilities(amd_gpu=_PMFW),
+            display_name=_names({}),
+            fallback_name=_names({}),
+        )
+        assert [r["id"] for r in rows] == ["h1"]
+
+    def test_intel_and_nvidia_gpu_fans_are_never_offered(self):
+        """DEC-121/DEC-204: no kernel write path exists, permanently."""
+        fans = [_fan("i", source="intel_gpu"), _fan("n", source="nvidia_gpu")]
+        rows = build_member_candidates(
+            fans,
+            [],
+            capabilities=Capabilities(amd_gpu=_PMFW),
+            display_name=_names({}),
+            fallback_name=_names({}),
+        )
+        assert rows == []
+
+    def test_read_only_amd_gpu_is_offered_but_flagged(self):
+        """Unlike Intel/NVIDIA this is a fixable ppfeaturemask state, so it is
+        surfaced rather than hidden."""
+        rows = build_member_candidates(
+            [_fan("gpu", source="amd_gpu")],
+            [],
+            capabilities=Capabilities(amd_gpu=_RDNA_READ_ONLY),
+            display_name=_names({"gpu": "9070XT Fan"}),
+            fallback_name=_names({}),
+        )
+        assert len(rows) == 1
+        assert "(read-only)" in rows[0]["label"]
+        assert rows[0]["selectable"] is False
+        assert "ppfeaturemask" in rows[0]["tooltip"]
+
+    def test_only_the_card_the_capability_describes_is_judged(self):
+        """Contract review of DEC-446: ``devices.amd_gpu`` describes the primary
+        card only. With a legacy primary at 03:00.0 and a PMFW card at 0a:00.0,
+        blocking by the primary's answer disabled the card the engine DOES
+        drive. Only the described card is blocked; the other is offered."""
+        legacy_primary = AmdGpuCapability(
+            present=True, pci_id="0000:03:00.0", fan_control_method="hwmon_pwm"
+        )
+        rows = {
+            r["id"]: r
+            for r in build_member_candidates(
+                [
+                    _fan("amd_gpu:0000:03:00.0", source="amd_gpu"),
+                    _fan("amd_gpu:0000:0a:00.0", source="amd_gpu"),
+                ],
+                [],
+                capabilities=Capabilities(amd_gpu=legacy_primary),
+                display_name=_names({}),
+                fallback_name=_names({}),
+            )
+        }
+        assert rows["amd_gpu:0000:03:00.0"]["selectable"] is False
+        assert "selectable" not in rows["amd_gpu:0000:0a:00.0"]
+        assert "(verify only)" not in rows["amd_gpu:0000:0a:00.0"]["label"]
+
+    def test_each_amd_gpu_is_judged_by_its_own_card(self):
+        """`GPU-b`: with ``devices.amd_gpus``, a legacy card BEHIND a PMFW primary
+        is blocked as verify only — the primary's answer used to leave it offered
+        — and the PMFW primary stays selectable."""
+        pmfw_primary = AmdGpuCapability(
+            present=True,
+            pci_id="0000:03:00.0",
+            fan_control_method="pmfw_curve",
+            fan_write_supported=True,
+        )
+        legacy_second = AmdGpuCapability(
+            present=True, pci_id="0000:0a:00.0", fan_control_method="hwmon_pwm"
+        )
+        rows = {
+            r["id"]: r
+            for r in build_member_candidates(
+                [
+                    _fan("amd_gpu:0000:03:00.0", source="amd_gpu"),
+                    _fan("amd_gpu:0000:0a:00.0", source="amd_gpu"),
+                ],
+                [],
+                capabilities=Capabilities(
+                    amd_gpu=pmfw_primary, amd_gpus=[pmfw_primary, legacy_second]
+                ),
+                display_name=_names({}),
+                fallback_name=_names({}),
+            )
+        }
+        assert "selectable" not in rows["amd_gpu:0000:03:00.0"]
+        assert rows["amd_gpu:0000:0a:00.0"]["selectable"] is False
+        assert "(verify only)" in rows["amd_gpu:0000:0a:00.0"]["label"]
+
+    def test_nothing_is_judged_before_capabilities_arrive(self):
+        """Contract review of DEC-446: with no capabilities yet, an unknown is
+        not an 'unwritable' — the row is offered unlabelled."""
+        rows = build_member_candidates(
+            [_fan("amd_gpu:0000:03:00.0", source="amd_gpu")],
+            [],
+            capabilities=None,
+            display_name=_names({}),
+            fallback_name=_names({}),
+        )
+        assert "selectable" not in rows[0]
+        assert "(read-only)" not in rows[0]["label"]
+
+    def test_read_only_advice_names_ppfeaturemask_only_while_overdrive_is_off(self):
+        """DEC-430: with overdrive on, a missing fan_curve is the kernel's doing,
+        so repeating the ppfeaturemask advice would send the user to a setting
+        they already have."""
+        rows = build_member_candidates(
+            [_fan("gpu", source="amd_gpu")],
+            [],
+            capabilities=Capabilities(
+                amd_gpu=AmdGpuCapability(
+                    present=True, fan_control_method="read_only", overdrive_enabled=True
+                )
+            ),
+            display_name=_names({"gpu": "9070XT Fan"}),
+            fallback_name=_names({}),
+        )
+        assert rows[0]["selectable"] is False
+        assert "no write path" in rows[0]["tooltip"]
+        assert "ppfeaturemask" not in rows[0]["tooltip"]
+
+    def test_legacy_amd_gpu_is_listed_verify_only_and_not_selectable(self):
+        """DEC-445: a pre-RDNA3 card's legacy pwm1 is written by verify and
+        reset, never by the engine, so no profile can drive it. Both daemon
+        answers are covered: the new one (``fan_write_supported: false``) and
+        the pre-DEC-445 one (``true``), which the GUI must not believe — no
+        engine has ever written that card."""
+        for fan_write_supported in (False, True):
+            legacy = AmdGpuCapability(
+                present=True,
+                fan_control_method="hwmon_pwm",
+                fan_write_supported=fan_write_supported,
+            )
+            rows = build_member_candidates(
+                [_fan("gpu", source="amd_gpu")],
+                [],
+                capabilities=Capabilities(amd_gpu=legacy),
+                display_name=_names({"gpu": "RX 6800 XT Fan"}),
+                fallback_name=_names({}),
+            )
+            assert len(rows) == 1, "listed, so the reason is visible"
+            assert "(verify only)" in rows[0]["label"], fan_write_supported
+            assert rows[0]["selectable"] is False, fan_write_supported
+            assert "no profile drives it" in rows[0]["tooltip"]
+            # The badge describes hardware, not the user's name for the fan.
+            assert rows[0]["clean_label"] == "RX 6800 XT Fan"
+
+    def test_writable_amd_gpu_is_offered_unflagged(self):
+        """Twin of the read-only case — the suffix must be conditional, not
+        unconditional."""
+        rows = build_member_candidates(
+            [_fan("gpu", source="amd_gpu")],
+            [],
+            capabilities=Capabilities(amd_gpu=_PMFW),
+            display_name=_names({"gpu": "9070XT Fan"}),
+            fallback_name=_names({}),
+        )
+        assert len(rows) == 1
+        assert "(read-only)" not in rows[0]["label"]
+        assert "selectable" not in rows[0]
+        assert rows[0]["clean_label"] == "9070XT Fan"
+
+    def test_clean_label_keeps_the_role_a_user_alias_hides(self):
+        """SAFETY (DEC-228): the persisted member_label sets the 30% CPU/pump
+        floor on both sides. Renaming a CPU header must not silently drop the
+        new control to the 20% chassis floor."""
+        rows = build_member_candidates(
+            [_fan("h1")],
+            [_header("h1", is_writable=True)],
+            capabilities=Capabilities(amd_gpu=_PMFW),
+            display_name=_names({"h1": "My Fan"}),  # alias hides the role
+            fallback_name=_names({"h1": "CPU_OPT"}),  # hardware carries it
+        )
+        assert rows[0]["label"].startswith("My Fan"), "display must keep the alias"
+        assert rows[0]["clean_label"] == "CPU_OPT", "persisted label must keep the role"
+
+    def test_clean_label_keeps_an_alias_that_carries_the_role(self):
+        """The converse: where the hardware label is role-less, the alias is the
+        only thing that knows this is the pump."""
+        rows = build_member_candidates(
+            [_fan("h1")],
+            [_header("h1", is_writable=True)],
+            capabilities=Capabilities(amd_gpu=_PMFW),
+            display_name=_names({"h1": "Pump"}),
+            fallback_name=_names({"h1": "SYS_FAN2"}),
+        )
+        assert rows[0]["clean_label"] == "Pump"
+
+    def test_aio_tag_is_appended_to_the_persisted_label_too(self):
+        """The AIO suffix is role-bearing ("pump"/"aio" both match the floor
+        classifier), so it must reach clean_label, not just the display label."""
+        rows = build_member_candidates(
+            [_fan("h1")],
+            [_header("h1", is_writable=True, is_aio=True)],
+            capabilities=Capabilities(amd_gpu=_PMFW),
+            display_name=_names({"h1": "Pump"}),
+            fallback_name=_names({"h1": "Pump"}),
+        )
+        assert "(AIO pump)" in rows[0]["label"]
+        assert "(AIO pump)" in rows[0]["clean_label"]
+
+    def test_non_hwmon_fan_gets_no_hardware_fallback(self):
+        """An OpenFan channel has no header, so the fallback must stay empty —
+        otherwise a raw daemon id could be mistaken for a role-bearing name."""
+        rows = build_member_candidates(
+            [_fan("openfan:ch00", source="openfan")],
+            [],
+            capabilities=Capabilities(amd_gpu=_PMFW),
+            display_name=_names({"openfan:ch00": "Front"}),
+            fallback_name=_names({"openfan:ch00": "CPU_FAN"}),  # must be ignored
+        )
+        assert rows[0]["clean_label"] == "Front"
+
+    def test_writable_header_without_a_fan_reading_is_added_once(self):
+        headers = [_header("h1", is_writable=True), _header("h2", is_writable=True)]
+        rows = build_member_candidates(
+            [_fan("h1")],
+            headers,
+            capabilities=Capabilities(amd_gpu=_PMFW),
+            display_name=_names({}),
+            fallback_name=_names({}),
+        )
+        assert sorted(r["id"] for r in rows) == ["h1", "h2"]
+        assert sum(1 for r in rows if r["id"] == "h1") == 1, "no duplicate row"
+        h2 = next(r for r in rows if r["id"] == "h2")
+        assert h2["rpm"] is None, "a header with no reading must not invent an RPM"
+
+    def test_rpm_is_passed_through_never_invented(self):
+        rows = build_member_candidates(
+            [_fan("h1", rpm=None)],
+            [_header("h1", is_writable=True)],
+            capabilities=Capabilities(amd_gpu=_PMFW),
+            display_name=_names({}),
+            fallback_name=_names({}),
+        )
+        assert rows[0]["rpm"] is None
+
+
+class TestAssignedElsewhereMap:
+    def test_maps_members_of_other_controls_only(self):
+        class _M:
+            def __init__(self, member_id):
+                self.member_id = member_id
+
+        class _C:
+            def __init__(self, cid, name, members):
+                self.id, self.name, self.members = cid, name, members
+
+        controls = [
+            _C("a", "CPU", [_M("h1"), _M("h2")]),
+            _C("b", "Chassis", [_M("h3")]),
+        ]
+        assert assigned_elsewhere_map(controls, "a") == {"h3": "Chassis"}
+        assert assigned_elsewhere_map(controls, "b") == {"h1": "CPU", "h2": "CPU"}
+
+
+class TestBuildRadiatorCandidates:
+    def test_pump_and_gpus_are_excluded(self):
+        fans = [
+            _fan("pump"),
+            _fan("rad"),
+            _fan("gpu", source="amd_gpu"),
+            _fan("nv", source="nvidia_gpu"),
+        ]
+        headers = [_header("pump", is_writable=True), _header("rad", is_writable=True)]
+        rows = build_radiator_candidates(
+            fans,
+            headers,
+            pump_id="pump",
+            preselect_ids=set(),
+            display_name=_names({}),
+        )
+        assert [r["id"] for r in rows] == ["rad"]
+
+    def test_preselect_from_detector_header_flag_or_name(self):
+        headers = [
+            _header("a", is_writable=True),
+            _header("b", is_writable=True, is_aio=True),
+            _header("c", is_writable=True),
+        ]
+        rows = build_radiator_candidates(
+            [],
+            headers,
+            pump_id=None,
+            preselect_ids={"a"},
+            display_name=_names({"c": "Top Radiator"}),
+        )
+        by_id = {r["id"]: r for r in rows}
+        assert by_id["a"]["preselect"] is True, "detector match"
+        assert by_id["b"]["preselect"] is True, "header reports liquid-cooled"
+        assert by_id["c"]["preselect"] is True, "name says radiator"
+
+    def test_read_only_header_excluded(self):
+        rows = build_radiator_candidates(
+            [],
+            [_header("ro", is_writable=False)],
+            pump_id=None,
+            preselect_ids=set(),
+            display_name=_names({}),
+        )
+        assert rows == []
+
+    def test_openfan_fans_are_offered_as_radiator_candidates(self):
+        """The GUI half of the `AUD3-h` contract (daemon >= 2.33.1, DEC-320).
+
+        An OpenFan channel has **no** ``HwmonHeader`` at all, and this picker
+        offers it anyway — that is deliberate and is what
+        ``cooling_device_view`` documents as a load-bearing assumption. The
+        daemon validated cooling-device members against hwmon PWM headers only,
+        so every id this test asserts is offered was rejected with
+        ``400 unknown hwmon header id`` on any machine that had hwmon headers.
+
+        This pins the premise rather than the fix: if the picker ever stops
+        offering OpenFan outputs, the daemon's per-source membership check
+        becomes dead code and this test is what says so.
+        """
+        fans = [_fan("openfan:ch00", source="openfan"), _fan("h1")]
+        headers = [_header("h1", is_writable=True)]
+        rows = build_radiator_candidates(
+            fans,
+            headers,
+            pump_id=None,
+            preselect_ids=set(),
+            display_name=_names({}),
+        )
+        by_id = {r["id"]: r for r in rows}
+        assert "openfan:ch00" in by_id, (
+            "an OpenFan fan must be offered as a radiator candidate even though "
+            "it has no HwmonHeader"
+        )
+        assert by_id["openfan:ch00"]["source"] == "openfan"
+        # And the hwmon header alongside it, so this is not passing because the
+        # picker returned everything indiscriminately.
+        assert "h1" in by_id
+
+
+class TestBuildSensorChoices:
+    def test_cpu_sensor_is_preferred(self):
+        class _S:
+            def __init__(self, sid, label, kind, chip="chip"):
+                self.id, self.label, self.kind, self.chip_name = sid, label, kind, chip
+
+        rows = build_sensor_choices(
+            [_S("s1", "Tctl", "cpu_temp"), _S("s2", "Ambient", "other")],
+            overrides={},
+        )
+        by_id = {r["id"]: r for r in rows}
+        assert by_id["s1"]["preferred"] is True
+        assert by_id["s2"]["preferred"] is False
+
+    def test_coolant_sensor_is_preferred_via_class_override(self):
+        """The second, independent route to `preferred` — classification rather
+        than `kind`. It is the one that matters for AIO radiator curves."""
+
+        class _S:
+            def __init__(self, sid, label, kind, chip="chip"):
+                self.id, self.label, self.kind, self.chip_name = sid, label, kind, chip
+
+        rows = build_sensor_choices(
+            [_S("s1", "Coolant", "other")],
+            overrides={"s1": "coolant"},
+        )
+        assert rows[0]["preferred"] is True
+
+
+class TestRolePreservingLabelAtItsNewHome:
+    """The helper moved into the headless layer; the page re-exports it under
+    its historical private name for the existing DEC-228 regression tests."""
+
+    def test_non_hwmon_source_keeps_the_display_name(self):
+        assert role_preserving_label("Front", "CPU_FAN", "openfan") == "Front"
+
+    def test_empty_fallback_keeps_the_display_name(self):
+        assert role_preserving_label("My Fan", "", "hwmon") == "My Fan"
+
+    def test_page_reexport_is_the_same_function(self):
+        from ventulus.ui.pages.controls_page import _role_preserving_label
+
+        assert _role_preserving_label is role_preserving_label

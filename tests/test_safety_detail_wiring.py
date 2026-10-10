@@ -1,0 +1,195 @@
+"""DEC-269: the thermal-detail wiring inside MainWindow, tested at the call site.
+
+`safety_detail_text` and `cpu_values_for_display` are covered thoroughly in
+test_dashboard_view — and that is exactly the trap the project rulebook records as having
+recurred five times: extracting a rule into a testable function does NOT test
+the call site. Before this file, nothing in the suite referenced
+`MainWindow._safety_detail_text`, so the whole DEC-269 hedge could be deleted
+from the production path with all tests still green.
+
+These tests drive the real widget and assert on the dialog text it would show.
+"""
+
+from __future__ import annotations
+
+import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QPushButton
+
+from ventulus.api.models import DaemonStatus, SensorReading
+from ventulus.constants import CPU_HEDGE_STALE_AFTER_MS
+from ventulus.ui.main_window import MainWindow
+
+
+@pytest.fixture()
+def window(qtbot, app_state, profile_service, settings_service):
+    win = MainWindow(
+        state=app_state,
+        profile_service=profile_service,
+        settings_service=settings_service,
+        demo_mode=False,
+    )
+    qtbot.addWidget(win)
+    return win
+
+
+def _cpu(value_c: float, age_ms: int, id: str = "cpu", kind: str = "cpu_temp") -> SensorReading:
+    # The hedge fires at CPU_HEDGE_STALE_AFTER_MS, not at Freshness.FRESH's 2 s.
+    return SensorReading(id=id, kind=kind, value_c=value_c, age_ms=age_ms)
+
+
+class TestHedgeThreshold:
+    """DEC-270: the hedge must not fire on healthy hardware.
+
+    It used to key on `Freshness.FRESH` (2 s), which answers a different
+    question — display currency at the GUI's own 1 Hz cadence. The daemon's poll
+    cadence is admin-configurable up to 6 s, and at 6 s a reading is older than
+    2 s for two thirds of every cycle, so the dialog read "Last known CPU sensor"
+    permanently while the daemon considered the value perfectly current.
+    """
+
+    @pytest.mark.parametrize("cadence_ms", [1000, 2000, 4000, 6000])
+    def test_no_false_hedge_at_any_sanctioned_daemon_cadence(self, window, cadence_ms):
+        # Worst case within a cycle: the reading is a full poll period old,
+        # measured just before the next one lands.
+        window._state.sensors = [_cpu(61.0, age_ms=cadence_ms)]
+        window._state.daemon_status = DaemonStatus(thermal_state="normal")
+
+        text = window._safety_detail_text()
+
+        assert "Hottest CPU sensor: 61.0" in text, (
+            f"a healthy {cadence_ms} ms cadence must not read as stale — "
+            "the daemon still considers this reading current"
+        )
+        assert "Last known" not in text
+
+    def test_a_genuinely_wedged_reading_still_hedges(self, window):
+        # Past the slowest sanctioned cadence plus jitter, nothing legitimate
+        # explains the age.
+        window._state.sensors = [_cpu(94.0, age_ms=CPU_HEDGE_STALE_AFTER_MS)]
+        window._state.daemon_status = DaemonStatus(thermal_state="emergency")
+
+        text = window._safety_detail_text()
+
+        assert "Last known CPU sensor: 94.0" in text
+
+    def test_the_threshold_clears_the_daemons_slowest_legal_cadence(self):
+        """Pins the relationship, not the number. The daemon clamps its poll
+        interval to MAX_SUPERVISABLE_POLL_INTERVAL_MS = 6000 ms (DEC-270); if
+        that ever rises, this threshold has to rise with it or the hedge starts
+        lying again."""
+        daemon_max_cadence_ms = 6000
+
+        assert daemon_max_cadence_ms < CPU_HEDGE_STALE_AFTER_MS, (
+            "the hedge must not fire on a reading that is merely one poll old "
+            "at the slowest cadence the daemon permits"
+        )
+
+
+# WIRE-c retired the dual spelling. `cpu_temp` is the wire token (`docs/08`
+# § GET /sensors) and the only one anything emits: the PascalCase alternate came
+# from `DemoService`, which the daemon never sent and which is now fixed at the
+# source. The parametrisation that used to pin both arms went with it — a second
+# arm over a spelling nothing produces asserts nothing.
+def test_a_stale_cpu_reading_is_hedged_through_the_real_window(window):
+    kind = "cpu_temp"
+    """The headline behaviour of the release, asserted on the production path."""
+    window._state.sensors = [_cpu(94.0, age_ms=20000, kind=kind)]
+    window._state.daemon_status = DaemonStatus(thermal_state="emergency")
+
+    text = window._safety_detail_text()
+
+    assert "Last known CPU sensor: 94.0" in text
+    assert "Hottest CPU sensor" not in text, (
+        "a reading the daemon has stopped trusting must not be presented as current"
+    )
+
+
+def test_a_fresh_cpu_reading_is_not_hedged_through_the_real_window(window):
+    window._state.sensors = [_cpu(61.0, age_ms=100)]
+    window._state.daemon_status = DaemonStatus(thermal_state="normal")
+
+    text = window._safety_detail_text()
+
+    assert "Hottest CPU sensor: 61.0" in text
+    assert "Last known" not in text
+
+
+def test_a_stale_hotter_die_does_not_print_under_the_confident_label(window):
+    """The multi-CCD Ryzen case: `max()` across every CPU sensor while the flag
+    required *all* of them to be stale printed the stale 94 C under "Hottest CPU
+    sensor". The window must show the fresh value it is actually being cooled to."""
+    window._state.sensors = [
+        _cpu(61.0, age_ms=100, id="cpu_ccd0"),
+        _cpu(94.0, age_ms=20000, id="cpu_ccd1"),
+    ]
+    window._state.daemon_status = DaemonStatus(thermal_state="normal")
+
+    text = window._safety_detail_text()
+
+    assert "Hottest CPU sensor: 61.0" in text
+    assert "94.0" not in text
+
+
+def test_clicking_the_thermal_chip_shows_the_hedged_text(qtbot, window, monkeypatch):
+    """`.click()`, not `_handler()` — the project rulebook names this exactly.
+
+    Every other test here calls `_safety_detail_text()` directly, which is one
+    level short of the wiring: delete `footer.thermal_clicked.connect(...)` or
+    break `box.setText(...)` in `_open_safety_detail`, and they all stay green
+    while the dialog shows nothing. This drives the real button.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    shown: list[str] = []
+    # The dialog is modal; `exec()` would block the test. Capture instead.
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()))
+
+    window._state.sensors = [_cpu(94.0, age_ms=20000)]
+    window._state.daemon_status = DaemonStatus(thermal_state="emergency")
+
+    btn = window.footer.findChild(QPushButton, "StatusFooter_Chip_thermal")
+    assert btn is not None, "the thermal chip must exist for the detail to be reachable"
+    qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+
+    assert shown, "clicking the thermal chip must open the safety detail"
+    assert "Last known CPU sensor: 94.0" in shown[0]
+
+
+def test_the_override_count_comes_from_the_real_daemon_status(window):
+    """`_safety_detail_text` resolves `len(ds.overrides)` itself. Proven only
+    against the pure helper, that resolution is free to be dropped."""
+    window._state.sensors = [_cpu(61.0, age_ms=100)]
+    window._state.daemon_status = DaemonStatus(thermal_state="normal", overrides=["fan1", "fan2"])
+
+    text = window._safety_detail_text()
+
+    assert "2 manual overrides active" in text
+
+
+def test_the_hedge_survives_a_daemon_that_reports_no_thermal_state(window):
+    """`thermal_state` defaults to "normal"; the hedge keys on the reading's age,
+    so it must still appear."""
+    window._state.sensors = [_cpu(70.0, age_ms=20000)]
+    window._state.daemon_status = None
+
+    text = window._safety_detail_text()
+
+    assert "Last known CPU sensor: 70.0" in text
+
+
+def test_a_coolant_emergency_is_explained_as_one_through_the_real_window(window):
+    """DEC-443, at the call site: the window must pass the daemon's
+    `emergency_causes` through, or a coolant emergency reads as a CPU one — the
+    helper alone proves the wording, never that the window supplies the cause."""
+    from ventulus.services.cooling_watch import EMERGENCY_CAUSE_PHRASES
+
+    window._state.sensors = [_cpu(55.0, age_ms=100)]
+    window._state.daemon_status = DaemonStatus(
+        thermal_state="emergency", emergency_causes=["coolant"]
+    )
+
+    text = window._safety_detail_text()
+
+    assert EMERGENCY_CAUSE_PHRASES["coolant"] in text
+    assert EMERGENCY_CAUSE_PHRASES["cpu"] not in text

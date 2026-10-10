@@ -1,0 +1,651 @@
+# Hardware Troubleshooting
+
+This page covers the **System State** page's health report and the situations it helps diagnose: chip detection, kernel driver state, missing sensors, BIOS interference, ACPI conflicts, vendor quirks, and verifying that fan headers actually respond to PWM writes.
+
+> **Quick navigation**
+> - The health report is the **System State** page. **Open Full Report**, on its **System Health Overview** card, shows the same analysis in one scrollable window (*System Health — Full Report*).
+> - The **Hardware** page's **Hardware Readiness Checklist** is a different surface: the daemon's own go/no-go assessment of your fan-control hardware — see [Diagnostics](diagnostics.md#hardware-readiness-checklist).
+> - Click **Rescan Hardware** in the global footer to fetch current state from the daemon.
+> - Fan tests live on the **Hardware** page: each header's card has **Test Control** (a ~6-second write test), **Characterise** (how the header responds across 30-100%, reported as three separate verdicts — daemon 2.29.0+) and **Discover Control Path** (*which fan* the header actually controls — daemon 2.39.0+), and **PWM Test Report…** tests the headers you choose in one run.
+> - The **System State** page keeps **Test PWM Control**, **Characterise PWM Response**, **Test GPU Fan Control** (does an AMD GPU fan actually respond — ~6 s) and **Restore GPU Fan to Automatic** under **Advanced actions**.
+
+If the report tells you a **driver is missing**, the step-by-step install walkthrough (prerequisites, DKMS, verify, rollback) is on the [Driver Setup](driver-setup.md) page. For the chip and driver matrix, see [Hardware Compatibility](../docs/19_Hardware_Compatibility.md). For vendor-by-vendor BIOS notes, see the [AMD Motherboard Fan Control Guide](../docs/21_AMD_Motherboard_Fan_Control_Guide.md). For sensor interpretation, see the [Sensor Interpretation Guide](../docs/20_Sensor_Interpretation_Guide.md) and the [AMD Sensor Interpretation Deep Dive](../docs/22_AMD_Sensor_Interpretation_Deep_Dive.md).
+
+New to the terms on this page — hwmon, Super I/O, `pwm_enable`, "read-only headers"? [Understanding Motherboard Fan Control](understanding-fan-control.md) explains them in plain English first, then points back here for the diagnosis.
+
+## What the System State page shows
+
+The page renders the daemon's hardware diagnostics — fetched in the background at startup, and again whenever you click **Rescan Hardware** or the page's own **Refresh**:
+
+| Section | What it tells you |
+|---------|-------------------|
+| **System Health Overview** | A pill reading *SYSTEM READY* or *N ACTION REQUIRED*, and a summary line: how many PWM headers were found and how many are writable, then your board's vendor, name and BIOS version as DMI reports them (e.g. `Gigabyte Technology Co., Ltd. — X870E AORUS MASTER — BIOS F14c`) |
+| **Condition cards** (under the summary) | One card per thing that needs a response now, each with its fix: a Super-I/O chip that did not appear (the dual-chip warning), a *Driver module collision* or *Conflicting driver modules loaded*, an *ACPI I/O port conflict* (for `it87` prefer the driver-local `options it87 ignore_resource_conflict=1`; the system-wide `acpi_enforce_resources=lax` is the fallback, and the only option for `nct6775`), *BIOS/EC reclaiming fan control*, every PWM header read-only, no hwmon chips at all, a GPU with fan control disabled or unavailable, a header whose duty will not hold |
+| **Board notes** (collapsed) | Known vendor + chip combinations with documented BIOS-level workarounds (e.g. Gigabyte + IT8696E → Smart Fan 6 BIOS notes). Reference material with an evidence status, not an alarm — see [Vendor quirks](#vendor-quirks) |
+| **Interference Monitor** | Per-header `pwm_enable` reclaim count with a severity colour, and any duty the daemon had to correct — see [Per-header pwm_enable reclaim count](#per-header-pwm_enable-reclaim-count) |
+| **Safety & GPU Limits** | The **CPU Thermal State** row — the daemon's current thermal state and the emergency limit this machine is actually using — plus a row per AMD discrete GPU (fan control method and the `amdgpu.ppfeaturemask` state PMFW fan curves need), any kernel advisories, and the firmware's fan speed range |
+| **Hardware Registry** | Each detected Super-I/O / sensor chip: Status, Chip / Component, Driver, Driver Status, whether the driver is in the mainline kernel, and its PWM header count. Hover a row for the chip's known issues |
+| **Advanced actions** (collapsed) | The fan and GPU tests listed under *Quick navigation* above |
+
+## Test PWM Control
+
+**Where to find it.** Since v2.56.0 the primary place is the **Hardware** page — each PWM header card has its own **Test Control** button, because the test belongs to a physical header. While a test started from a header card is running, every header card's tests are unavailable until it finishes: the daemon runs one hardware test at a time, so a second press would only queue another test behind the first. (A test started on the System State page does not grey them; a press then gets the daemon's "already in progress" refusal.) The **System State** page keeps the same controls as an advanced shortcut (and is still the only place with the bulk **Verify All Writable** sweep); both pages run the identical implementation and report identical wording.
+
+For motherboard hwmon headers it is often unclear whether a write actually reaches the fan. The board may accept the write at the sysfs level but the embedded controller (EC) or BIOS overrides it within milliseconds — the classic "Linux says PWM=50%, fan still runs at 100%" problem.
+
+**Test PWM Control** writes a known-distinct PWM value to a chosen header, waits ~6 seconds, then reads back what actually happened. The result is one of:
+
+| Result | Meaning |
+|--------|---------|
+| **PWM control is working correctly** | The write took effect and RPM responded as expected. The header is genuinely controllable from Linux |
+| **BIOS/EC reverted pwm_enable** | The board's EC flipped `pwm_enable` back from manual (1) to automatic (2 or 5) during the wait — fan control is being overridden. This is the dominant failure mode on Gigabyte / AORUS boards with Smart Fan 6. See [AMD Motherboard Fan Control Guide § Gigabyte](../docs/21_AMD_Motherboard_Fan_Control_Guide.md) |
+| **PWM value was clamped or ignored** | The write was accepted but the value the hardware reports back differs from what was written (or differs more than expected). Often a partial BIOS override |
+| **PWM accepted but RPM did not change** | Write took effect at the sysfs level but the fan did not respond. Either the header has nothing connected, the fan is stalled, or there is no tachometer to confirm |
+| **PWM accepted; RPM readback unavailable** | Write looks fine but the board does not provide a `fan*_input` value for this header to confirm |
+| **PWM readback failed** | Reading the header back after the write did not return a value at all, so whether the duty held could not be confirmed — and there was no usable RPM reading to corroborate it either. **This is not evidence the write failed, and not a finding about your board.** It is almost always transient: re-run the test. If it repeats, check `dmesg` for the sensor chip's driver — a chip removed or unbound mid-test produces exactly this. Requires daemon v2.48.0 or newer; an older daemon reported this case as *PWM accepted; RPM readback unavailable*, which claimed more than it had checked |
+| **The header became pump-protected during the test** | Partway through the test the header became one the daemon protects as a pump — you assigned it the pump role, or a profile naming it as a pump was activated — so the daemon stopped the test before measuring anything and put the header back, never below the 30 % pump floor. Nothing was learned about the header; no RPM change is shown, because the fan never settled. Re-run the test if you still want the answer. Needs daemon v2.56.0 or newer |
+
+Under the result, one **Test:** line says what the test did and what it saw — the duty it set and how long it waited, the RPM before and after, and whether the header's fan mode stayed *manual*, the mode the test sets (ending *automatic (firmware)* is the BIOS/EC taking it back; on a driver that reports a 100% duty as *full speed*, a passing test says so rather than calling it a reclaim). A **Next step** suggestion tailored to the result and your board vendor follows where there is one. Since v3.2.0 **Show test evidence** opens the before/after table behind that line: the header's **Fan mode (`pwm_enable`)** with its raw value (for example *Automatic (firmware) — mode 5*), the **Duty read back** as a percentage and raw value, and the **RPM**. A value the daemon did not report shows an em dash, never a zero; a test stopped because the header became pump-protected shows *not measured* after, because it never settled.
+
+**Fan mode names.** Everywhere the GUI shows a header's `pwm_enable` — this table, the **Mode** column of **Characterise PWM Response**, and a header card's **Control mode** — it uses the kernel's meanings: **0** is *Full speed (no control)*, **1** is *Manual* (what the daemon sets when it takes a header over), and **2 and above** are *Automatic (firmware)*. Which automatic mode a number means differs between chips, which is why the evidence table keeps the number beside the name.
+
+**The daemon remembers each header's result (daemon 3.2.0+).** A header whose test found *PWM control is working correctly* is recorded as verified; one that found *BIOS/EC reverted pwm_enable*, *PWM value was clamped or ignored* or *PWM accepted but RPM did not change* is recorded as failed. The other results decide nothing and leave the header's previous result in place, and so does any test whose result carries a **Restore:** line — the header was taken from the test partway (by the thermal emergency, another test, or the daemon stopping), so what it read may not be its own. A full PWM sweep (**Characterise PWM Response**) that completes counts too: verified when every duty held and the fan followed, failed when a duty was put back or the header left manual mode. Only the latest result per header is kept, it survives a restart, and it is kept no matter which program or validation session ran the test. The **Hardware** page's readiness checklist uses it: *PWM control not yet verified* counts the writable headers still untested, and *PWM control failed verification* appears while any header's latest result is a failure — test that header again once the cause is fixed.
+
+If the daemon could not put the header back when the test ended, the result says so on a **Restore:** line and is shown as a warning even when the test itself passed. That happens when another hardware test took the header over, when the daemon was stopping, or when the write that restores the duty failed — the daemon reports that one of these happened, not which. The header may still be at the test duty; the line names that duty and the one the header had before the test. If it stays there, re-activate your profile.
+
+### Prerequisites
+
+Just a connected daemon and a writable header to test. The daemon performs the write test under its own internal hwmon lease and coordinates it with its profile engine, so its own per-second writes never collide with the verify wait — the GUI sends no lease and holds none. Earlier versions asked you to "activate a profile to acquire the lease" first; that step is gone in 2.0.0.
+
+## Characterise PWM Response
+
+**Test PWM Control** answers one question at one duty: does a write reach the fan at all? **Characterise PWM Response** answers the fuller one — *how* does this header respond across its range. It holds the header at a series of duties (30%, 40%, … 100% by default), waits for each to settle, and records what came back. Rows appear as they are measured, and you can stop it at any point.
+
+It is a *deeper* test beside the quick one, not a replacement. Use it when a fan or pump behaves oddly rather than plainly not working: it will not tell you anything new about a header that is clearly reverted.
+
+**Requires daemon 2.29.0 or newer.** On an older daemon the button is disabled and its tooltip says why.
+
+Since v2.59.0 each step also reports the header's **Mode** — whether the daemon had manual control of it at that moment, or something else did. That is the observation behind the sweep-level *interference detected* verdict, which until now was a conclusion with nothing on screen to check it against; a header the daemon did not report a mode for shows an em dash, which is not the same as *Full speed (no control)*. The mode names are the ones listed under [Test PWM Control](#test-pwm-control). Since v2.56.0 the results table also reports **Response** and **Settling** for each step — how long the fan took to react at all, and how long the daemon held that duty — with a *Response latency* and *Typical settling time* summary underneath. Both are measured values: a header with no tachometer, or a fan whose speed never moved, shows an em dash rather than a fabricated zero, and the summary lines are omitted entirely when nothing was measurable. The figures are rounded to a tenth of a second because the daemon samples RPM every 500 ms — any more precision would be invented.
+
+### The three verdicts, and why they are separate
+
+The summary reports three things independently, and this matters more than it looks:
+
+| Verdict | Question it answers |
+|---------|--------------------|
+| **PWM command** | Did the write itself succeed? |
+| **PWM readback** | Did the header report the duty back correctly? |
+| **RPM response** | Did the fan actually change speed? |
+
+A pump can accept a PWM command, report it back perfectly, and still run at whatever speed it likes — because many AIO pumps drive themselves during startup or when their own thermal protection kicks in. That combination is reported as a possible device override, **not** as a failed PWM write, and the dialog says so:
+
+> Some pumps temporarily override PWM during startup or internal thermal-protection behaviour. If RPM does not follow PWM, allow that behaviour to finish before concluding that control is unavailable.
+
+If you have just powered the machine on, give the pump a minute and run it again before drawing conclusions.
+
+### What else it reports
+
+- **Observed range** — the measured RPM span across the tested PWM span. One noisy sample is not a hardware specification; treat it as what this run saw.
+- **A non-monotonic response** — speed that does not rise steadily with PWM. Reported as an observation. Plenty of healthy pumps and fans are non-linear or hysteretic; it is not a fault on its own.
+- **A dead zone** — speed flat at the low end before it starts rising.
+- **A PWM clamp** — the header reporting the same duty back for several different requests, which suggests the hardware pins it there.
+- **Interference** — another controller (BIOS, EC, or board firmware) taking the header back mid-test. The run stops and says so, because readings taken while something else is driving the header do not mean anything.
+
+### Safety
+
+- **A pump is never driven below its pump floor — 30%, or 70% for a pump on a DC-mode header (daemon 3.0.0 and later) — and no header is ever driven to 0%.** The daemon clamps every duty itself; nothing the GUI sends can lower that floor.
+- **A run that stops early never leaves the fan running slower than it found it** — with one exception, a fan whose driver stops responding (below). That guarantee comes from the daemon restoring the header's original speed on the way out (next bullet), not from the order duties are tested in. On daemon 2.40.0+ the sweep runs *down from the top duty and back up again* rather than climbing once, so the old "low to high, therefore never slower" reasoning no longer holds — the conclusion does, but the restore is what carries it.
+- **Curve control for every fan is paused while the test runs**, and each fan holds its last duty. Thermal safety is unaffected and still overrides everything — the test refuses to start while the system is hot or while thermal protection is active, and stops if either happens mid-run.
+- The header's original speed is restored on every exit path on which nothing else owns the fan: finishing, cancelling, a failed write, interference, or a thermal stop. **This happens in the daemon**, so closing the window — or the GUI crashing — does not leave a fan stuck at a test speed.
+- The two exceptions are both deliberate, and both leave the fan running *faster* rather than slower: if thermal protection kicks in it keeps the fan high and the original speed is not put back until it releases, and if the daemon is shutting down the header is handed to the motherboard instead. The result tells you which happened, so the window never claims a speed was restored when it was not.
+- **A third exception can leave the fan slower (daemon 2.56.0+):** if the fan's driver stops answering mid-test — a reading does not come back within 2 seconds — the test stops and the daemon does not write to that fan again, because a write to a driver that has stopped responding could stall control of every motherboard fan. The fan stays at the test speed it was on, never below 20 % (30 % for a pump), until your profile drives it again. The result says the original speed was not restored. A header that became a pump during the test is still put back, at 30 % or more.
+
+### Behaviour characterisation (daemon 2.40.0+)
+
+On a current daemon the sweep does more than walk upward once.
+
+It now runs the header **down from its top duty and back up again**, which is what lets it
+report *hysteresis* — whether the fan settles at a different speed approaching a duty from
+above than from below. Some hysteresis is completely normal, and the report says so: a
+built-in controller, a firmware clamp, temperature-dependent behaviour and tach scaling are
+all ordinary explanations. It is not a fault reading.
+
+The dialog also now opens on the **safety preflight** — the same checklist Discover Control
+Path shows — so you can see the daemon's own verdict before anything moves. If it says
+*blocked*, Start is disabled and the reason is on screen.
+
+What you get back:
+
+- a **compact summary** — safe tested range, effective control range (where PWM actually
+  changes speed), reported RPM range, hysteresis, RPM stability, response time and settling
+  time;
+- a **response curve** with the two directions plotted together, flat regions shaded and the
+  saturation point marked;
+- an expandable block with the engineering detail — sample interval, measurement resolution,
+  standard deviation, coefficient of variation, tach dropouts and outliers.
+
+Two things worth knowing about how it words results:
+
+- **Timings are reported at the resolution they were measured at.** The daemon reads the
+  tachometer twice a second, so it says "~1.5 s", never "1,483 ms". A more precise-looking
+  number would be invented. Many motherboard chips update the reading only every couple of
+  seconds, and since daemon 2.53.0 (built as 2.52.0, which was never released) the resolution shown is that update rate.
+  The *Response latency* and *Settling time* medians in the detail block are rounded to that
+  update rate, never below one update, and name it — "~2 s (tach updates every 1 s)". When
+  the daemon could not establish the update rate, the resolution reads *unknown* and the
+  medians are given in whole seconds, marked "tach resolution unknown". Settling time
+  and RPM stability are measured on those updates, after the fan has settled. A step that is
+  still changing when its time runs out shows **Not settled**. That means there is no
+  steady reading to report yet, not that something is wrong.
+- **Reported RPM is what the motherboard says, not necessarily what the pump is doing.**
+  Where a validated cooler definition supplies a correction, both figures are shown with the
+  source of the correction. No cooler ships with one yet, so today you will always see the
+  reported figure labelled as observed — which is the honest answer.
+
+If a reading falls outside what previous runs established for that header, you will see a
+cautious note rather than an error. It lists the likely explanations — internal control, a
+clamp, startup behaviour, thermal protection, or different tach scaling — because an
+unexpected speed is not, on its own, evidence of a failing pump.
+
+## Discover Control Path
+
+The other two tests both start from an assumption: that `pwm5` controls the fan reported on `fan5_input`. That is a naming convention, not a measurement, and on real boards it is often wrong — a splitter puts two fans on one tachometer, a Y-cable puts a fan's tachometer on a channel with no PWM at all, and some vendors simply do not line the numbers up.
+
+**Discover Control Path** establishes the relationship instead of assuming it. It nudges one header up or down by a small amount, watches **every** fan tachometer on the board while it does, and reports which ones responded and how confident it is.
+
+You will find it on each PWM header card on the **Hardware** page, beside *Test Control* and *Characterise*. **Requires daemon 2.39.0 or newer**; on an older daemon the button is disabled and its tooltip says why.
+
+### The safety check comes first
+
+The window opens on a **Safety preflight** — a list of what the daemon checked before anything moves:
+
+```text
+Safety preflight
+Pump role             Confirmed
+Safe minimum          30%
+Temperature source    CPU Package · fresh
+PWM ownership         Available
+Original state        Captured
+Supporting cooling    Available
+
+Ready to test
+```
+
+If something is unsafe, **Start is disabled and the window says exactly why** — the system is too hot, thermal protection is active, another test is already running, the header is read-only, or the temperature readings the daemon relies on have gone stale.
+
+The verdict is the **daemon's**, not the app's. Ventulus displays what the daemon decided; it does not make its own safety judgement and cannot talk the daemon into running something it refused. If the daemon is too old to publish a preflight, the window says so and still lets you start — the daemon runs the same checks when you press the button regardless.
+
+### What it reports
+
+```text
+PWM4 → fan2_input
+Relationship confidence: HIGH
+Direction: positive
+Baseline: 1350 RPM
+Perturbed: 1775 RPM
+Observed change: +31%
+
+Other tach channels:
+fan1: no meaningful response
+fan3: no meaningful response
+```
+
+The channels that did **not** respond are listed too, deliberately. "fan1 did not respond" is evidence; a channel simply missing from the list is indistinguishable from one nobody looked at.
+
+Five outcomes are possible:
+
+| Result | What it means |
+|--------|---------------|
+| **Confirmed** | One channel responded in every cycle, clearly more than anything else moved. |
+| **Probable** | One channel responded every time, but another moved by a comparable amount. |
+| **Ambiguous** | A channel responded in some cycles and not others — not repeatable enough to rely on. |
+| **Multiple responses** | Several channels responded together. Normal for a splitter, and it means the mapping is not one-to-one. |
+| **No tach response** | Nothing moved. **This is not a fault.** The header may drive no tachometer-reporting device at all, or drive one running under its own internal control — which is exactly what an AIO pump does during startup. |
+
+After a successful run the answer is kept: open **Details** on the header card and you will see the relationship, its confidence, and when it was last checked. Ventulus discards that record automatically if the header stops existing — a new board, a driver change, or the chip starting to publish labels all change the header's identity, and a mapping is only ever reported for hardware that is still the same hardware.
+
+### Why it does not just stop the fan
+
+The classic Linux tool for this (`pwmconfig`) stops each fan in turn and watches for the tachometer that drops to zero. That is effective and it is the single most dangerous thing you can do to a liquid cooler. Ventulus does not do it, and cannot be made to:
+
+- **The perturbation always moves away from whichever limit is nearer.** A pump idling near its floor is nudged *up*, never down toward a stall.
+- **No header is ever driven to 0%, and a pump never goes below its pump floor** (30%, or 70% on a DC-mode header with daemon 3.0.0 and later). The daemon clamps every duty; nothing the app sends can lower that floor.
+- **A pump whose tachometer stops reporting mid-test aborts the run immediately** and puts the header back.
+- **Two cycles are run, not one** — so a fan that happened to drift while the test was looking cannot be mistaken for one that responded.
+- Curve control is paused for this header while the test runs, and every other fan holds its last speed. Thermal protection still overrides everything, and the test refuses to start — or stops — if it engages.
+- The original speed is restored on every exit path, by the **daemon**, so closing the window or crashing the app strands nothing. The thermal-protection and shutdown exceptions described for the sweep above apply here too, and both leave the fan running faster rather than slower.
+
+### About the timings
+
+If the result says the telemetry update rate is **unknown**, that is a real answer rather than a missing one. Many Super-I/O drivers do not publish how often they refresh a reading, and if nothing changed during the test there is nothing to infer it from. Ventulus reports UNKNOWN rather than quoting its own sampling rate as though it were the hardware's — a number that looks precise and is not is worse than no number.
+
+## Calibrate OpenFan Channel
+
+**Calibrate OpenFan Channel…**, in the Hardware page's **Hardware Diagnostics** section, measures two things about one fan on an OpenFan controller: the duty at which it **stops** as its speed is lowered (the *stall duty*), and the duty at which it **starts again** as its speed is raised (the *restart duty*). The second is usually higher than the first — a fan that is already turning keeps turning at a duty that could not start it from a stop.
+
+It walks the channel down from 100 % in 10 % steps to 30 %, then in 2 % steps until the fan is confirmed stopped, then back up in 2 % steps until it is confirmed spinning. Each step is held for a few seconds and judged on three fresh RPM readings. A typical fan takes 1.5 to 2 minutes, about 3 at most. The dialog plots the walk — the way down and the way back up as two lines, so the gap between them shows — and lists every step.
+
+**Requires ventulusd 3.1.0 or newer.** On an older daemon the button is disabled and its tooltip names the version.
+
+### Before it starts: the pump question
+
+The walk takes the fan to 0 %. A channel you have set to **Pump** (Hardware page ▸ *OpenFan Channels*, daemon 3.5.0 or newer) is listed as *pump, not calibrated* and cannot be started; the daemon refuses it too, and a run under way stops if you set its channel to Pump. For any other channel the daemon has no way to tell whether it powers a pump, so it will not start until you tick **"… does not power a pump"** for the channel you picked. The tick is cleared whenever you pick a different channel and after every run, so a confirmation for one fan never carries over to another. **Do not calibrate a channel that powers a pump.**
+
+### What it tells you
+
+- **Stops at** and **Starts again at** — the two duties, and the gap between them.
+- **The minimum to use.** When both were found, the dialog says *"Keep this fan's minimum at N% or more to keep it running"*, where N is the **restart** duty — the lowest duty that started it again from a stop. A minimum just above the stall duty keeps a spinning fan spinning, but a fan that is already stopped (at boot, or after a 0 % point on a curve) starts again only at the restart duty.
+- **The fan never stopped** — it kept spinning even at 0 %, so any minimum keeps it running.
+- **The fan did not start again on its own** — it stopped, but was still stopped at the top of the way back up, so no minimum is recommended. The daemon then runs it at 100 % to start it again; if even that does not get it spinning, the result says so and the fan may be stuck or disconnected.
+- **No fan detected** — the channel read 0 rpm at 100 %.
+
+### Safety
+
+- **Curve control for every fan is paused while it runs**, and each fan holds its last duty. Thermal safety is unaffected and still overrides everything. The test refuses to start while the system is hot, while thermal protection is active, when temperature readings are stale, or when there is no fresh CPU temperature reading — and it stops itself if any of those happens mid-run, or if the CPU warms by more than a few degrees while the fan is slowed.
+- **A fan is never left stopped.** If the run stops early at a point where the fan may be stopped, the daemon runs it at 100 % until it is seen spinning before restoring its original speed.
+- **The original speed is restored in the daemon**, so closing the window — or the GUI crashing — does not leave the fan at a test speed. If you close the window while the walk is running, it asks whether to **stop the calibration** or **keep it running**; either way the daemon restores the channel when the run ends.
+- The exceptions leave the fan running *faster*, never slower: while thermal protection is forcing fan output the original speed is not put back (the fan stays at the forced duty until temperatures fall), and if the daemon is shutting down before it could confirm the fan had restarted it leaves the channel at 100 %. The result says which happened.
+
+## Test GPU Fan Control
+
+AMD GPU fan control fails *silently* far more often than motherboard headers: the driver accepts a `fan_curve` write but the firmware ignores it (missing `amdgpu.ppfeaturemask` bit `0x4000`), or a BIOS overdrive lock blocks it. The GPU rows on the **System State** page's **Safety & GPU Limits** card can show that the *configuration* looks right while fan control still does not work.
+
+**Test GPU Fan Control** (on the **System State** page — shown only when a writable AMD GPU is present and the daemon is ≥ 1.11.0) briefly drives the GPU fan to a test speed — always *upward*, so it never reduces cooling on a hot GPU — waits ~6 seconds, reads back the applied PMFW `fan_curve` (or legacy `pwm1`) and the `fan1_input` RPM, then restores the previous state. No lease is required. The result is one of:
+
+| Result | Meaning & fix |
+|--------|---------------|
+| **GPU fan control is working** | The fan responded to the test. Nothing to do |
+| **Zero-RPM idle (normal)** | The curve applied but the fan stays stopped because the GPU is below its zero-RPM stop temperature. Expected — the fan spins up under load. Since v3.2.0 this is shown only when the card itself reports zero-RPM idle as enabled; if it does not, the result is a warning asking you to re-test with the GPU under load |
+| **No RPM sensor to corroborate** | The write was confirmed via curve read-back, but this GPU exposes no `fan1_input` to measure RPM |
+| **The GPU ignored the write** | Accepted at sysfs but not applied. Add `amdgpu.ppfeaturemask=0xffffffff` to the kernel command line and reboot; if it is already set, suspect a BIOS overdrive lock and check the GPU advisories on the **System State** page. (The "SMU driver interface version" message some RDNA4 cards log is not itself a fault.) |
+| **Fan did not respond** | The curve applied but RPM did not change with zero-RPM disabled. Confirm the fan is physically connected. A few cards have per-unit fan faults that no kernel change has been shown to fix (e.g. some R9700s, [ROCm #6101](https://github.com/ROCm/ROCm/issues/6101)) — compare the fan's RPM under load and consider a warranty claim |
+| **GPU fan left manual mode** (legacy `pwm1` GPUs) | `pwm1_enable` changed from manual during the test, so something other than the test changed the card's fan mode. Usually another GPU fan tool (for example LACT, CoreCtrl or amdgpu-fan) — stop it, then re-test. The `amdgpu` driver also hands the fan back to the card's own automatic control when the GPU re-initialises (resume from suspend, a GPU reset). Motherboard BIOS fan settings do not drive a graphics card's fan |
+| **Write was rejected** | The driver/firmware refused the write. Ensure `amdgpu.ppfeaturemask=0xffffffff` is set and that `amdgpu` (not `vfio-pci`) is bound to the GPU |
+
+As with the header test, a **Test:** line under the result says what speed the test set, through which interface, how long it waited, and the RPM before and after (a write the driver rejected reads *tried to set*, with no RPM change), and **Show test evidence** opens the before/after table (applied fan speed, RPM, and zero-RPM idle or fan mode where the card reports them).
+
+The card's **OD_RANGE minimum** (board-specific, read from the card's own `fan_curve`; often around 15%, higher on some cards) and zero-RPM idle are reported as informational outcomes, never as failures — a healthy idle GPU is never flagged as broken. Failure verdicts add their fix to the **issue checklist**. If the control is not shown at all, the GPU has no write path (read-only — see "GPU fan control says feature_unavailable" below) or the daemon is older than 1.11.0.
+
+## Intel Arc GPUs are monitor-only
+
+If you have an Intel Arc discrete GPU (Battlemage / Arc B-series on the `xe` driver, or Alchemist / Arc A-series on `i915`), Ventulus **monitors** it but cannot control its fan:
+
+- Its package / VRAM / memory-controller / PCIe temperatures appear in the dashboard chart and on the **Overview** page, and any of them can be selected as a **curve sensor** to drive *other* fans.
+- Its fan shows up in the dashboard fan table and on the **Overview** page with control method **read-only (firmware-managed)**.
+- It is **never** offered as a controllable curve member and is never written to.
+
+This is by design, not a bug or a missing driver. The Linux `xe`/`i915` hwmon interface exposes the GPU fan's RPM (`fan1_input`) as read-only and provides **no PWM/write attribute** — the card's fan is governed autonomously by an on-card firmware blob (shipped in `linux-firmware` as `fan_control_*.bin`). There is no kernel-side knob for Ventulus, or any other Linux tool, to set its speed. So no lease, PMFW curve, `ppfeaturemask`, or overdrive setting applies to an Intel GPU, and there is no "Test GPU Fan Control" for it.
+
+Only the Arc **B580** currently maps to a specific model name; other Intel discrete GPUs display as "Intel D-GPU" until an authoritative device-ID → name mapping is confirmed for them.
+
+## NVIDIA GPUs are monitor-only
+
+If you have an NVIDIA discrete GPU, Ventulus **monitors** it but does not drive its fan:
+
+- Its temperature appears in the dashboard chart and on the **Overview** page, and can be selected as a **curve sensor** to drive *other* fans.
+- Its fan shows up in the dashboard fan table and on the **Overview** page with control method **read-only**. The NVML path also reports the firmware's *measured* fan duty (shown as "N% duty"), which is distinct from a commanded value and may exceed 100%.
+- It is **never** offered as a controllable curve member and is never written to.
+
+This is by design. NVIDIA presents two mutually-exclusive driver worlds, and Ventulus treats both as read-only:
+
+- **`nouveau`** (the open driver) publishes an hwmon node whose `pwm1` *is* writable, but Ventulus deliberately **excludes** it from control — GPU fans are owned by the GPU subsystem, the same safety rule applied to AMD.
+- **Proprietary NVIDIA** exposes no hwmon fan node; where enabled, Ventulus reads temperature and fan telemetry through the **NVML** userspace library. This path is **opt-in and off by default** (`[detection] enable_nvidia_telemetry` in the daemon config, plus a `/dev/nvidia*` systemd drop-in) and is **experimental** — built and tested, but not yet verified against NVIDIA hardware. It never writes to the GPU.
+
+Fan *write* control for NVIDIA is a possible future addition, deliberately deferred until it can be validated on real hardware.
+
+## Per-header pwm_enable reclaim count
+
+Some boards (most commonly Gigabyte AM5 with Smart Fan 6) repeatedly reset `pwm_enable` from manual back to automatic. Each reset is a "reclaim" — the daemon sets it back, but the EC keeps stealing it.
+
+The **Interference Monitor** on the **System State** page shows a per-header count with a severity ramp:
+
+| Reclaim count | Colour | Meaning |
+|---------------|--------|---------|
+| **0** | Green (OK) | Header is being controlled cleanly — no contention |
+| **1–9** | Amber (WARN) | Occasional reclaim; control still working but the EC is fighting back |
+| **≥10** | Red (HIGH) | Persistent contention; expect fan speed to drift even though the daemon keeps writing |
+
+The verdict takes the highest severity across all headers, so if any single header is in HIGH state the whole report alerts you to it.
+
+Since v2.74.0 the count is **dated**, not merely counted. The daemon reports how long ago each header's most recent reclaim was, and once every affected header has been quiet for long enough the **System State** condition stands down: the **Interference Monitor** keeps the count, relabels it **Past Interference**, and tells you how long ago it was. The count itself never resets while the daemon is running, so this is what separates a BIOS fighting you *now* from one that lost the argument hours ago — the severity ramp above describes a live fight. If the age is not known, because the daemon predates the report or the count does, the warning stays exactly as it was: absence of a measurement is not evidence that something is old.
+
+Since v2.56.0 each header's own card in **Cooling Hardware** shows this count too, in its **Details ▸ Capabilities** block — a header that has never been reclaimed reads *Not observed*. A header currently under firmware control **and** with reclaims on record shows a **Control reclaimed** status; a header that was reclaimed in the past but is back under the daemon's control does not, because that is contention the daemon won rather than a live problem.
+
+The daemon includes a watchdog that re-asserts `pwm_enable=1` automatically, so control still works in the WARN/HIGH cases. The remedy is per vendor, and the board notes the report shows for your chip carry it. On Gigabyte boards, an `it87-dkms-git` build from 2026-08-24 on carries the fixes (PR #128) for the firmware logic that retakes headers; if yours is older, rebuild it — but read [it87 v2.0 renames your chips](driver-setup.md#it87-v20-renames-your-chips) first, because a build from 2026-09-09 on changes every header id unless ventulusd is 3.0.0 or newer. Setting a header to *Full Speed* in BIOS is a fail-safe, not a fix: on some boards it locks Linux out of that header.
+
+## Vendor quirks
+
+When the daemon reports a board vendor and chip combination that matches a known workaround pattern, the System State page renders the relevant guidance — BIOS settings to change, kernel modules to install, or known-issue notes. They live in the collapsed **Board notes for this hardware (N)** section, *below* the conditions and never mixed into them: a quirk matches on which motherboard you own rather than on anything your machine is doing, so it is reference material rather than an alarm. Each note is its own row, most-severe-first, with a colour-coded severity badge that pairs an icon, the word, and a colour — **CRITICAL** (red), **HIGH** (orange), **MEDIUM**/**LOW** (amber), **INFO** (blue) — so an informational note never looks like a warning. The summary is always visible; click **Details** for the full explanation and a link to the Hardware Compatibility Guide (CRITICAL and HIGH start expanded, as does anything confirmed on your machine; MEDIUM, LOW and INFO start collapsed).
+
+Every note also says **what your machine says about it** — *observed*, *not present on this system*, *not yet verified*, or *reference for this hardware*. Most of these quirks describe the BIOS silently ignoring PWM writes, and only writing to a header can settle that, so the section offers a one-click **Test fan control** whenever there is something for it to resolve (it runs the same check as *Verify All Writable* under **Advanced actions**). A clean test marks those notes as not observed; if any header fails, the note is raised as an action above. With daemon 3.2.0 or newer the answer comes from the daemon's per-header results rather than from the last test this app ran: one verified header is enough to mark the notes not observed, and one header whose latest result is a failure raises them — whichever program ran the test — until that header passes. You can **Acknowledge** a note you have read or **Dismiss** it entirely — both are reversible from **Settings → Prompts & Dismissals**, and neither survives the note later being confirmed on your hardware.
+
+Currently surfaced quirks include:
+
+- **Gigabyte + IT8696E** — Smart Fan 6 BIOS setup notes for AM5 800-series AORUS boards
+- **NCT6798 / NCT6799 on ASUS** — typical driver-loaded paths and ASUS WMI sensor helpers
+
+For the full list of vendor-specific workarounds and BIOS settings, see the [AMD Motherboard Fan Control Guide](../docs/21_AMD_Motherboard_Fan_Control_Guide.md).
+
+## Fan presence — "no fan detected" annotations
+
+Modern boards ship with more PWM headers than most builds populate. The X870E AORUS MASTER, for example, exposes 8 PWM headers (5 on the IT8696E + 3 on the IT87952E) but a typical build only uses 3–4 of them.
+
+To prevent users from accidentally assigning curves to empty headers, the GUI annotates any **writable** hwmon header that reads 0 RPM with `(no fan detected)`. This appears in:
+
+- Overview → Fan Status → RPM column
+- Controls → Fan Role member picker
+- Fan Wizard
+
+If you have a fan plugged in and still see "no fan detected", the most common causes are:
+- The fan has no tachometer (3-pin DC fans without RPM sense, or pumps wired to the PWM-only `FAN_PUMP` headers)
+- The fan is stopped because the header is currently being driven at 0% (zero-RPM mode active)
+- The fan is stalled
+
+Use **Test PWM Control** on the header — if the write is effective but RPM does not change, the header is controllable but cannot confirm fan presence; if the write is reverted, the BIOS is overriding control regardless.
+
+## Per-board hwmon header label resolver
+
+On many boards the chip publishes no fan-header names at all — the silkscreen
+labels printed next to the headers (`CPU_FAN`, `SYS_FAN1`, …) live on the board,
+not in the chip. Every Gigabyte board using the `it87` driver is in this
+category. Where sysfs has no name, the daemon reports the header's own node id
+(`pwm1`, `pwm2`, …) as a stand-in.
+
+The GUI fills in the gap with a **per-board label resolver** that picks names in
+this priority order:
+
+1. **User alias** (set via the [Fan Wizard](fan-wizard.md), or by renaming a fan
+   wherever it appears)
+2. **Daemon-supplied sysfs label** — *when the chip really published one*. A
+   label that just restates the header's own node id (`pwm1` on header 1) is a
+   stand-in, not a name, and is skipped so the steps below get their turn
+3. **`/etc/sensors.d` and `/usr/share/sensors/*` chip-block labels** (libsensors config, parsed for `chip` / `label` / `ignore` directives)
+4. **In-repo fallback table** (curated per-board mapping, matched on your
+   motherboard's vendor and model)
+5. **The node id** (`pwm1`), when nothing above knows the board
+
+> Before v2.30.0, step 2 accepted the stand-in as a real name, so steps 3-5 never
+> ran and every header on such a board displayed as `pwmN`. If you renamed your
+> fans by hand to work around that, your names are kept — a user alias still wins.
+
+The fallback table currently covers the **Gigabyte X870E AORUS MASTER** as a worked example:
+
+- IT8696E primary chip — 5 verified silkscreen labels: `CPU_FAN`, `SYS_FAN1`, `SYS_FAN2`, `SYS_FAN3`, `CPU_OPT`
+- IT87952E secondary chip — 3 labels (`SYS_FAN5_PUMP`, `SYS_FAN6_PUMP`, `SYS_FAN4`) from two owners' configs in [frankcrawford/it87 issue #103](https://github.com/frankcrawford/it87/issues/103) and the it87 project's own Gigabyte sensor catalogue, confirmed on a physical board: a fan plugged into SYS_FAN4 reads on the third channel, which rules out the one source that ordered them differently
+
+If you see an `(unverified)` suffix on a header label (no entry in the table carries one today, but a newly added board may), treat the assignment as a hint, not a fact. The Fan Wizard is the safe way to confirm — it stops one fan at a time so you can see exactly which physical fan corresponds to which header.
+
+## Sensors missing or fewer than expected
+
+Fan control depends on sensors: curves need temperatures, and the daemon's thermal safety needs a CPU sensor. If the Dashboard or the **Overview** page shows nothing — or less than you expect — work down this list:
+
+- **No CPU temperature** — the CPU modules (`k10temp` for AMD, `coretemp` for Intel) are mainline and auto-load via device matching on essentially every distribution. If the **CPU Thermal State** row on the **System State** page reads *No_sensor_fallback*, try loading the module by hand (`sudo modprobe k10temp` or `sudo modprobe coretemp`) and check `sudo dmesg` for errors. Once the module loads, click **Rescan Hardware** in the footer — the daemon picks up the new sensor within a couple of poll cycles, no restart needed.
+- **No motherboard temperatures or fan RPMs** — Super-I/O chip modules cannot auto-load (the chips sit on ISA I/O ports with no bus-enumerable trigger), so the daemon package ships `/etc/modules-load.d/ventulus.conf`, which loads `nct6775`, `it87`, `w83627ehf`, and `drivetemp` at boot. Loading a module for a chip that is not present is **usually** harmless — but not on a Gigabyte board, where `nct6775` and `w83627ehf` can hide a second chip until a reboot, or on some boards until the machine is powered down at the wall (see ["Some of my fan headers are missing"](#some-of-my-fan-headers-are-missing--only-5-of-8-show-up) below). With daemon 2.56.1 or later you do not need to act on it: the daemon package ships a modprobe guard (`/usr/lib/modprobe.d/ventulus-superio.conf`) that suppresses those two modules on every Gigabyte board (Gigabyte boards use ITE chips, which those modules cannot drive) and leaves them alone everywhere else, so the entries above are safe as they stand. Each module it declines is logged: `sudo journalctl -b -t ventulus-superio-guard`. Daemon 2.56.0 and older ship a guard that covers only the Gigabyte boards it lists; on any other Gigabyte board, suppress the two modules yourself as step 2 of the recovery below describes. If you have a Gigabyte board that really does carry a Nuvoton chip, turn the guard off by creating an **empty** file of the **same name**, `/etc/modprobe.d/ventulus-superio.conf`, and rebooting. A same-named file in `/etc` masks the package's copy, and an empty one leaves no rule behind. A copy of the package's file would keep the guard, and a differently-named file does not reliably win. If your chip needs an out-of-tree driver instead, the readiness chips table says so — see [Driver Setup](driver-setup.md).
+- **No memory (DIMM) temperatures** — these are optional; many machines have none, and nothing about fan control depends on them. Check, in order:
+  - **DDR5** needs kernel 6.11 or later. The kernel registers modules from the firmware's memory table: if the table lists a mix of memory types it registers none, and on a bus with more than 8 slots it tries only the first 8 addresses. Current kernels also skip DDR5 modules on Intel boards whose firmware locks SPD writes ("SPD Write Disable"). `ls /sys/bus/i2c/drivers/spd5118/` lists the modules it found; `sudo dmesg | grep -i spd` shows what it did.
+  - **DDR4** needs a module with a thermal sensor, and most consumer DDR4 has none. Where one exists it appears as a `jc42` sensor. Some DDR5 modules have no working sensor either.
+  - **RGB tools.** OpenRGB and similar tools talk to the same SMBus addresses, and can conflict with the memory driver while they run.
+  - **A module shown under unavailable sensors with "disabled"** has its sensor switched off as the driver sees it (`temp1_enable` is 0: the state the firmware left when the driver loaded, or a write to that file). The driver would keep returning the last value, so the daemon does not use it. It recovers by itself once the sensor is switched back on through `temp1_enable`; the daemon never writes to the module. A change made over raw SMBus, bypassing the driver, is not seen until the driver reloads.
+  - **After suspend** some boards fail to talk to the modules again; the sensors then show as unavailable until the next boot. If resume itself misbehaves, `blacklist spd5118` in a file under `/etc/modprobe.d/` turns the driver off (you lose the reading).
+  - Each module is named by its bus address (**DIMM 0x51**, **DIMM 0x53**…). The kernel does not report which slot an address belongs to, so the name does not claim one. Two modules at the same address on different SMBus segments (boards with more than 8 slots) get the segment added, **DIMM 0x51 (p2)**; hover for the full id.
+  - A module keeps its id when the kernel renumbers its i2c bus (after a GPU change, for example), so curves and chart settings stay attached. Settings saved before this change follow the module automatically on first connect, and the event is noted in the log. If two modules could match one saved setting, nothing is moved: pick the sensor again.
+- **No drive temperatures** — NVMe drives report temperatures through the kernel `nvme` driver automatically; SATA/SAS drives need `drivetemp` (already in the daemon's modules-load list above).
+- **`lm_sensors` is optional** — the daemon reads `/sys/class/hwmon` directly and does not use libsensors. Installing `lm_sensors` gives you the `sensors` CLI, which is handy for cross-checking what the kernel exposes.
+
+### About `sensors-detect`
+
+Prefer the **Hardware** page first — its readiness checklist and Super-I/O section identify your board's chips **without probing the hardware**. Treat `sudo sensors-detect` as a **last resort**, run at your own risk: its probing "can access chips in a way these chips do not like, causing problems ranging from SMBus lockup to permanent hardware damage (a rare case, thankfully)" — [sensors-detect(8)](https://man.archlinux.org/man/extra/lm_sensors/sensors-detect.8.en). If you do run it, accept its conservative defaults rather than answering yes to every probe, and **never run it after boot on a Gigabyte board** — it can wedge the Super-I/O bridge so a second chip vanishes, and the package's guard cannot stop it (it probes the ports itself rather than loading a module); and **a reboot may not bring it back — power down at the wall**, because the bridge keeps standby power (see ["Some of my fan headers are missing"](#some-of-my-fan-headers-are-missing--only-5-of-8-show-up) below).
+
+## Voltages, and why some of them have no name
+
+The **Hardware** page has a read-only **Voltages** table (v2.61.0, with
+`ventulusd` ≥ v2.37.0). It lists the analogue-to-digital channels your
+Super-I/O chip exposes — typically ten of them per chip.
+
+The **Identification** column says who named each row:
+
+- **Named by the driver** — the kernel driver labels a few of the chip's own
+  internal inputs (`3VSB`, `Vbat`, `+3.3V`) and has already scaled them. Read
+  these at face value.
+- **Named by the board catalogue** (GUI v3.3.0 with `ventulusd` ≥
+  v3.3.0) — on Gigabyte boards, the daemon recognises the board from its firmware
+  ID and names the remaining inputs from the it87 driver project's per-board
+  sensor configs, including each rail's divider. The reading shown is the rail
+  voltage (the pin reading times the divider); hover the row to see the pin
+  reading and the divider. On an X870E AORUS MASTER, for example, `in2` reads
+  about 2 V at the pin and is shown as `+12V` at about 12 V.
+- **Not used by this board** — the same catalogue does not map this input for
+  your board. It may be unconnected or simply unused, so the reading shown is
+  the raw pin voltage, like an unnamed channel, and is not a known rail.
+- **Unnamed channel** — nobody named it. This is normal rather than a fault on
+  any board the catalogue does not cover.
+
+**Do not read an unnamed channel as a rail voltage.** Motherboards feed a rail
+through a resistor divider before it reaches the chip, and the driver has no way
+to know the ratio your board used. So the number shown is a real measurement of
+the voltage *at the chip's pin*, and it is not the voltage of whatever rail that
+pin is wired to — a +12V rail commonly reads around 2 V there.
+
+An `lm_sensors` configuration for your board under `/etc/sensors.d/` names the
+channels and applies the divider maths **for the `sensors` command only**:
+`lm_sensors` reads that file, the kernel driver never does, so installing one
+changes nothing in this table. If your board is not in the catalogue and you want
+the rail voltages, `sensors` with your board's configuration shows them.
+
+Two things the table deliberately does not show, because on real hardware they
+mislead:
+
+- **Voltage alarm bits.** On the reference board two channels assert their alarm
+  bit while reading *inside* their own configured limits, so the bit would put a
+  fault on screen that the reading beside it disproves.
+- **Per-channel min/max.** These are usually driver defaults rather than limits
+  anyone configured for your board.
+
+Voltages are informational only. They are never offered as a fan-curve source,
+and nothing in fan control reads them. They are not on the live poll, because
+rails move by millivolts: the GUI reads them when it connects to the daemon, when
+you press **Re-scan** on the Hardware page, and when you refresh or rescan on
+**System State**. The table says when its readings were taken ("Read at 14:03."),
+and if a Re-scan cannot read them it keeps the previous readings and says why.
+
+## Common situations
+
+### "All my hwmon headers show as read-only"
+
+Open the **System State** page:
+
+- If the **Hardware Registry** shows the expected chip but its **Driver Status is "not loaded"**, the kernel module is missing. The row names the module to install (e.g., `it87-dkms-git` on AUR for Gigabyte AM5 boards).
+- If the driver is loaded but the summary line says **0 writable**, the bound driver publishes the pwm files read-only. On MSI and ASRock Nuvoton boards that usually means the in-kernel `nct6683` is bound — it never makes PWM writable outside Mitac OEM systems — so the out-of-tree driver the registry names is needed. See [Driver Setup](driver-setup.md).
+- If headers are writable but a fan test's result is `pwm_enable_reverted`, the firmware is taking control back — see the board notes on that page. On Gigabyte IT8689E boards, an `it87-dkms-git` build from before 2026-08-24 is the usual cause: rebuild it, but read [it87 v2.0 renames your chips](driver-setup.md#it87-v20-renames-your-chips) first: a build from 2026-09-09 on changes every header id unless ventulusd is 3.0.0 or newer. Setting the header to *Full Speed* in BIOS Smart Fan is a fail-safe, not a fix, and on some boards it locks Linux out of that header.
+- If an ACPI resource conflict blocks the driver, an *ACPI I/O port conflict* card says so. For `it87` prefer `options it87 ignore_resource_conflict=1`; `acpi_enforce_resources=lax` is the system-wide fallback.
+
+### "Some of my fan headers are missing — only 5 of 8 show up"
+
+Open the **System State** page. If a *Super-I/O chip not enumerated* card (the dual-chip warning) is under the **System Health Overview**, your motherboard is one of the Gigabyte boards with two ITE chips (X870E AORUS MASTER, X670E AORUS MASTER, Z790 AORUS MASTER, etc.) and one of them did not appear.
+
+**On a daemon older than 3.0.0, first rule out a false alarm (it87 builds from 2026-09-09).** From its v2.0 release the out-of-tree `it87` driver names Gigabyte chips with a suffix — `it8696_a008090a` instead of `it8696`. A daemon older than 3.0.0 does not recognise the new names, so the card reports both chips missing while they are working (the card then says so itself). Check:
+
+```
+cat /sys/class/hwmon/hwmon*/name
+```
+
+If you see names like `it8696_a008090a` and `it87952_a008090a`, both chips are present — update ventulusd, and the card goes away. The rename also changes every fan header's id on such a daemon; see [Driver Setup → *it87 v2.0 renames your chips*](driver-setup.md#it87-v20-renames-your-chips). From 3.0.0 the daemon recognises the new names, so a card you see there is a real missing chip.
+
+**Case A — the driver is not loaded.** Run `sudo dmesg | grep -i it87` (or `journalctl -k -b | grep -i it87`). Each chip the driver found prints a line such as `Found IT8696E chip at 0xa40 … revision 0`. If there are no `it87` lines at all, or `modprobe` says "module not found":
+
+1. Install `it87-dkms-git` (see [Driver Setup](driver-setup.md)). Builds from 2026-03 onward reach the secondary chip through an MMIO path that is on by default; only older builds needed `options it87 mmio=on`.
+2. Reboot, then click **Rescan Hardware**.
+
+**Case B — the driver is loaded, but a chip is missing.** The secondary chip is blocked. Work down the recovery ladder below; it is the one upstream gives, and it is right whichever way the chip is blocked.
+
+> **Why this page no longer says "read the DEVID".** It used to tell you to look for `Unsupported chip (DEVID=0xFFFF)` or `Unsupported chip (DEVID=0x8883)` in the kernel log and choose a fix from that. Neither line appears on a normal system. The driver prints that message only at debug level, and a chip that answers `0xFFFF` makes the driver give up without printing anything. The two values are also not two different faults. Upstream reads `0xFFFF` without the Super-I/O unlock key and `0x8883` with it, on the same blocked chip ([issue #70](https://github.com/frankcrawford/it87/issues/70)). The ladder clears both.
+
+**What is happening.** Your board's secondary Super-I/O sits behind an ITE eSPI-to-LPC bridge. Something wrote a Super-I/O *config-mode unlock* to port 0x2E/0x4E, which put the **bridge** into configuration mode — and while it is there, the bridge answers in place of the IT87952E behind it. `it87` looks for a chip, gets the bridge, and gives up. You lose every header on the secondary chip: on an X870E AORUS MASTER that is 3 of 8 fan headers and 3 of 9 temperatures.
+
+**What writes that unlock.** Almost always the `nct6775` or `w83627ehf` kernel modules. Both write the unlock *before* reading the device ID, so they do the damage even though they then fail to load with "No such device" — they are Nuvoton/Winbond drivers and your board is ITE, so they were never going to bind. Running `sensors-detect` does the same thing.
+
+> **Measured, not theorised.** On 2026-09-05, on an X870E AORUS MASTER: loading
+> `nct6775` made the working `it87952-isa-0a60` chip disappear within a single
+> boot, while reloading `it87` by itself changed nothing. Suppressing both
+> modules and cutting power restored 3 fans, 3 PWMs and 3 thermistor
+> temperatures.
+
+**The block can survive a reboot.** It can also survive a normal shut-down, because the bridge keeps its standby power. On that X870E AORUS MASTER only removing mains power cleared it. This is the most important thing on this page: *if you reboot, test, and see no change, that does not mean the fix failed — go on to the power cut.*
+
+#### Recovery, step by step
+
+1. **Check whether the package's guard covers your board.** From 2.56.1, the
+   `ventulusd` package installs a guard that suppresses the two modules
+   on every Gigabyte board, and logs each time it does (2.56.0 and older cover only
+   the boards they list):
+
+   ```
+   sudo journalctl -b -t ventulus-superio-guard
+   ```
+
+   A line such as *not loading nct6775: X870E AORUS MASTER is a Gigabyte board,
+   and Gigabyte boards use ITE Super-I/O chips* means your board is covered —
+   skip to step 3. No line means the guard did not act: the board's vendor is
+   not Gigabyte (or the firmware reports no vendor and the board is not one the
+   guard lists), an older package is installed, or nothing asked for the
+   modules this boot. Do not use `lsmod` for this: the modules fail to load on these boards
+   even when their probe has already done the damage, so an empty `lsmod` proves
+   nothing.
+
+2. **Otherwise, suppress the two modules yourself.** Create
+   `/etc/modprobe.d/ventulus-superio-local.conf`:
+
+   ```
+   install nct6775 /bin/true
+   install w83627ehf /bin/true
+   ```
+
+   Use `install`, **not** `blacklist`: `blacklist` is ignored by the explicit
+   `modprobe` that systemd issues at boot, so it would silently do nothing here.
+
+3. **Confirm nothing else loads them, and stop running `sensors-detect`.** Look
+   for other files naming `nct6775` or `w83627ehf`. `lm_sensors.service` loads
+   whatever `sensors-detect` once wrote to `/etc/conf.d/lm_sensors`, so check
+   that file too:
+
+   ```
+   grep -rn 'nct6775\|w83627ehf' /etc/modules-load.d/ /etc/conf.d/lm_sensors
+   ```
+
+   A module named there still goes through the guard (or your own file from
+   step 2), so it is only a trigger where neither is in place — but removing it
+   costs nothing on a Gigabyte board. `sensors-detect` itself is different: it
+   probes the ports directly, so no guard can stop it. Do not run it on this
+   board.
+
+4. **Reboot, then click Rescan Hardware.** If the missing chip is back, you are
+   done.
+
+5. **Still missing: power down fully.** Shut the machine down, then **either**
+   switch the PSU off at the back (the `0`/`O` side of the rocker) **or** unplug
+   it at the wall. Wait about 10 seconds. A normal shut-down that leaves the PSU
+   switched on is not enough.
+
+6. **Power back on and verify:**
+
+   ```
+   sudo dmesg | grep -i it87
+   sensors | grep -c '^it8'
+   ```
+
+   You want a second `Found IT...E chip` line, and two `it8*` chips rather than
+   one.
+
+7. **Click Rescan Hardware** in the app. The dual-chip warning on the **System
+   State** page disappears once every expected chip is present, and the new
+   headers appear on the **Controls** page.
+
+**Optional — seeing the ID the driver read, for a bug report.** On kernels built
+with dynamic debug (Arch's and CachyOS's are), you can make the driver print it:
+
+```
+echo 'options it87 dyndbg=+p' | sudo tee /etc/modprobe.d/it87-debug.conf
+# reboot, then:
+sudo dmesg | grep -i 'unsupported chip'
+sudo rm /etc/modprobe.d/it87-debug.conf
+```
+
+This changes nothing about the fix — the ladder is the same either way.
+
+#### If it still fails after a genuine power cut
+
+Then something else is still writing the unlock before `it87` reads. Check, in
+this order:
+
+- another `modules-load.d` file, `/etc/conf.d/lm_sensors`, or a distro default, loading `nct6775` where the guard has not acted;
+- `sensors-detect`, run by hand or by a script;
+- a Super-I/O module baked into your initramfs (`for i in /boot/initramfs-*.img; do echo "$i"; lsinitcpio "$i" | grep -E 'nct6775|w83627|it87'; done` — CachyOS names its images `initramfs-linux-cachyos*.img`, not `initramfs-linux.img`);
+- any other tool that probes Super-I/O ports.
+
+**Do not** reach for these — they are known not to help, and one of them makes
+things worse:
+
+- **`mmio=on`** — already the driver default; setting it changes nothing.
+- **Reinstalling `it87-dkms-git`** — the block is not a driver bug, and the
+  failure reproduces at upstream HEAD. (A rebuild after 2026-09-09 also renames
+  your chips — see above.)
+- **`force_id`** — the reporter on
+  [issue #81](https://github.com/frankcrawford/it87/issues/81) forced the ID and
+  still lost three fans and a water pump. Upstream tells people explicitly not
+  to use it.
+- **`sensors-detect`** — this is one of the things that *causes* the block.
+
+**This is per-board, not per-family.** Other boards in the same generation with
+the same IT8696E + IT87952E pairing work out of the box — the X870E AORUS ELITE
+X3D is owner-confirmed with both chips controllable
+([issue #89](https://github.com/frankcrawford/it87/issues/89)). Background on
+the bridge itself is in
+[issue #64](https://github.com/frankcrawford/it87/issues/64).
+
+> One historical exception to "MMIO is good": on **IT8665E** boards (X399-era ASUS ROG Zenith Extreme, and ASUS AM4 300/400-series boards such as the PRIME X470-PRO) the MMIO default *broke* PWM writes. This was fixed upstream by [PR #120](https://github.com/frankcrawford/it87/pull/120) (merged 2026-07-22), which removed MMIO support for that chip in the driver, closing [issue #106](https://github.com/frankcrawford/it87/issues/106). On a current build you need no parameter — update the driver. `options it87 mmio=off` is only needed on a build predating that merge.
+
+### "Fans run at full speed regardless of profile"
+
+The daemon's thermal failsafe has two distinct triggers, with different fan speeds:
+
+- **Emergency (100%):** any CPU sensor reports at or above the emergency limit. That limit is at least 105°C, and where the kernel publishes the CPU's own design ceiling the daemon raises it to that ceiling **plus 5°C**, capped at 115°C. The margin matters: a modern Intel part is *meant* to run at its ceiling under load, so a limit set *at* the ceiling would trip on a perfectly healthy machine and then stay tripped, because release needs a reading at or below 80°C that a part holding its ceiling never produces. The **System State** page shows the limit in use, on the **CPU Thermal State** row. Every OpenFan channel and writable hwmon fan the machine has is forced to 100% — including fans no profile controls — and held there until a *current* reading from the hottest CPU sensor is 80°C or below. A sensor that stops updating or disappears keeps it at 100%. Then the active profile resumes at once.
+- **Coolant emergency (100%, daemon 3.0.0 and later):** a coolant sensor — an AIO or custom-loop coolant temperature the daemon recognises — reports at or above the **coolant limit** (60°C unless you changed it under **Settings**, settable 40–70°C). The same force as the CPU emergency: every OpenFan channel and writable hwmon fan to 100%, held until a *current* coolant reading is 5°C below the limit. It is the same **Emergency** state everywhere it is shown; the thermal-state detail says which sensor tripped it. Machines with no coolant sensor are unaffected, and a sensor you only *treat as coolant* in the app does not arm it.
+- **No-sensor fallback (40%):** no current CPU reading for 5 consecutive seconds, and no emergency under way. Either no CPU sensor is left, or the one there has stopped updating. The fans your active profile controls are held at 40% or more — so profile fans sitting at a uniform ~40% (rather than 100%) usually mean a missing or frozen CPU sensor, not an overheat. A fan whose curve can no longer be evaluated keeps the speed it had, if that is higher — an OpenFan fan included after the controller reconnected or the machine resumed from sleep, since the daemon remembers its speed and sets it again (daemon 3.3.0 and newer; older daemons ran it at 100%). Fans no profile controls are left to your motherboard's own fan curve, which reads its own CPU sensor; with no profile active, nothing is forced at all. A sensor that stopped updating while it read 80°C or more does not trigger this: your curves keep running on that last reading instead.
+
+Both are minimums over your profile, not replacements: a fan your curve is already running faster keeps its speed. GPU fans are never forced — the GPU's own firmware handles GPU thermal protection — and they keep following their own curves throughout.
+
+**The CPU emergency is a backstop, not a cooling-failure alarm.** A modern CPU protects itself by slowing down at its own temperature ceiling, and the emergency limit sits above that ceiling on purpose. So a stopped pump or stalled fans usually show up as a CPU pinned at its ceiling and running slower — not as an emergency. Daemon 3.0.0 and later watch for exactly that in two ways:
+
+- **Pump stall response.** A pump in your active profile that the daemon has seen spinning, and that then reads 0 RPM for 10 seconds while it is being asked to run, is driven to full speed for 30 seconds to restart it. If it turns, it goes back to its curve; if it still reads 0 RPM it stays at full speed. A second stall in the same run holds it at full speed until the daemon restarts or you activate a profile. Each is an **error** alert naming the pump. A pump that still is not turning at full speed needs attention now: check its power and cable.
+- **Cooling advisory.** If the CPU has sat at or above its ceiling (its own reported limit, or 85°C where it reports none) for a minute while no fan or pump is running above 50%, you get a **warning** alert. It forces nothing — it tells you something is wrong with the cooling, and the CPU is slowing itself down to cope.
+
+If the CPU sits at its ceiling under a load it used to handle comfortably, check the pump and the fan speeds.
+
+**A faulty CPU sensor stuck at or above the limit keeps the emergency on.** One reading at the limit is enough to start it. The daemon then waits for that sensor to read 80°C or below, and never decides on its own that the reading was wrong. This is deliberate: it follows the industrial safety standard IEC 61511, where a safety action that has fired stays in force until its reset. So if the fans stay at 100% while the machine is cool, look at the CPU sensors on the **Overview** page for one reporting an impossible temperature. Then fix or unload the driver that reports it, or report it so that sensor can be set aside when sensors are classified. **If that was your only CPU sensor, unloading its driver does not end the emergency** — a sensor that disappears keeps it on — so restart the daemon afterwards (`sudo systemctl restart ventulusd`). With no CPU sensor left, the restarted daemon then applies the 40% fallback above.
+
+Both overrides are owned and driven entirely by the daemon — it forces the fan speeds and holds them itself. The GUI simply reflects the `thermal_state` field in the daemon's 1 Hz poll: the footer's **thermal state** chip changes (click it for the detail), a banner reading *"Thermal protection active (…)"* appears across the top of the Dashboard, and the chart gets a marker. It is also an alert: the emergency is an **error** alert naming its cause, the no-sensor fallback a **warning**, and both are written to the event log and counted in the footer's health summary. Normal profile control resumes automatically once the daemon reports a normal thermal state again — fans pinned during an override are the daemon protecting the system, not a stuck profile.
+
+Check the **CPU Thermal State** row on the **System State** page. If it reads *No_sensor_fallback*, the daemon has no current CPU temperature: install / load the matching driver (`k10temp` for AMD, `coretemp` for Intel are mainline; some boards also need `nct6775` or `it87`). See [Sensors missing or fewer than expected](#sensors-missing-or-fewer-than-expected).
+
+### "GPU fan control says feature_unavailable"
+
+Open the **System State** page and look at the GPU rows on the **Safety & GPU Limits** card. If `amdgpu.ppfeaturemask` is missing bit `0x4000` (`PP_OVERDRIVE_MASK`), the kernel will not expose PMFW fan curves on RDNA3+ GPUs (RX 7000 / 9000 series). Add `amdgpu.ppfeaturemask=0xffffffff` to your kernel command line and reboot. See the [Hardware Compatibility](../docs/19_Hardware_Compatibility.md) doc for the full kernel-parameter explanation.
+
+### "A popup said my kernel has a known regression — should I worry?"
+
+The daemon ships a curated catalogue of amdgpu kernel regressions (`hwmon/kernel_warnings.rs`). When the running kernel matches a known issue affecting your hardware, the GUI raises a popup, and the warning is listed as an **Advisory** row on the **System State** page's **Safety & GPU Limits** card until you acknowledge it. The popup's details carry the upstream references.
+
+Currently catalogued:
+
+- **`rdna_mes_hang_drm_amd_4765` (Critical):** raised on Linux **6.18.0–6.18.6** and **6.17.9–6.17.13** with an RDNA3, RDNA3.5 or RDNA4 GPU (RX 7000 / RX 9000 series, Radeon Pro W7000 and AI PRO cards, and integrated graphics such as the Radeon 780M, 890M or 8060S) — any of them in the machine, not only the one Ventulus shows first, and the message names which (from daemon 3.0.0; older daemons checked only that first card, usually the discrete one). A compute job running alongside a 3D workload can hang the GPU, and while the system is hung nothing can change a fan's speed ([drm/amd #4765](https://gitlab.freedesktop.org/drm/amd/-/issues/4765)). It is **fixed in 6.18.7 and 6.19**. Update to the **latest 6.18 longterm** point release or a current stable **7.x** kernel. **Do not** move to 6.15, 6.16 or 6.17: none of them was ever a longterm kernel, all are end-of-life, and 6.17.9 onward carries this bug. The daemon matches on the version number, so a distribution kernel that already backported the fix may still be flagged.
+
+Daemon v2.56.0 and older raise two older advisories instead. Both were retired because their advice was wrong. Here is what to do if you see one:
+
+- **`rdna_hang_kernel_6_18_6_19`:** it flagged every 6.18 and 6.19 kernel and told you to pin 6.15–6.17. Ignore that part. Follow the advice above instead, and update the daemon.
+- **`smu_mismatch_navi48_r9700`:** the "SMU driver interface version" message it points at appears on **every** Navi 48 card, the RX 9070 XT included, and is not a fault. The firmware is designed to be backward compatible, and kernel 7.0 removed the message as confusing ([commit e471627d5627](https://git.kernel.org/torvalds/c/e471627d56272a791972f25e467348b611c31713)). `pwm1` is read-only on every RDNA4 card by design; fan control goes through the firmware's `fan_curve`, which works on at least some R9700s. Separately, a few R9700 owners report the fan not responding under load ([ROCm #6101](https://github.com/ROCm/ROCm/issues/6101)). Those reports are per-unit and unresolved. If yours does not follow a curve, return it to automatic, watch its RPM under load, and consider a warranty claim.
+
+The popup has two buttons. **OK** hides it for the rest of this session: it will not come back on a reconnect or the daemon's periodic refresh, but it appears again the next time you start Ventulus. **Don't show again** hides it for good, by recording its id in the `acknowledged_kernel_warnings` field of `~/.config/ventulus/app_settings.json`. To bring dismissed advisories back, press **Clear dismissed** beside *Dismissed driver advisories* in **Settings → Prompts & Dismissals**; there is no need to edit the file.
+
+---
+
+Previous: [Profiles and Curves Reference](profiles-and-curves.md) | Next: [Driver Setup](driver-setup.md) | Back to [Table of Contents](README.md)

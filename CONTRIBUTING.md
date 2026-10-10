@@ -1,0 +1,121 @@
+# Contributing to Ventulus GUI
+
+## Setup
+
+```bash
+git clone https://github.com/Plan-B-Development/ventulus.git
+cd ventulus
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+## Quality Gates
+
+All four must pass before merging:
+
+```bash
+ruff format --check src/ tests/
+ruff check src/ tests/
+python -m compileall -q src/
+QT_QPA_PLATFORM=offscreen python -m pytest tests/ -v
+```
+
+Run all at once:
+
+```bash
+ruff format --check src/ tests/ && ruff check src/ tests/ && python -m compileall -q src/ && QT_QPA_PLATFORM=offscreen python -m pytest tests/ -v
+```
+
+**`QT_QPA_PLATFORM=offscreen` is required, not optional.** Run the suite bare on a
+machine with a live Wayland/X session and three `TestKeyboardFocusVisibility` tests
+fail: the platform theme overrides the stylesheet's `:focus` rules, so the
+render-diff sees the native focus ring rather than the themed one. Those failures
+are an artefact of the environment, not a real regression — but they are
+indistinguishable from one, so always set the variable. CI sets it too.
+
+The whole set takes well under a minute: the three lint/compile gates are
+milliseconds and the suite is the bulk of it. `python -m pytest --collect-only -q`
+prints the current test count — a figure repeated here would just go stale. There is no "fast subset"
+to reach for — run all four.
+
+### Coverage
+
+CI enforces a branch-coverage floor of **88%** (`fail_under` in `pyproject.toml`).
+To check it locally before pushing:
+
+```bash
+QT_QPA_PLATFORM=offscreen python -m pytest --cov --cov-branch --cov-report=term-missing
+```
+
+### Headless / no display
+
+Tests construct real Qt widgets, so `QT_QPA_PLATFORM=offscreen` is part of every test
+command in this file — set it whether or not you have a display. If you see Qt
+platform-plugin errors, that variable is what fixes them.
+
+## Running
+
+```bash
+# Demo mode (no daemon needed)
+ventulus --demo
+
+# Connected to daemon
+ventulus
+
+# Custom socket path
+ventulus --socket /tmp/ventulus.sock
+```
+
+## Testing
+
+```bash
+# Full suite — see CHANGELOG.md for the current passing count
+QT_QPA_PLATFORM=offscreen python -m pytest
+
+# Specific file
+QT_QPA_PLATFORM=offscreen python -m pytest tests/test_profile_service.py -v
+
+# With coverage
+QT_QPA_PLATFORM=offscreen python -m pytest --cov --cov-branch --cov-report=term-missing
+```
+
+Tests use `pytest-qt` for widget testing. All tests must be deterministic — no real hardware, no real network calls, no flaky timing.
+
+## Code Style
+
+- **Formatter:** ruff (auto-format with `ruff format src/ tests/`)
+- **Linter:** ruff (auto-fix with `ruff check --fix src/ tests/`)
+- **Python:** >= 3.12, develop on 3.14
+- **Type hints:** required for public APIs; use `TYPE_CHECKING` imports to avoid circular dependencies
+- **Comments:** only when the *why* is non-obvious
+
+## Architecture Rules
+
+1. **No direct hardware access.** The GUI communicates only with the daemon API.
+2. **Truthful UI.** Never hide errors, never display stale data as fresh.
+3. **Daemon owns safety.** Thermal rules, fan floors, and emergency overrides belong to the daemon.
+4. **All widgets must have unique `objectName`s** for test targeting.
+
+## Project Structure
+
+```
+src/ventulus/
+├── api/            # Daemon HTTP client and typed models
+├── services/       # AppState, PollingService, ProfileService (daemon owns control — no GUI control loop)
+├── ui/
+│   ├── pages/      # Dashboard, Controls, Overview, System State, Hardware, Logs, Settings, Theme
+│   └── widgets/    # Reusable components (cards, charts, editors)
+└── main.py         # Entry point and arg parsing
+```
+
+## Pull Requests
+
+- Keep PRs focused — one feature or fix per PR
+- Include tests for new features and regression tests for bug fixes
+- Update `CHANGELOG.md` under `[Unreleased]`
+- Update relevant `docs/` if architecture changes materially
+
+## Reporting Issues
+
+File issues at https://github.com/Plan-B-Development/ventulus/issues

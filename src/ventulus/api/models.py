@@ -1,0 +1,5023 @@
+"""Typed data models for daemon API responses.
+
+These are the GUI's internal representations — UI code should only work with
+these types, never raw JSON dictionaries.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field, fields
+from enum import Enum
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+
+class ConnectionState(Enum):
+    CONNECTED = "connected"
+    DEGRADED = "degraded"
+    DISCONNECTED = "disconnected"
+
+
+class OperationMode(Enum):
+    AUTOMATIC = "automatic"
+    READ_ONLY = "read_only"
+    DEMO = "demo"
+
+
+class Freshness(Enum):
+    FRESH = "fresh"
+    STALE = "stale"
+    INVALID = "invalid"
+
+
+#: The daemon's poll interval when the GUI has not learned it (`GET /config`'s
+#: ``polling.poll_interval_ms``): the daemon's own default.
+DEFAULT_DAEMON_POLL_INTERVAL_MS = 1000
+
+#: The fixed floors the cadence-scaled limits never go below — the GUI's limits
+#: before they followed the daemon's cadence, still right at its default.
+_FRESH_FLOOR_MS = 2000
+_INVALID_FLOOR_MS = 10000
+
+_FRESHNESS_ORDER = (Freshness.FRESH, Freshness.STALE, Freshness.INVALID)
+
+
+def freshness_for_age(age_ms: int, poll_interval_ms: int) -> Freshness:
+    """How current a reading of ``age_ms`` is, judged against the daemon's cadence.
+
+    The daemon's own rule (`health/staleness.rs`): fresh within two poll intervals,
+    stale up to five, then worse. Its interval is admin-configurable up to 6 s, and
+    a reading's age naturally runs up to one full interval, so a fixed 2 s limit
+    called every healthy reading stale for most of each cycle at a slow cadence,
+    and at 2 s raised and cleared a "stale" alert every few seconds. The limits
+    never drop below the old fixed 2 s / 10 s.
+    """
+    interval = max(1, int(poll_interval_ms))
+    if age_ms < max(_FRESH_FLOOR_MS, 2 * interval):
+        return Freshness.FRESH
+    if age_ms < max(_INVALID_FLOOR_MS, 5 * interval):
+        return Freshness.STALE
+    return Freshness.INVALID
+
+
+def default_reading_freshness(reading: SensorReading | FanReading) -> Freshness:
+    """A reading's freshness at the daemon's default cadence, connected.
+
+    The fallback for a view builder given no ``freshness`` judge (tests, previews);
+    a live page passes ``AppState.display_freshness``.
+    """
+    return reading.freshness_at(DEFAULT_DAEMON_POLL_INTERVAL_MS)
+
+
+def at_least(freshness: Freshness, floor: Freshness) -> Freshness:
+    """The worse of two freshness values."""
+    return max(freshness, floor, key=_FRESHNESS_ORDER.index)
+
+
+# ---------------------------------------------------------------------------
+# Capabilities
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OpenfanCapability:
+    present: bool = False
+    channels: int = 0
+    rpm_support: bool = False
+    write_support: bool = False
+
+
+@dataclass
+class HwmonCapability:
+    present: bool = False
+    pwm_header_count: int = 0
+    write_support: bool = False
+
+
+@dataclass
+class KernelWarning:
+    """Daemon-emitted kernel-version advisory for an AMD GPU (DEC-098).
+
+    Since DEC-449 the daemon evaluates every AMD GPU on the machine, not only
+    the card the list is filed under; the ``message`` names the affected cards.
+
+    Mirrors `crate::hwmon::kernel_warnings::KernelWarning` on the daemon.
+    Severity is one of ``"info" | "medium" | "high" | "critical"``; the GUI
+    surfaces high/critical entries as a popup (once per id per session, until
+    "Don't show again") and logs everything.
+    """
+
+    id: str = ""
+    severity: str = "info"
+    message: str = ""
+
+
+@dataclass
+class AmdGpuCapability:
+    present: bool = False
+    model_name: str | None = None
+    display_label: str = "AMD D-GPU"
+    pci_id: str | None = None
+    fan_control_method: str = "none"
+    pmfw_supported: bool = False
+    fan_rpm_available: bool = False
+    fan_write_supported: bool = False
+    is_discrete: bool = False
+    overdrive_enabled: bool = False
+    pci_device_id: int | None = None
+    pci_revision: int | None = None
+    gpu_zero_rpm_available: bool = False
+    # DEC-098: list of advisories the daemon detected based on the running
+    # kernel + every AMD GPU's identity (DEC-449: not only this card's). Empty
+    # when nothing applies; older daemons without the field also yield an
+    # empty list (parser-tolerant).
+    kernel_warnings: list[KernelWarning] = field(default_factory=list)
+
+    @property
+    def profile_writable(self) -> bool:
+        """True when a daemon profile can drive this GPU's fan (DEC-445).
+
+        PMFW ``fan_curve`` only — the daemon engine writes nothing else on a GPU.
+        A pre-RDNA3 card reports ``"hwmon_pwm"``: verify and reset write its
+        legacy ``pwm1``, and no engine ever has. Daemons before DEC-445 also
+        report ``fan_write_supported: true`` for it, so this is keyed on the
+        method as well as the flag, which makes it right against every daemon.
+        The one gate for "can a profile drive it" — read it, never the flag.
+        """
+        return self.present and self.fan_write_supported and self.fan_control_method == "pmfw_curve"
+
+    def describes_fan(self, fan_id: str) -> bool:
+        """True when this capability is about ``fan_id``'s card.
+
+        ``devices.amd_gpu`` describes ONE card, the daemon's primary, so on a
+        machine with two AMD GPUs its answers say nothing about the other.
+        A payload without ``pci_id`` is taken to describe every card, as before.
+        Callers go through :meth:`Capabilities.amd_gpu_for_fan`, which prefers
+        the per-card ``devices.amd_gpus`` (`GPU-b`).
+        """
+        return self.present and (not self.pci_id or fan_id == f"amd_gpu:{self.pci_id}")
+
+
+@dataclass
+class IntelGpuCapability:
+    """Intel discrete GPU (Arc) capability (DEC-121).
+
+    Monitoring-only: Intel GPU fan control is firmware-managed with no
+    userspace write path, so ``fan_control_method`` is always ``"read_only"``
+    (fan present) or ``"none"``, and there is deliberately no
+    ``fan_write_supported`` field — Intel GPU fans are never offered as
+    writable controls. Mirrors the read-only subset of ``AmdGpuCapability``
+    (no PMFW/overdrive/zero-RPM/kernel-warning fields). Older daemons that
+    predate the field yield ``present=False`` via the parser's tolerance.
+    """
+
+    present: bool = False
+    model_name: str | None = None
+    display_label: str = "Intel D-GPU"
+    pci_id: str | None = None
+    pci_device_id: int | None = None
+    driver: str | None = None  # "xe" or "i915"
+    fan_control_method: str = "none"  # "read_only" | "none" — never writable
+    fan_rpm_available: bool = False
+    is_discrete: bool = False
+
+
+@dataclass
+class NvidiaGpuCapability:
+    """NVIDIA discrete GPU capability (DEC-204).
+
+    Read-only, like the Intel Arc capability (DEC-121) — NVIDIA fan control is
+    never offered (nouveau's writable ``pwm1`` is excluded from discovery; the
+    NVML backend is telemetry-only), so there is deliberately no
+    ``fan_write_supported`` field. ``model_name``/``driver_version`` come only
+    from the proprietary NVML driver; the open ``nouveau`` leg yields the
+    generic ``"NVIDIA D-GPU"`` label. ``driver`` is the kernel module name
+    (``"nouveau"`` or ``"nvidia"``) — not the ``nvml`` userspace library. Older
+    daemons that predate the field yield ``present=False`` via parser tolerance.
+    """
+
+    present: bool = False
+    model_name: str | None = None
+    display_label: str = "NVIDIA D-GPU"
+    pci_id: str | None = None
+    driver: str | None = None  # "nouveau" | "nvidia" (kernel module)
+    driver_version: str | None = None
+    fan_control_method: str = "none"  # "read_only" | "none" — never writable
+    fan_rpm_available: bool = False
+    is_discrete: bool = False
+
+
+@dataclass
+class UnsupportedCapability:
+    present: bool = False
+    status: str = "unsupported"
+
+
+@dataclass
+class AioHwmonCapability:
+    """Liquid-cooler (AIO) hwmon capability (daemon >= 1.18.0, DEC-156).
+
+    Backward-compatible superset of :class:`UnsupportedCapability`: ``present``
+    and ``status`` are always parseable (pre-1.18.0 daemons send only those),
+    while ``pump_writable`` / ``coolant_available`` default to ``False`` against
+    an older daemon. ``status`` is one of ``"supported"`` (a writable AIO
+    pump/fan header), ``"monitor_only"`` (a cooler/coolant sensor is detected
+    but nothing is writable — never offer control), or ``"unsupported"``.
+    USB-only coolers are out of scope and reported via ``aio_usb``.
+    """
+
+    present: bool = False
+    status: str = "unsupported"
+    pump_writable: bool = False
+    coolant_available: bool = False
+
+
+@dataclass
+class FeatureFlags:
+    openfan_write_supported: bool = False
+    hwmon_write_supported: bool = False
+
+
+@dataclass
+class ControlCapability:
+    """Daemon control-plane capabilities (DEC-159/160).
+
+    Top-level ``control`` block in ``GET /capabilities``. ``profile_storage``
+    is True when the daemon exposes the ``/profiles`` CRUD + validate surface
+    (daemon ≥ 1.19). ``autonomous_control`` is True only on a 2.0.0+ daemon that
+    is the sole authoritative fan writer (DEC-165) — the thin GUI gates all
+    runtime control on it: a daemon that omits the flag (pre-2.0) defaults it to
+    False here and the GUI refuses to operate. Absent block ⇒ all fields default
+    to the old/safe value (AIP-180).
+    """
+
+    profile_storage: bool = False
+    curve_evaluation: bool = False
+    manual_override: bool = False
+    fan_identify: bool = False
+    autonomous_control: bool = False
+    min_supported_gui: str = ""
+    # DEC-265: daemon exposes POST /fans/openfan/rescan, which adopts an
+    # OpenFanController that appeared after the daemon booted (or that failed its
+    # identity handshake once at startup) without a restart. Older daemons omit
+    # the field, so it defaults False and the action stays hidden rather than
+    # offering a button that can only 404.
+    openfan_rescan: bool = False
+    # DEC-311 (daemon >= 2.28.0): the daemon classifies PWM headers by role,
+    # refuses to STOP a role="pump" header during identify (perturbing it
+    # instead), keeps verify above the pump floor, and accepts
+    # POST /config/header-role.
+    #
+    # Gating on this is a TRUTHFULNESS requirement, not a cosmetic one: the
+    # wizard's "the pump will briefly change speed" copy is a LIE against an
+    # older daemon, which drives the pump to 0. When this is False the wizard
+    # keeps its original "the fan will stop" wording, which is the honest
+    # description of what that daemon actually does.
+    header_roles: bool = False
+    # Daemon ≥ 2.23.0 accepts a ``remove`` array on
+    # ``POST /config/profile-search-dirs``, so a stale profile search directory
+    # can be pruned instead of only ever added.
+    #
+    # Gating on this flag is mandatory, and for a stronger reason than
+    # ``openfan_rescan``'s: an older daemon does not 404 a ``remove``, it parses
+    # only ``add`` and **silently ignores the rest**. Probing would read that
+    # partial success as a whole one and tell the user a directory had been
+    # pruned when it had not.
+    profile_search_dir_remove: bool = False
+    # AIO-MB Phase 3 (daemon >= 2.29.0): the daemon exposes
+    # POST /hwmon/{id}/characterize plus the GET/DELETE
+    # /diagnostics/characterization pair — the deeper PWM/RPM response sweep
+    # that sits ALONGSIDE the quick "Test PWM Control" verify.
+    #
+    # Gate on this rather than probing. An older daemon 404s the POST — the same
+    # status this route returns for an unknown header id. They differ only in
+    # error.code ("not_found" from the route fallback vs "validation_error" from
+    # the handler), and keying feature detection on that is exactly the
+    # undocumented coupling the capability exists to replace.
+    pwm_characterization: bool = False
+    #: Daemon understands the AIO Phase 8 Batch 2 behaviour inputs
+    #: (``bidirectional``, ``stability_seconds``), publishes the §2-§7
+    #: derivations, and accepts the ``pwm_behaviour_characterization`` session
+    #: diagnostic. True from daemon >= 2.40.0 (DEC-334).
+    #:
+    #: **Gate on this, never on ``pwm_characterization``.** An older daemon
+    #: ignores the two new request fields rather than rejecting them, so an
+    #: ungated client would silently get a plain ascending sweep and render
+    #: empty hysteresis and stability panels as though the hardware had
+    #: produced them.
+    pwm_behaviour_characterization: bool = False
+    # DEC-316 (AIO-MB Phase 4, daemon >= 2.31.0): the daemon exposes
+    # `GET /inventory/cooling-devices`, `POST /config/cooling-device` and
+    # `DELETE /config/cooling-device/{id}`. Gates those ENDPOINTS only — the
+    # additive `HwmonHeader` fields that shipped alongside need no flag, since
+    # each is optional and absence already means "fall back".
+    cooling_devices: bool = False
+    # AIO-MB Phase 5 (daemon >= 2.32.0): the validation-session surface.
+    # Gate on this rather than probing — an older daemon 404s these routes from
+    # the route fallback, which is indistinguishable from a genuine "no such
+    # session" without inspecting `error.code`.
+    validation_sessions: bool = False
+    # AIO Phase 8 Batch 1 (daemon >= 2.39.0): `POST
+    # /hwmon/{id}/discover-control-path` plus the GET/DELETE
+    # /diagnostics/control-path pair, and the `control_path_discovery` token on a
+    # validation session's `diagnostics[]`.
+    #
+    # `bool`, not `bool | None`: absence and false mean the same thing here —
+    # hide the button — because there is no older behaviour to fall back to. The
+    # feature did not exist before the flag did.
+    control_path_discovery: bool = False
+    # AIO Phase 8 Batch 1 (daemon >= 2.39.0): `GET /diagnostics/preflight`.
+    #
+    # A SEPARATE flag from `control_path_discovery`, matching the daemon: the
+    # preflight is read-only and also covers the two pre-existing diagnostics, so
+    # the GUI can offer the safety summary on the Test/Characterise dialogs
+    # without offering discovery.
+    diagnostic_preflight: bool = False
+    # AIO Phase 8 Batch 3a (daemon >= 2.41.0, DEC-335): the
+    # `thermal_observation` session kind and the power fields on a sample.
+    #
+    # **This flag is load-bearing in a way the diagnostics tokens are not.** An
+    # unknown `diagnostics[]` token makes the daemon reject the whole session,
+    # so a mistake there is loud. An unknown `kind` does not: it falls back to
+    # `"validation"` and returns 200, so an ungated client would start what it
+    # believes is a thermal observation, receive a perfectly valid ordinary
+    # session, and label it wrongly for the rest of its life.
+    thermal_observation: bool = False
+    #: `P8-az` (Run 2, daemon >= 2.43.0): the daemon accepts
+    #: ``stop_when_diagnostics_complete`` on ``POST /validation/session`` and
+    #: echoes it back on the session document, so a session can finalise itself
+    #: when its orchestrated diagnostics finish.
+    #:
+    #: **Gate the OFFER on this, and render the ECHO.** An older daemon has the
+    #: session routes and ``serde`` drops an unknown request field rather than
+    #: rejecting it — so it returns ``200`` for a request carrying the flag and
+    #: then records for the full two-hour sample cap. Neither the status nor the
+    #: body distinguishes the two, which is why offering the option ungated
+    #: would put a promise on screen that a whole range of daemons will not keep.
+    validation_auto_stop: bool = False
+    #: DEC-388: the daemon applies an exit floor on a clean stop, accepts
+    #: ``POST /config/exit-floor`` and reports ``shutdown.exit_floor_pct`` on
+    #: ``GET /config``. Gate the Settings control on this: an older daemon 404s
+    #: the POST and leaves its OpenFan channels at their last duty whatever the
+    #: control says.
+    exit_floor: bool = False
+    #: DEC-443 (`W-SAFE`): the daemon forces a coolant emergency at the
+    #: configurable ``safety.coolant_limit_c`` (``POST /config/coolant-limit``),
+    #: answers a stalled pump, floors a DC-mode pump at 70 %, raises the
+    #: cooling advisory, and publishes ``emergency_causes`` / ``pump_stalls`` /
+    #: ``advisories`` on ``/status``. Gate the Settings control on this: an older
+    #: daemon 404s the POST and has no coolant rung at all.
+    cooling_failure_detection: bool = False
+    #: DEC-456: the daemon keeps each writable hwmon header's latest conclusive
+    #: PWM-control verdict and publishes it as ``pwm_verification`` on
+    #: ``GET /hwmon/headers``. Gate on this, never on the field: the field is
+    #: absent for every header not yet verified, so its absence alone cannot
+    #: tell "not yet verified" from an older daemon that keeps no record.
+    pwm_verification_records: bool = False
+    #: Daemon >= 3.4.0: ``POST /config/header-role`` accepts ``"no_fan"`` (a
+    #: header with nothing plugged in). Gate the picker's "No fan" choice on
+    #: this — an older daemon rejects the token with a 400.
+    header_role_no_fan: bool = False
+    #: `ROLE-f` (DEC-475): ``POST /config/header-role`` accepts an OpenFan
+    #: channel id and ``GET /fans/openfan/roles`` reports each channel's role.
+    #: A channel assigned ``pump`` is the daemon's only pump evidence for an
+    #: OpenFan channel. Gate the OpenFan role picker on this — an older daemon
+    #: rejects the id with a 400 and 404s the route.
+    openfan_header_roles: bool = False
+    #: `ROLE-a`: a header or OpenFan channel the user assigned ``cpu_fan`` gets
+    #: the 30% CPU/pump floor in the active profile, as a ``CPU_FAN`` label does.
+    #: A floor only — identify still stops it and ``stop_permitted`` does not
+    #: change. Gate any display of that floor on this: an older daemon gives an
+    #: assigned CPU fan none.
+    cpu_fan_role_floor: bool = False
+    #: DEC-406 (daemon >= 2.53.0): the engine reads back an hwmon write it would
+    #: coalesce and rewrites a duty that moved, giving up after three
+    #: corrections that do not hold. Every hwmon ``/fans``/``/poll`` entry then
+    #: carries ``duty_corrections`` and ``duty_not_holding``.
+    #:
+    #: Gates what the PWM Test Report and the System State page may SAY about
+    #: drift: on an older daemon a moved duty simply stands, and the absence of
+    #: the two fields is "this daemon does not reconcile", never "no drift".
+    duty_reconciliation: bool = False
+    #: DEC-407 (daemon >= 2.54.0): ``POST /hwmon/{id}/stall-probe`` plus the
+    #: GET/DELETE ``/diagnostics/stall-probe`` pair and the ``pwm_stall_probe``
+    #: preflight token. Gate on this rather than probing: an older daemon 404s
+    #: the POST from the route fallback, the same status an unknown header gets.
+    stall_probe: bool = False
+    #: DEC-452 (daemon >= 3.1.0): ``POST /fans/openfan/{ch}/calibration`` plus the
+    #: GET/DELETE ``/diagnostics/openfan-calibration`` pair. Describes the build,
+    #: not whether a controller is attached (that is the POST's ``503``). An older
+    #: daemon has only the deprecated synchronous ``/calibrate``, which this GUI
+    #: never calls.
+    openfan_calibration: bool = False
+    #: DEC-481: the OpenFan firmware update — ``status.openfan_link``,
+    #: ``status.openfan_maintenance``, ``GET /fans/openfan/device`` and the
+    #: ``POST|GET|DELETE /fans/openfan/maintenance`` run. Describes the build;
+    #: whether a controller is attached is the device answer's ``present``.
+    openfan_firmware_maintenance: bool = False
+    #: DEC-483: the daemon can write the OpenFAN firmware itself —
+    #: ``PUT /fans/openfan/firmware``, ``"write": "daemon"`` on the start,
+    #: ``daemon_write`` on the device answer and ``firmware_write`` on the run.
+    #: Describes the build; whether this daemon may open USB devices (the opt-in
+    #: drop-in) is ``daemon_write.available``.
+    openfan_firmware_write: bool = False
+    #: DEC-484: an OpenFAN board on USB that does not answer can be updated —
+    #: ``status.openfan_silent_board``, ``silent_board`` on the device answer,
+    #: ``"board": "silent"`` on the start and ``board`` on the run. Describes
+    #: the build; whether such a board is there is the status field.
+    openfan_firmware_silent_update: bool = False
+    #: DEC-489: a curve's ``hysteresis_c`` sets its own falling-temperature
+    #: deadband width. Gate the setting on this, never on the field: an older
+    #: daemon stores the field (profiles are saved losslessly) and silently runs
+    #: its fixed default, so an ungated editor would show a band nothing applies.
+    curve_hysteresis: bool = False
+    #: DEC-442: every hwmon chip name and id is canonical — the it87 v2.0 board
+    #: suffix is stripped where the daemon reads it and in the state it saved
+    #: before — so a driver rebuild no longer changes any fan header's id. Gates
+    #: the "a rebuild changes your ids" caution, which stays true on an older
+    #: daemon.
+    canonical_chip_names: bool = False
+    # `WIRE-k` (daemon >= 2.36.0): five features that shipped BEFORE this block
+    # had keys for them. Until the daemon grew these flags the GUI detected them
+    # by comparing the daemon's version string — which says when a feature first
+    # appeared, not whether this build serves it — or by calling the route and
+    # reading a 404 as "unsupported". Neither is a contract: the route
+    # fallback's 404 is indistinguishable from a handler's own 404 for an
+    # unknown id, which is exactly why `pwm_characterization` and
+    # `validation_sessions` above were given flags in the first place.
+    #
+    # Each defaults False, so against an older daemon the GUI falls back to the
+    # probe-then-recover it already does. That fallback is deliberately KEPT
+    # rather than deleted: these flags only exist from 2.36.0, and the daemon
+    # floor is lower than that.
+    # `None`, NOT `False`, and the distinction is the whole point. The wire
+    # separates "absent" from "false"; a `False` default collapses them, and a
+    # collapsed answer would hide five WORKING features on every daemon between
+    # each feature's own floor (1.11.0 to 2.16.0) and 2.36.0, which is where the
+    # flags start. `daemon_supports` reads `None` as "did not say" and leaves the
+    # caller's existing fallback in charge.
+    #
+    # The sibling flags above stay `bool` on purpose: for those, absence and
+    # false mean the same thing to the GUI (hide the button, keep the old
+    # wording), so there is nothing to distinguish.
+    gpu_fan_verify: bool | None = None
+    hardware_readiness: bool | None = None
+    # Advertises the ROUTE, not that a probe will act. The active port probe is
+    # separately gated by daemon config and by CAP_SYS_RAWIO, and a disabled
+    # probe returns a normal report rather than an error — so the button gates
+    # on this flag and the report still says whether the probe ran.
+    superio_port_probe: bool | None = None
+    preferred_sensors: bool | None = None
+    daemon_config_report: bool | None = None
+
+
+@dataclass
+class Limits:
+    """Policy limits the daemon advertises on ``GET /capabilities`` so clients
+    size their UI from the binary rather than from a matching literal.
+
+    Only ``diagnostic_max_temp_c`` is modelled. ``openfan_stop_timeout_s`` was
+    modelled by DEC-329 to cap the Fan Wizard's spin-down, on the belief that the
+    daemon restarts a 0% OpenFan fan after that long. It does not — a repeated
+    0% coalesces before the timeout is checked, so a stop lasts as long as it is
+    commanded — so the cap was removed and the field lost its only consumer
+    (DEC-426, ``DC-b``). It is declared ``unmodelled`` in
+    ``tests/fixtures/wire_fields.json``, beside ``pwm_percent_min`` / ``max``.
+    """
+
+    # Deliberately NOT modelling `pwm_percent_min` / `pwm_percent_max` /
+    # `openfan_stop_timeout_s`. The whole `SafetyLimits` block was deleted in the
+    # P3 capability cleanup because nothing read it — the daemon clamps
+    # authoritatively (DEC-163), so a GUI mirror described a decision the GUI
+    # does not make — and that deletion set the bar for re-adding: *find a
+    # consumer first*. None of the three has one.
+    #: `PTA-i` (daemon >= 2.55.0): the temperature above which any sensor makes
+    #: a diagnostic refuse or stop. The PWM Test Report's consent page
+    #: interpolates it rather than restating the daemon constant. ``None``
+    #: means "this daemon did not say" — the text is then worded without a
+    #: figure, never with a guessed one.
+    diagnostic_max_temp_c: float | None = None
+
+
+@dataclass
+class Capabilities:
+    api_version: int = 1
+    daemon_version: str = ""
+    ipc_transport: str = ""
+    openfan: OpenfanCapability = field(default_factory=OpenfanCapability)
+    hwmon: HwmonCapability = field(default_factory=HwmonCapability)
+    amd_gpu: AmdGpuCapability = field(default_factory=AmdGpuCapability)
+    #: `GPU-b`: ``devices.amd_gpus`` — every detected AMD GPU, each described by
+    #: its own card. ``None`` is a daemon that predates the field, where only
+    #: the primary card (``amd_gpu``) is described. Read through
+    #: :meth:`amd_gpu_for_fan`.
+    amd_gpus: list[AmdGpuCapability] | None = None
+    intel_gpu: IntelGpuCapability = field(default_factory=IntelGpuCapability)
+    nvidia_gpu: NvidiaGpuCapability = field(default_factory=NvidiaGpuCapability)
+    aio_hwmon: AioHwmonCapability = field(default_factory=AioHwmonCapability)
+    aio_usb: UnsupportedCapability = field(default_factory=UnsupportedCapability)
+    features: FeatureFlags = field(default_factory=FeatureFlags)
+    limits: Limits = field(default_factory=Limits)
+    control: ControlCapability = field(default_factory=ControlCapability)
+
+    def amd_gpu_for_fan(self, fan_id: str) -> AmdGpuCapability | None:
+        """The capability of ``fan_id``'s own AMD card, or ``None`` if unknown.
+
+        The one lookup for any per-fan AMD GPU judgement (writability, control
+        method, label), so a secondary card is never judged by the primary's
+        answer (`GPU-b`). With ``devices.amd_gpus`` the card is found by its PCI
+        address; on an older daemon only the primary card is known
+        (:meth:`AmdGpuCapability.describes_fan`), and any other card is ``None``.
+        """
+        if self.amd_gpus is not None:
+            return next(
+                (
+                    gpu
+                    for gpu in self.amd_gpus
+                    if gpu.present and gpu.pci_id and fan_id == f"amd_gpu:{gpu.pci_id}"
+                ),
+                None,
+            )
+        return self.amd_gpu if self.amd_gpu.describes_fan(fan_id) else None
+
+    @property
+    def any_gpu_profile_writable(self) -> bool:
+        """True when a daemon profile can drive at least one AMD GPU fan.
+
+        The GPU half of "does this daemon have a backend it can write": the two
+        ``features.*_write_supported`` flags cover OpenFan and hwmon only, so a
+        machine whose one drivable fan is a GPU's would otherwise read as having
+        none. Each card is judged by :attr:`AmdGpuCapability.profile_writable`;
+        an older daemon without ``devices.amd_gpus`` describes the primary only.
+        """
+        cards = self.amd_gpus if self.amd_gpus is not None else [self.amd_gpu]
+        return any(gpu.profile_writable for gpu in cards)
+
+    @property
+    def any_write_backend(self) -> bool:
+        """True when the daemon can drive some fan: OpenFan, hwmon or an AMD GPU."""
+        return bool(
+            self.features.openfan_write_supported
+            or self.features.hwmon_write_supported
+            or self.any_gpu_profile_writable
+        )
+
+
+# ---------------------------------------------------------------------------
+# Status
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SubsystemStatus:
+    name: str = ""
+    status: str = "unknown"
+    age_ms: int | None = None
+    reason: str = ""
+
+
+@dataclass
+class OverrideStatusEntry:
+    """One active manual override on the daemon's `/status` poll surface
+    (DEC-163). Carries no `override_token` — this is an *observation* surface,
+    not a control one: an override the GUI did not create cannot be renewed or
+    released (no token), only displayed or superseded by a fresh take (DEC-169).
+    """
+
+    control_id: str = ""
+    pwm_percent: int = 0
+    expires_in_secs: int = 0
+
+
+@dataclass
+class IdentifyStatusEntry:
+    """One active fan-identify hold on the daemon's `/status` poll surface
+    (DEC-166), each with its remaining deadman TTL."""
+
+    fan_id: str = ""
+    expires_in_secs: int = 0
+    # DEC-311: so a GUI polling into an identify it did not initiate still
+    # describes it truthfully. "stop" (pre-2.28.0 daemons omit it) or
+    # "pump_perturb".
+    mode: str = "stop"
+    identify_pwm_percent: int = 0
+
+    def describe_hold(self) -> str:
+        """What the daemon is actually doing to this fan, in its own words.
+
+        These two fields ride the 1 Hz poll precisely so a GUI polling into an
+        identify **someone else started** describes it truthfully (DEC-311), and
+        both were read nowhere outside the wizard — so the Overview panel and the
+        support bundle called a pump perturbation a stop (`WIRE-p`).
+
+        A pre-2.28.0 daemon omits ``mode`` and always stops, so the ``"stop"``
+        default is correct rather than merely safe. An unrecognised token is
+        rendered verbatim, never coerced into "stopped" (the 273-i rule): a
+        future mode described as a stop would be the same lie in a new coat.
+
+        On the model rather than in a view module because both consumers need it
+        and they already import each other — the DEC-276 lesson, and the same
+        placement as ``FanReading.requested_duty``.
+        """
+        if self.mode == "pump_perturb":
+            return f"held at {self.identify_pwm_percent}%"
+        if self.mode in ("stop", ""):
+            return "stopped"
+        return f"{self.mode} at {self.identify_pwm_percent}%"
+
+
+@dataclass
+class UnavailableSensor:
+    """A sensor the daemon discovered but currently cannot read (DEC-193).
+
+    Mirrors the daemon's ``UnavailableSensorEntry`` on the ``/status`` +
+    ``/poll`` surface. The canonical case is a wireless-radio temperature
+    (e.g. an ``ath12k`` WiFi chip) that returns ``ENETDOWN`` whenever the radio
+    is soft-blocked. These are surfaced for *display only* (Diagnostics): the
+    daemon evicts them from the live ``sensors`` array so a stale value is never
+    served, and the GUI does not raise a staleness warning for them.
+    """
+
+    id: str = ""
+    label: str = ""
+    reason: str = ""
+    unavailable_for_ms: int = 0
+
+
+# Every value the daemon's `skipped_controls[].reason` field can take (273-i), in
+# no particular order. This is the WIRE vocabulary, so — like
+# `THERMAL_STATE_VALUES` above — it belongs with the model rather than with the
+# one surface that renders it, and `test_skip_reason_map_covers_the_wire_vocabulary`
+# pins the Controls-page presentation map against it. DEC-257 is the reason: a
+# presentation map keyed off a wire field drifted silently once already and a live
+# thermal recovery rendered as a neutral grey pill.
+SKIP_REASON_VALUES: tuple[str, ...] = (
+    "curve_not_found",
+    "sensor_unavailable",
+    "mix_unresolvable",
+    "sync_unresolvable",
+    # `OFN-j`, daemon >= 2.47.0. Unlike its four siblings this is not a
+    # curve-resolution failure: the curve evaluated and an output was computed,
+    # and the DELIVERY has nowhere to go because every member's backend is
+    # absent. Canonically an `openfan:` member on a machine with no
+    # OpenFanController — a profile exported from a machine that has one imports
+    # cleanly onto one that does not — but it is not OpenFan-specific: an
+    # `hwmon:` member on a board with no writable header reports identically.
+    # Raised only when EVERY member is undeliverable; a partly-live control is
+    # still commanding fans and is deliberately not listed.
+    "backend_unavailable",
+)
+
+
+@dataclass
+class ControlOutput:
+    """One control's applied output from the engine's last evaluating tick (277-k).
+
+    The value the daemon actually applied, whatever produced it — a curve or a
+    live manual override — because the question the Controls card renders it to
+    answer is "what are the fans doing?".
+
+    **Not a per-fan duty.** A member can sit above this on a role-aware floor or
+    below it on a diverging GPU (DEC-119); per-fan duty is ``FanReading.
+    last_commanded_pwm``. **Absence is meaningful**: a control the daemon did not
+    evaluate — no profile, a listed skip, or the whole of a thermal event — is
+    simply not in the list, and the card must fall back to "no value" rather than
+    carrying its previous figure forward. Daemon ≥ 2.22.0; older daemons omit the
+    array entirely and the GUI defaults it to empty.
+    """
+
+    control_id: str = ""
+    output_pct: float = 0.0
+
+
+@dataclass
+class SkippedControl:
+    """A control the daemon's engine cannot resolve, so is not commanding (273-i).
+
+    Mirrors the daemon's ``SkippedControlEntry`` on the ``/status`` + ``/poll``
+    surface. The fans of such a control hold their last commanded duty — a skip
+    never lowers a fan (DEC-269) — but nothing is driving them, which is what
+    this says.
+
+    ``reason`` is a stable token from `SKIP_REASON_VALUES`, not prose: the daemon
+    deliberately sends the token and leaves the wording to the client, so it can
+    be styled and localised here. An unrecognised token must still render (a
+    newer daemon may add one), which is why the presentation map has a fallback.
+    """
+
+    control_id: str = ""
+    control_name: str = ""
+    reason: str = ""
+    skipped_for_ms: int = 0
+
+
+@dataclass
+class ReadinessRollup:
+    """Compact hardware-readiness rollup from ``GET /status`` + ``/poll`` (DEC-206).
+
+    A cache-cheap summary the daemon mirrors onto the poll surface so the
+    Dashboard can show a single health chip without fetching the full
+    ``/inventory/readiness`` list. ``overall`` is the most severe item's
+    severity; ``top_summary`` / ``top_code`` name the single most-important next
+    step (both ``None`` when ``overall`` is ``"ok"``). The whole object is
+    ``None`` on daemons predating DEC-206 (and until the daemon's startup seed
+    runs) → the GUI hides the chip.
+    """
+
+    overall: str = "ok"  # ok | info | warning | critical
+    critical: int = 0
+    warning: int = 0
+    info: int = 0
+    top_summary: str | None = None
+    top_code: str | None = None
+
+    @property
+    def to_fix_count(self) -> int:
+        """Number of items that need attention (critical + warning); the chip's
+        ``N to fix``. Info-tier items are advisory and not counted."""
+        return self.critical + self.warning
+
+
+@dataclass
+class RuntimeConfigDegraded:
+    """The daemon's own ``runtime.toml`` failed to load, so it is running on
+    built-in defaults (daemon >= 2.34.0, DEC-321).
+
+    **[SAFETY], and this is why the field is on the wire at all.** The defaults
+    carry no ``header_roles``. On a board whose Super-I/O publishes no
+    ``pwmN_label`` files — the case the whole AIO-MB programme exists for — a
+    user's ``pump`` assignment is the *only* evidence a header drives a pump, so
+    a failed **startup** load removes that header's 30% floor, its stop exemption
+    and its pump-safe identify. The daemon's only other notification is one
+    ``warn!`` in its journal, which no client can see.
+
+    ``None`` when the config loaded cleanly *and* when the daemon predates
+    2.34.0. The two are deliberately indistinguishable and both read as "fine" —
+    the safe direction, because that is exactly what such a daemon reports today.
+
+    A **missing** ``runtime.toml`` is not a degradation and is never reported:
+    that is first boot, and defaults are the correct answer there.
+    """
+
+    #: ``unreadable`` (I/O error, or larger than the daemon's 4 MiB read cap) or
+    #: ``malformed`` (read, but not valid TOML for this daemon version —
+    #: canonically a downgrade, since each section is ``deny_unknown_fields``).
+    reason: str = ""
+    #: The file that failed to load.
+    path: str = ""
+    #: The underlying I/O or TOML error, verbatim. Daemon prose, **not** a stable
+    #: token — render it, never branch on it.
+    detail: str = ""
+    #: ``startup``, ``reload`` or (daemon >= 2.51.0) ``update``. These cost
+    #: different things: only the boot load seeds every runtime-mutable key, so a
+    #: ``reload`` failure leaves header roles as startup established them and is
+    #: materially narrower; ``update`` is a setter that kept a copy and replaced
+    #: the file (`TS-r`).
+    phase: str = ""
+    #: Where a setter kept the unreadable original (``runtime.toml.invalid-<ts>``)
+    #: before replacing ``path`` (daemon >= 3.6.0, `TS-at`). Empty when nothing was
+    #: kept, or from an older daemon. Once set, ``path`` holds a file the daemon
+    #: wrote and this is the file to repair — including on a ``startup`` record,
+    #: whose lost header roles are then only in this copy.
+    kept_as: str = ""
+
+
+# Every value the daemon's `thermal_state` field can take (DEC-132/165), in
+# severity order. This is the WIRE vocabulary, so it belongs with the model
+# rather than with any one surface that renders it.
+#
+# DEC-257: separate presentation maps key off this field
+# (`ui.status_banner.THERMAL_STATES`, `services.dashboard_view._THERMAL_REASONS`,
+# `services.system_state_view._THERMAL_STATE`, and since DEC-459
+# `services.cooling_watch.THERMAL_ALERTS`) and one of them had silently
+# drifted — it carried three values the daemon never sends and was missing
+# `recovery` and `no_sensor_fallback`, so a live thermal recovery rendered as a
+# neutral grey pill. They cannot be collapsed into one map (they map to different
+# things, and one lives behind a Qt import while two are deliberately Qt-free),
+# so `test_thermal_state_maps_cover_the_wire_vocabulary` pins all of them against
+# this tuple instead. Any future map is one line away from the same guarantee.
+THERMAL_STATE_VALUES: tuple[str, ...] = (
+    "normal",
+    "recovery",
+    "emergency",
+    "no_sensor_fallback",
+)
+
+
+# DEC-443 (`W-SAFE`): the wire vocabularies of the cooling-failure watch. Like
+# `THERMAL_STATE_VALUES` they belong with the model, and every presentation map
+# keyed off them is pinned against them by a test. A client must still render a
+# token it does not know — each surface falls back rather than dropping it.
+EMERGENCY_CAUSE_VALUES: tuple[str, ...] = ("cpu", "coolant")
+PUMP_STALL_STATE_VALUES: tuple[str, ...] = ("stall_response", "not_turning", "held")
+ADVISORY_CODE_VALUES: tuple[str, ...] = ("cpu_at_ceiling_low_cooling",)
+
+
+@dataclass
+class PumpStall:
+    """A pump under the daemon's stall response (DEC-443, `TS-e`).
+
+    ``state`` is one of `PUMP_STALL_STATE_VALUES`: ``stall_response`` (driven to
+    100 % for the response window after reading 0 RPM while commanded to run),
+    ``not_turning`` (still 0 RPM at 100 %), or ``held`` (a second stall this
+    run — held at 100 % until a daemon restart or a profile activation).
+    """
+
+    header_id: str = ""
+    state: str = ""
+    since_ms: int = 0
+    stall_count: int = 0
+
+
+@dataclass
+class CoolingAdvisory:
+    """A daemon advisory about cooling (DEC-443, `TS-m`). Forces nothing.
+
+    ``cpu_at_ceiling_low_cooling``: the hottest fresh CPU reading has sat at or
+    above ``ceiling_c`` for a minute while no non-GPU output is commanded at
+    50 % or more — the shape of a dead pump under a throttling CPU, which the
+    CPU emergency (a backstop above the ceiling) practically never sees.
+    """
+
+    code: str = ""
+    since_ms: int = 0
+    cpu_temp_c: float = 0.0
+    ceiling_c: float = 0.0
+    max_duty_pct: int = 0
+
+
+@dataclass
+class OpenFanMaintenanceSummary:
+    """``status.openfan_maintenance`` (DEC-481): a firmware update in miniature.
+
+    ``state`` is ``running`` (``stage`` is the stage token) or
+    ``needs_recovery`` (``stage`` is ``finished`` and ``outcome`` says how it
+    ended). Tokens are opaque: an unknown one is rendered, not dropped.
+    """
+
+    run_id: str = ""
+    stage: str = ""
+    state: str = ""
+    outcome: str | None = None
+
+    @property
+    def needs_recovery(self) -> bool:
+        return self.state == "needs_recovery"
+
+
+@dataclass
+class OpenFanSilentBoardEntry:
+    """``status.openfan_silent_board`` (DEC-484): an OpenFAN board on USB, with
+    the board's USB identity, whose serial device an adoption probe opened
+    without an answer. The daemon publishes it only while no controller
+    answers and no update runs."""
+
+    usb_serial: str = ""
+    #: Its physical USB port path (``8-8``).
+    usb_port: str = ""
+
+
+@dataclass
+class DaemonStatus:
+    api_version: int = 1
+    daemon_version: str = ""
+    overall_status: str = "unknown"
+    subsystems: list[SubsystemStatus] = field(default_factory=list)
+    uptime_seconds: int | None = None
+    # Daemon thermal safety override state (DEC-132) — one of
+    # `THERMAL_STATE_VALUES`. While not "normal" the daemon is
+    # forcing OpenFan + writable-hwmon PWM to protect the hardware — the engine
+    # is the sole writer since 2.0.0, so there is no GUI loop to stand down
+    # (DEC-165). Defaults to "normal" for older daemons that don't send the field.
+    thermal_state: str = "normal"
+    # Daemon-held live overrides / fan-identify holds (DEC-163/166), each with
+    # remaining TTL. Omitted from the wire when empty (daemon skips empty Vecs),
+    # so these default to []. Poll-authoritative observation surface consumed by
+    # the Controls page (display-only reconcile) and Diagnostics (DEC-169).
+    overrides: list[OverrideStatusEntry] = field(default_factory=list)
+    fan_identify: list[IdentifyStatusEntry] = field(default_factory=list)
+    # DEC-193: sensors discovered but currently unreadable (e.g. an ath12k WiFi
+    # temp while the radio is off). Omitted from the wire when empty (daemon
+    # skips empty Vecs) → defaults to []. Display-only; surfaced in Diagnostics.
+    unavailable_sensors: list[UnavailableSensor] = field(default_factory=list)
+    # 273-i: controls the daemon's engine cannot resolve, so is not commanding —
+    # e.g. a Mix naming a curve id the profile no longer has. Their fans hold
+    # their last commanded duty. Omitted from the wire when empty (daemon skips
+    # empty Vecs) and absent entirely from daemons older than 2.21.0 → defaults
+    # to []. Display-only; surfaced on the Controls page card for the control.
+    skipped_controls: list[SkippedControl] = field(default_factory=list)
+    control_outputs: list[ControlOutput] = field(default_factory=list)
+    # AIO-MB Phase 5: the current or most recent validation session, in
+    # miniature, so a live panel needs no second request. `None` when no session
+    # has ever run OR the daemon predates 2.32.0 — absence is not an error, and
+    # the two cases are deliberately indistinguishable because nothing should
+    # behave differently between them.
+    validation_session: ValidationSessionSummary | None = None
+    # DEC-194: the daemon's active profile, mirrored onto every /poll status so an
+    # external activation (CLI --profile, another client, systemd) shows within
+    # ~1 s instead of the slow /profile/active refresh. `None` (not "") when the
+    # key is ABSENT — an older daemon that never sends it, or genuinely no active
+    # profile — which is how the polling worker knows to leave the /profile/active
+    # fallback authoritative instead of clobbering it with a blank.
+    active_profile_id: str | None = None
+    active_profile_name: str | None = None
+    # `CTRL-d`: the daemon's authoritative answer to "is a profile active?",
+    # always serialised from daemon 2.45.0. Tri-state, and all three readings
+    # matter:
+    #   None  — the key is ABSENT: a daemon < 2.45.0. Unknown; leave the
+    #           /profile/active fallback authoritative (the DEC-194 behaviour).
+    #   False — authoritatively nothing is active. Clear the cached id + name;
+    #           the two fields above are absent for a REASON, not by age.
+    #   True  — the id + name above are present and current.
+    # Before this field, `active_profile_id is None` meant both of the first two,
+    # so a deactivation left a stale profile named in the sidebar and the status
+    # banner until the GUI reconnected.
+    has_active_profile: bool | None = None
+    # DEC-206: compact hardware-readiness rollup for the Dashboard health chip,
+    # mirrored onto every /poll status. `None` when the key is ABSENT (older
+    # daemon, or before the daemon's startup seed runs) → the chip is hidden.
+    readiness: ReadinessRollup | None = None
+    # DEC-321 / `WIRE-a`: set when the daemon's own runtime.toml failed to load
+    # and it fell back to built-in defaults. `None` when it loaded cleanly OR the
+    # daemon predates 2.34.0 — both read as "fine", which is the safe direction.
+    # STICKY for the daemon's lifetime: a later successful `POST /config/*`
+    # repairs the file but does not clear this, because nearly every
+    # runtime-mutable key is consumed once at startup. Only a restart clears it.
+    runtime_config_degraded: RuntimeConfigDegraded | None = None
+    # `WIRE-n` (daemon >= 2.36.0): True while a hardware verify, PWM
+    # characterisation, OpenFan calibration or validation sweep owns the
+    # daemon's engine WRITE PAUSE. The engine keeps evaluating and keeps
+    # publishing every control's duty in `control_outputs` — it simply does not
+    # write it — so without this field a Controls card shows a duty nothing is
+    # applying. Defaults False on older daemons, which is what those cards render
+    # today.
+    #
+    # NOT a safety signal, and it must never gate one. The thermal emergency's
+    # force-all runs well before the daemon's `verify_active()` gate (DEC-297),
+    # so a paused write phase does not pause the ladder — suppressing a thermal
+    # banner on this field would hide a live emergency. It qualifies the
+    # COMMANDED DUTY and nothing else.
+    verify_active: bool = False
+    # DEC-443: WHY `thermal_state` is "emergency" — tokens from
+    # `EMERGENCY_CAUSE_VALUES`, "cpu" before "coolant". Omitted when empty and
+    # absent before daemon 3.0.0 → []. An older daemon's only emergency is the
+    # CPU one, so an empty list reads as the CPU's (`cooling_watch`); a newer
+    # daemon in emergency always names at least one cause.
+    emergency_causes: list[str] = field(default_factory=list)
+    # DEC-443: pumps under the stall response, and cooling advisories. Omitted
+    # when empty and absent before daemon 3.0.0 → [] either way.
+    pump_stalls: list[PumpStall] = field(default_factory=list)
+    advisories: list[CoolingAdvisory] = field(default_factory=list)
+    # DEC-481: the OpenFan controller's connection — "connected",
+    # "unresponsive", "reconnecting", or "maintenance" while a firmware update
+    # holds it — separate from presence. `None` when no controller is adopted
+    # or the daemon predates the field. An unrecognised token is rendered, not
+    # dropped.
+    openfan_link: str | None = None
+    # DEC-481: a firmware update running, or one that left the board needing
+    # recovery. `None` otherwise, and on an older daemon. The full run is
+    # `GET /fans/openfan/maintenance`.
+    openfan_maintenance: OpenFanMaintenanceSummary | None = None
+    # DEC-484: an OpenFAN board on USB that does not answer, while no
+    # controller does and no update runs. `None` otherwise, and on an older
+    # daemon.
+    openfan_silent_board: OpenFanSilentBoardEntry | None = None
+
+
+# ---------------------------------------------------------------------------
+# Sensors and Fans
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SensorThresholds:
+    """Curated hwmon temperature-threshold sysfs attributes (DEC-117).
+
+    Mirrors the daemon's :class:`SensorThresholdsResponse`. Every field is
+    optional because driver coverage varies wildly across motherboards —
+    k10temp exposes essentially none, coretemp typically exposes
+    ``max``/``crit``, amdgpu exposes ``crit``/``emergency``, and the
+    nct6775/nct6683 families expose ``max``/``crit``/``alarm``. Alarm flags
+    are snapshotted at daemon discovery time, not refreshed every poll.
+    """
+
+    max_c: float | None = None
+    min_c: float | None = None
+    crit_c: float | None = None
+    crit_hyst_c: float | None = None
+    emergency_c: float | None = None
+    emergency_hyst_c: float | None = None
+    lcrit_c: float | None = None
+    offset_c: float | None = None
+    alarm: bool | None = None
+    max_alarm: bool | None = None
+    crit_alarm: bool | None = None
+    fault: bool | None = None
+
+    def is_empty(self) -> bool:
+        """True when no attribute was reported by the daemon.
+
+        The daemon omits the entire ``thresholds`` JSON object when no
+        attribute was readable, so an instance with this method returning
+        True normally means a malformed/partial payload — the GUI treats
+        it the same as "no thresholds" for rendering purposes.
+        """
+        return (
+            self.max_c is None
+            and self.min_c is None
+            and self.crit_c is None
+            and self.crit_hyst_c is None
+            and self.emergency_c is None
+            and self.emergency_hyst_c is None
+            and self.lcrit_c is None
+            and self.offset_c is None
+            and self.alarm is None
+            and self.max_alarm is None
+            and self.crit_alarm is None
+            and self.fault is None
+        )
+
+
+@dataclass
+class SensorReading:
+    id: str = ""
+    kind: str = ""
+    label: str = ""
+    value_c: float = 0.0
+    source: str = ""
+    age_ms: int = 0
+    rate_c_per_s: float | None = None
+    session_min_c: float | None = None
+    session_max_c: float | None = None
+    chip_name: str = ""
+    temp_type: int | None = None
+    # DEC-117: curated hwmon threshold attributes. ``None`` when the daemon
+    # predates DEC-117 or when the chip exposes no attribute of interest
+    # for this sensor.
+    thresholds: SensorThresholds | None = None
+    # DEC-193: False when this temperature must not be offered as a fan-curve
+    # source (currently wireless-radio PHY temps such as ath12k WiFi, which read
+    # ENETDOWN whenever the radio is down). The Controls page drops these from
+    # the curve sensor picker; display is unaffected. Defaults True so a
+    # pre-2.3.0 daemon that omits the field leaves every sensor selectable.
+    control_eligible: bool = True
+
+    def freshness_at(self, poll_interval_ms: int) -> Freshness:
+        """This reading's freshness at the daemon's cadence (:func:`freshness_for_age`).
+
+        Read it through ``AppState.reading_freshness`` / ``display_freshness``,
+        which know the cadence and the connection.
+        """
+        return freshness_for_age(self.age_ms, poll_interval_ms)
+
+
+@dataclass
+class FanReading:
+    id: str = ""
+    source: str = ""
+    rpm: int | None = None
+    last_commanded_pwm: int | None = None
+    # DEC-204: firmware-reported *measured* current fan duty % (NVIDIA via NVML),
+    # distinct from ``last_commanded_pwm`` (daemon-commanded) — never conflate.
+    # May exceed 100 (NVML expresses it as a % of max noise tolerance). ``None``
+    # for sources without a duty readback (openfan/hwmon/amd/intel/nouveau) and
+    # on pre-DEC-204 daemons (absent from the wire).
+    duty_pct: int | None = None
+    age_ms: int = 0
+    stall_detected: bool | None = None
+    # AIO-MB Phase 5: the hardware readback of `pwmN`, as a percent.
+    #
+    # Distinct from ``last_commanded_pwm``, which for an hwmon header carries
+    # whichever of the poll's readback and the engine's command wrote last
+    # (register row AIO5-a). Phase 5 needs the two as separate columns, and a
+    # device-side override is classified from `command low + readback low + RPM
+    # high` — neither is expressible while they share a field.
+    #
+    # hwmon only. ``None`` means "the daemon did not say" — never 0% — and is
+    # what a pre-2.32 daemon, an OpenFan channel and a GPU fan all report.
+    pwm_readback_pct: int | None = None
+    # AIO-MB Phase 6 (DEC-318, daemon >= 2.33.0): the duty the daemon last
+    # COMMANDED for an hwmon header, as a percent.
+    #
+    # The command half of the pair whose readback half is ``pwm_readback_pct``,
+    # and the field to read when the value the daemon actually chose matters.
+    # Single-producer daemon-side (only the hwmon write path sets it), unlike
+    # ``last_commanded_pwm`` — which for an hwmon header reports whichever of the
+    # poll's readback and the engine's command wrote last (AIO5-a), so for an
+    # *uncontrolled* header it is a readback despite its name.
+    #
+    # hwmon only. ``None`` means "the daemon has never commanded this header" —
+    # never 0% — and is also what a pre-2.33 daemon reports for every fan. An
+    # OpenFan channel and a GPU fan keep their own unambiguous command in
+    # ``last_commanded_pwm`` and report ``None`` here rather than duplicating it.
+    pwm_commanded_pct: int | None = None
+    # AIO-MB Phase 4: the driver's own `fanN_alarm` bit, sampled at 1 Hz.
+    # `None` means "not known" — either the driver exposes no alarm attribute,
+    # or the entry was refreshed by a PWM write without re-reading it. Never
+    # treat None as "no alarm".
+    fan_alarm: bool | None = None
+    # AIO-MB Phase 4: the LIVE `pwmN_enable` mode for an hwmon header. On the
+    # poll rather than on the header because the daemon writes this attribute
+    # when it takes a header over, so a discovery-time value would report the
+    # pre-takeover mode forever — and the field's diagnostic value is answering
+    # "is something else controlling this header *now*?". `None` = not known.
+    pwm_enable_mode: int | None = None
+    # DEC-406 (daemon >= 2.53.0, capability `control.duty_reconciliation`): how
+    # many times since the daemon started it rewrote this header's duty because
+    # something else had moved it. `None` means THIS DAEMON DOES NOT SAY — an
+    # older daemon, or a non-hwmon fan — never 0. A rise during a PWM Test
+    # Report run is evidence of a second writer.
+    duty_corrections: int | None = None
+    # DEC-406: True once three corrections in a row did not hold and the daemon
+    # stopped rewriting this header. Cleared when a readback agrees again or the
+    # command changes. `None` = not reported (older daemon / non-hwmon).
+    duty_not_holding: bool | None = None
+
+    def freshness_at(self, poll_interval_ms: int) -> Freshness:
+        """This reading's freshness at the daemon's cadence (:func:`freshness_for_age`).
+
+        Read it through ``AppState.reading_freshness`` / ``display_freshness``,
+        which know the cadence and the connection.
+        """
+        return freshness_for_age(self.age_ms, poll_interval_ms)
+
+    def requested_duty(self) -> tuple[int | None, bool]:
+        """The duty the daemon asked for, and whether it is an approximation.
+
+        Returns ``(value, approximate)``. ``approximate`` is True only where the
+        sole candidate is ``last_commanded_pwm`` — which for an *hwmon* header
+        carries whichever of the poll's readback and the engine's command wrote
+        last (register row ``AIO5-a``), so on an *uncontrolled* header nothing
+        was commanded at all and any wording saying "commanded" is false.
+
+        Lives here rather than in one view module on purpose. It began as a
+        helper inside the Hardware page's header inspector, which is why the
+        Dashboard's two derivations were still reading the ambiguous field a
+        release after DEC-318 shipped the unambiguous one (register row
+        ``WIRE-j``) — the DEC-276 lesson that a rule inside one consumer is a
+        rule the other consumers cannot follow.
+        """
+        if self.pwm_commanded_pct is not None:
+            return self.pwm_commanded_pct, False
+        if self.last_commanded_pwm is not None:
+            return self.last_commanded_pwm, True
+        return None, False
+
+
+# ---------------------------------------------------------------------------
+# Cooling-device topology (AIO-MB Phase 4, DEC-316, daemon >= 2.31.0)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DevicePolicySummary:
+    """The resolved device policy a cooling device operates under.
+
+    Read-only: these values are compiled into the daemon and selected by id.
+    The GUI displays them and never sends them — the daemon rejects a payload
+    carrying any of these keys by name.
+    """
+
+    id: str = ""
+    display_name: str = ""
+    # The policy's own declared floor. The floor a given HEADER actually gets is
+    # `HwmonHeader.effective_min_pwm_pct`, which also applies the absolute pump
+    # backstop — prefer that when showing what a specific fan will do.
+    minimum_safe_pwm_pct: int = 0
+    supports_stop: bool = False
+    startup_override_seconds: int | None = None
+    expected_rpm_min: int | None = None
+    expected_rpm_max: int | None = None
+    internal_control_possible: bool = False
+
+
+@dataclass
+class CoolingDevice:
+    """One cooling assembly: a pump, its radiator fans, and a temperature source.
+
+    Metadata. The daemon's profile engine never reads a cooling device, so this
+    changes nothing about what a fan does — it exists so the GUI can present a
+    cooler as one thing instead of re-inferring it from labels.
+    """
+
+    id: str = ""
+    name: str = ""
+    # Opaque token: "unknown" | "aio_liquid" | "air_cooler" | "custom_loop".
+    # Render an unrecognised value rather than dropping the device (273-i).
+    kind: str = "unknown"
+    pump_member: str | None = None
+    radiator_members: list[str] = field(default_factory=list)
+    auxiliary_members: list[str] = field(default_factory=list)
+    # Advisory only — a curve keeps its own `sensor_id`. Nothing in the control
+    # path reads these.
+    preferred_sensor: str | None = None
+    fallback_sensor: str | None = None
+    coolant_sensor: str | None = None
+    # "available" | "unavailable". Unavailable is the NORMAL case for a
+    # motherboard-connected AIO and is not an error or a readiness item.
+    coolant_telemetry: str = "unavailable"
+    device_policy: DevicePolicySummary = field(default_factory=DevicePolicySummary)
+
+
+@dataclass
+class CoolingDeviceInventory:
+    cooling_devices: list[CoolingDevice] = field(default_factory=list)
+    # Every policy the daemon ships, so the GUI offers the real choices rather
+    # than a hardcoded list that drifts from the binary.
+    available_policies: list[DevicePolicySummary] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Hwmon headers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PwmVerification:
+    """A header's latest conclusive PWM-control verdict (DEC-456).
+
+    Published per header on ``GET /hwmon/headers`` by a daemon advertising
+    ``control.pwm_verification_records``. ``state`` is ``"verified"`` or
+    ``"failed"`` — treat any other value as an opaque token that settles
+    nothing (273-i). The record also names how and when it was earned
+    (``method``, ``result``, ``run_id``, ``verified_unix_ms``); the GUI reads
+    only ``state`` today, so those stay unmodelled (``tests/fixtures/wire_fields.json``).
+    """
+
+    state: str = ""
+
+
+@dataclass
+class HwmonHeader:
+    id: str = ""
+    # DEC-229: never empty, and not always real. The daemon's `read_label` tries
+    # `pwmN_label`, then `fanN_label`, then *synthesises* `pwm{pwm_index}` — and
+    # the it87 driver publishes no label files for most Gigabyte boards, so the
+    # synthesised form is common. Resolve through
+    # `hwmon_label_resolver.resolve_hwmon_header_label` (or `AppState`) rather
+    # than reading this field directly; `is_placeholder_hwmon_label` is the test.
+    # Note the label is also embedded in `id` (`hwmon:<chip>:<dev>:pwmN:<label>`).
+    label: str = ""
+    # Canonical (DEC-442): on an it87 v2.0 Gigabyte chip the daemon strips the
+    # driver's board suffix, so this is `it8696`, the name embedded in `id`.
+    chip_name: str = ""
+    # DEC-442: the hwmon `name` exactly as sysfs published it (`it8696_a008090a`
+    # on an it87 v2.0 Gigabyte chip, otherwise equal to `chip_name`). Read ONLY
+    # to match `/etc/sensors.d` blocks, which upstream writes against this
+    # spelling; never compare a table or build an id from it. An older daemon
+    # omits it, so "" means "use `chip_name`".
+    sysfs_chip_name: str = ""
+    device_id: str = ""
+    pwm_index: int = 0
+    supports_enable: bool = False
+    rpm_available: bool = False
+    min_pwm_percent: int = 0
+    max_pwm_percent: int = 100
+    # Defaults False — the SAFE direction, and register row `WIRE-t`. The daemon
+    # always serialises this key (it is a plain `bool`, not an `Option`), so the
+    # default is only reachable through a malformed or truncated response; there,
+    # `True` would make a read-only header look controllable and offer it in the
+    # member-picker, which DEC-102 exists to prevent. Any construction that means
+    # "writable" must say so explicitly — including the demo seeds, which do.
+    is_writable: bool = False
+    pwm_mode: int | None = None  # 0=DC, 1=PWM, None=not exposed
+    is_aio: bool = False  # liquid-cooler header (daemon >= 1.18.0, DEC-156)
+    # DEC-311 (AIO-MB Phase 1, daemon >= 2.28.0): what this channel DRIVES.
+    # Per-channel, unlike the chip-level `is_aio` — a pump on a motherboard
+    # AIO_PUMP header is `role="pump", is_aio=False`, which is the whole point.
+    # Already has the user's `POST /config/header-role` assignment applied.
+    #
+    # Treat as an OPAQUE TOKEN: render an unrecognised value rather than
+    # dropping the header (the 273-i rule). Known values are "unknown",
+    # "cpu_fan", "pump", "radiator_fan", "chassis_fan", "no_fan" (daemon
+    # >= 3.4.0, user-assigned only); a pre-2.28.0 daemon
+    # omits the field entirely, hence the "unknown" default.
+    role: str = "unknown"
+    # How `role` was established: "none" | "label" | "chip_mapping" |
+    # "user_assigned". Lets the UI distinguish a confident classification from
+    # a guess worth asking the user about.
+    role_source: str = "none"
+
+    # ── AIO-MB Phase 4 (DEC-316, daemon >= 2.31.0) ───────────────────────────
+    # Every field below defaults to None/empty meaning "this daemon did not
+    # say", NEVER "zero". That distinction is load-bearing for
+    # `effective_min_pwm_pct` in particular: typed `int` with a 0 default, a
+    # pre-2.31 daemon (which omits the key) would make the GUI believe a 0%
+    # floor on a pump. `None` routes callers to the client-side reconstruction
+    # in `services/pump_protection.py` instead.
+    #
+    # The daemon-enforced duty floor for this header, in percent. Prefer this
+    # over re-deriving the floor from labels and chip names.
+    effective_min_pwm_pct: int | None = None
+    # Whether this header may be driven to 0 at all. False wherever the daemon's
+    # pump-protection union holds. `None` = unknown, fall back.
+    stop_permitted: bool | None = None
+    # The cooling device that claims this header, if any.
+    cooling_device_id: str | None = None
+    # ── Header capability audit (read-only driver introspection) ──
+    # PWM base frequency in Hz from `pwmN_freq`.
+    pwm_freq_hz: int | None = None
+    # NOTE: the header carries no `pwm_enable_mode`. The header's CURRENT mode is
+    # state, not a capability — the daemon writes `pwmN_enable` itself when it
+    # takes a header over — so it rides the 1 Hz poll as `FanReading.pwm_enable_mode`.
+    # `supports_enable` above is the static half: whether the attribute exists.
+    #
+    # The `pwmN_enable` values this chip's driver accepts. EMPTY MEANS UNKNOWN:
+    # nothing in sysfs reports this, so the daemon derives it from driver
+    # knowledge and has none for unrecognised chips. Never render an empty list
+    # as "no modes supported".
+    supported_pwm_enable_modes: list[int] = field(default_factory=list)
+    # Low RPM alarm threshold from `fanN_min`.
+    rpm_min_threshold: int | None = None
+    # High RPM threshold from `fanN_max`. Absent on most Super-I/O chips.
+    rpm_max_threshold: int | None = None
+    # Tach pulses per revolution from `fanN_pulses`. Absent on it87 — the
+    # validation board — so `None` is the common case, not an anomaly.
+    tach_pulses_per_rev: int | None = None
+    # DEC-456 (`control.pwm_verification_records`): the daemon's record of this
+    # header's latest conclusive PWM-control verdict. `None` = no verdict yet —
+    # never "failed". On a daemon without the capability it is always `None`,
+    # which is why a consumer gates on the capability rather than on this field
+    # (`services/pwm_verification.pwm_verification_tristate`).
+    pwm_verification: PwmVerification | None = None
+
+
+# ---------------------------------------------------------------------------
+# Write responses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GpuFanResetResult:
+    gpu_id: str = ""
+    reset: bool = False
+
+
+@dataclass
+class ProfileActivateResult:
+    """Response from POST /profile/activate."""
+
+    activated: bool = False
+    profile_id: str = ""
+    profile_name: str = ""
+
+
+@dataclass
+class OverrideGrant:
+    """Response from POST /control/{id}/override (DEC-163)."""
+
+    control_id: str = ""
+    override_token: int = 0
+    pwm_percent: int = 0
+    ttl_secs: int = 0
+    renew_secs: int = 0
+    expires_in_secs: int = 0
+
+
+@dataclass
+class OverrideRenewResult:
+    """Response from POST /control/{id}/override/renew (DEC-163)."""
+
+    control_id: str = ""
+    override_token: int = 0
+    ttl_secs: int = 0
+    expires_in_secs: int = 0
+
+
+@dataclass
+class OverrideReleaseResult:
+    """Response from DELETE /control/{id}/override (DEC-163)."""
+
+    control_id: str = ""
+    released: bool = False
+
+
+@dataclass
+class IdentifyResult:
+    """Response from POST /fans/{id}/identify (DEC-166)."""
+
+    fan_id: str = ""
+    action: str = ""
+    expires_in_secs: int | None = None
+    # DEC-311: which behaviour the DAEMON chose. The client always asks for
+    # "stop"; the daemon substitutes a safe perturbation for a pump-role header
+    # and reports back what it did. "stop" | "pump_perturb"; None on restore,
+    # and None from a pre-2.28.0 daemon (which always stops).
+    mode: str | None = None
+    # The duty the fan is held at: 0 for a stop, >= 30 for a pump perturbation.
+    identify_pwm_percent: int | None = None
+    # What it was running at beforehand, so the UI can say "60% -> 85%".
+    baseline_pwm_percent: int | None = None
+
+
+@dataclass
+class FieldViolation:
+    """One validation finding from ``error.details.field_violations`` (DEC-160).
+
+    ``severity`` is the daemon's lowercase ``"error"`` | ``"warning"`` tier
+    (DEC-160). It defaults to ``"error"`` for older daemons that omit it — a
+    violation surfaced on a 400 rejection is an error unless told otherwise.
+    """
+
+    field: str = ""
+    reason: str = ""
+    description: str = ""
+    severity: str = "error"
+
+
+@dataclass
+class ActiveProfileInfo:
+    """Response from GET /profile/active."""
+
+    active: bool = False
+    profile_id: str = ""
+    profile_name: str = ""
+
+
+@dataclass
+class ProfileDeactivateResult:
+    """Response from POST /profile/deactivate."""
+
+    deactivated: bool = False
+    previous_profile_id: str | None = None
+    previous_profile_name: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Sensor history
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CalPoint:
+    """One held duty of an OpenFan calibration walk (DEC-452).
+
+    ``phase`` is ``descent`` | ``ascent`` | ``kick``; ``observation`` is
+    ``spinning`` | ``stopped`` | ``unconfirmed`` | ``interrupted``. Both are
+    opaque tokens: render an unrecognised one (273-i). ``rpm`` is the hold's
+    last fresh reading.
+
+    The deprecated synchronous ``/calibrate`` route's result model
+    (``CalibrationResult``) was deleted with DEC-453: the GUI never called that
+    route and never will.
+    """
+
+    pwm_percent: int = 0
+    rpm: int = 0
+    phase: str = ""
+    observation: str = ""
+
+
+@dataclass
+class OpenFanCalibrationRun:
+    """An OpenFan calibration run — the ``202`` body of
+    ``POST /fans/openfan/{ch}/calibration`` and of ``GET``/``DELETE
+    /diagnostics/openfan-calibration`` (DEC-452, daemon >= 3.1.0).
+
+    ``state`` shares the characterisation vocabulary; while ``running``,
+    ``outcome``, ``abort_reason`` and ``detail`` stay ``None`` and
+    ``completed_unix_ms`` is set only by the terminal publish. Every token is
+    opaque (273-i).
+    """
+
+    run_id: str = ""
+    fan_id: str = ""
+    channel: int = 0
+    state: str = ""
+    #: ``descent`` | ``ascent`` | ``kick`` | ``restore``; ``None`` before the
+    #: first write and after the end.
+    phase: str | None = None
+    current_pct: int | None = None
+    hold_ms: int = 0
+    outcome: str | None = None
+    abort_reason: str | None = None
+    detail: str | None = None
+    #: The highest duty confirmed stopped on the way down, and the lowest
+    #: confirmed spinning on the way back up.
+    stall_duty_pct: int | None = None
+    restart_duty_pct: int | None = None
+    hysteresis_pct: int | None = None
+    #: The lowest NON-ZERO and the highest reading of any point.
+    min_rpm: int | None = None
+    max_rpm: int | None = None
+    #: A recovery kick ran and the fan was not confirmed spinning within it.
+    restart_failed_at_full: bool = False
+    start_cpu_temp_c: float | None = None
+    max_cpu_temp_c: float | None = None
+    rise_limit_c: float = 0.0
+    points: list[CalPoint] = field(default_factory=list)
+    #: ``None`` in the ``202`` (the task reads it) and when unknown.
+    original_pct: int | None = None
+    #: ``pending`` | ``restored`` | ``restored_full_speed`` | ``write_failed`` |
+    #: ``skipped_thermal_force`` | ``not_needed``.
+    restore_outcome: str = ""
+    restore_failed: bool = False
+    started_unix_ms: int = 0
+    completed_unix_ms: int | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self.state == "running"
+
+
+@dataclass
+class ProfileSearchDirsResult:
+    """Response from POST /config/profile-search-dirs.
+
+    ``search_dirs`` is the daemon's resulting list — render *that*, never a
+    locally-predicted one: an edit can be partly idempotent (removing an entry
+    that was never registered, re-adding one already present).
+    """
+
+    updated: bool = False
+    search_dirs: list[str] = field(default_factory=list)
+
+
+@dataclass
+class HistoryPoint:
+    """A single point from the daemon's sensor history ring buffer."""
+
+    ts: int = 0  # Unix timestamp in milliseconds
+    v: float = 0.0  # Value (°C, RPM, etc.)
+
+
+@dataclass
+class SensorHistory:
+    """Response from GET /sensors/history."""
+
+    entity_id: str = ""
+    points: list[HistoryPoint] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Hardware diagnostics
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HwmonChipInfo:
+    chip_name: str = ""
+    # DEC-442: the chip's hwmon `name` exactly as sysfs published it — differs
+    # from the canonical `chip_name` only on an it87 v2.0 Gigabyte chip
+    # (`it8696_a008090a`). Display and support-report only (`BRD-x`). Empty from
+    # a daemon older than DEC-442.
+    sysfs_chip_name: str = ""
+    device_id: str = ""
+    # The driver the chip NAME suggests — a guess, wrong in both directions for
+    # the nct668x family, whose two drivers share hwmon names (`BRD-g`).
+    expected_driver: str = ""
+    # DEC-469: the kernel driver actually bound, read by the daemon from the
+    # hwmon device's `device/driver` link. Absent on older daemons and where no
+    # link was read; prefer it to `expected_driver` wherever it is present.
+    bound_driver: str | None = None
+    # Chip-level by name (DEC-144), but following `bound_driver` where that
+    # contradicts the name's guess (daemon >= DEC-469).
+    in_mainline_kernel: bool = False
+    header_count: int = 0
+
+
+@dataclass
+class HwmonDiagnostics:
+    chips_detected: list[HwmonChipInfo] = field(default_factory=list)
+    total_headers: int = 0
+    writable_headers: int = 0
+    enable_revert_counts: dict[str, int] = field(default_factory=dict)
+    # DEC-360, daemon >= 2.46.0: age in ms of the most recent counted reclaim,
+    # per header. Dates the counts beside it — that map is monotonic for the
+    # life of the PWM controller and has no reset path, so the count alone
+    # cannot tell an active BIOS fight from one reclaim three weeks ago that the
+    # watchdog already remediated.
+    #
+    # An older daemon omits it, and a header counted but absent here means the
+    # age is UNKNOWN. Both must read as "not known to be old" rather than as
+    # "just now" or "ancient": guessing either way would make the GUI quieter or
+    # louder than the evidence supports, and the safe default for a missing
+    # measurement is to keep presenting what we do know.
+    enable_revert_last_seen_ms: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class GpuDiagnosticsInfo:
+    pci_bdf: str = ""
+    pci_device_id: int = 0
+    pci_revision: int = 0
+    model_name: str | None = None
+    fan_control_method: str = "none"
+    overdrive_enabled: bool = False
+    ppfeaturemask: str | None = None
+    ppfeaturemask_bit14_set: bool = False
+    zero_rpm_available: bool = False
+    # DEC-119: PMFW OD_RANGE fan-speed bounds (percent). The firmware-enforced
+    # minimum (~15% on RDNA3+) is the real reason a PMFW GPU fan cannot be
+    # driven to 0% via the curve. None for non-PMFW GPUs / older daemons.
+    fan_speed_min_pct: int | None = None
+    fan_speed_max_pct: int | None = None
+    # DEC-119: best-effort PMFW ``fan_minimum_pwm`` setting (percent). None
+    # when absent/unparseable or the daemon predates the field.
+    fan_minimum_pwm: int | None = None
+    # DEC-119: whether the amdgpu driver is bound to this GPU's PCI device.
+    # Defaults True (an hwmon node implies a bound driver) for forward-compat.
+    amdgpu_driver_bound: bool = True
+    # DEC-119: kernel-regression advisories for any AMD GPU (DEC-449), mirroring
+    # ``/capabilities.amd_gpu.kernel_warnings``. Hand-parsed in
+    # ``parse_hardware_diagnostics`` (nested dataclasses can't round-trip via
+    # ``**``). Empty when none apply or the daemon predates the field.
+    kernel_warnings: list[KernelWarning] = field(default_factory=list)
+
+
+@dataclass
+class IntelGpuDiagnosticsInfo:
+    """Intel discrete GPU diagnostics (DEC-121).
+
+    Read-only by nature — no ppfeaturemask/overdrive/PMFW/kernel-warning
+    fields. ``fan_control_note`` is a daemon-supplied, user-facing explanation
+    of why fan control is unavailable (firmware-managed).
+    """
+
+    pci_bdf: str = ""
+    pci_device_id: int = 0
+    pci_revision: int = 0
+    model_name: str | None = None
+    driver: str = ""  # "xe" or "i915"
+    fan_control_method: str = "none"
+    fan_rpm_available: bool = False
+    fan_control_note: str = ""
+
+
+@dataclass
+class NvidiaGpuDiagnosticsInfo:
+    """NVIDIA discrete GPU diagnostics (DEC-204).
+
+    Read-only by nature — no fan write path (nouveau's ``pwm1`` is excluded from
+    discovery; the NVML backend is telemetry-only). ``fan_control_note`` is a
+    daemon-supplied, user-facing explanation of why fan control is unavailable.
+    ``driver`` is the kernel module name (``"nouveau"``/``"nvidia"``). No
+    ``pci_device_id``/``pci_revision`` — the daemon has no NVIDIA device-id →
+    model table. ``model_name``/``driver_version`` are NVML-only.
+    """
+
+    pci_bdf: str = ""
+    model_name: str | None = None
+    driver: str = ""  # "nouveau" | "nvidia" (kernel module)
+    driver_version: str | None = None
+    fan_control_method: str = "none"
+    fan_rpm_available: bool = False
+    fan_control_note: str = ""
+
+
+@dataclass
+class AmdPciDeviceInfo:
+    """An AMD VGA-class PCI device and its bound driver (DEC-119).
+
+    Mirrors the daemon's ``AmdPciDeviceInfo``. Detected by scanning PCI space
+    independently of hwmon, so a GPU whose amdgpu driver failed to bind
+    (blacklist, KMS failure, vfio-pci passthrough) is still reported — that
+    case produces no hwmon node and an absent ``GpuDiagnosticsInfo``.
+    """
+
+    pci_bdf: str = ""
+    pci_device_id: int = 0
+    driver: str | None = None
+    amdgpu_bound: bool = False
+    hwmon_present: bool = False
+
+
+@dataclass
+class ThermalSafetyInfo:
+    """Thermal-emergency state and thresholds, as reported by the daemon.
+
+    The two threshold defaults are **fallbacks for a daemon that omits the
+    fields**, not a source of truth — the daemon owns these values and DEC-292
+    made it report them from one place rather than restating them. Read
+    ``emergency_threshold_c`` (the Overview/System State surfaces already do);
+    never hardcode the number beside it, or the GUI becomes a sixth copy of a
+    threshold that has just been reduced to one.
+    """
+
+    state: str = "normal"
+    cpu_sensor_found: bool = False
+    # DEC-308: PER-MACHINE, not a constant. The daemon derives the trip point
+    # from the CPU's own reported design ceiling and reports what it actually
+    # acted on, so this default is only what a daemon that reports nothing
+    # implies — it is the daemon's floor, never an upper bound. Render the
+    # reported value; do not compare it to a literal.
+    emergency_threshold_c: float = 105.0
+    release_threshold_c: float = 80.0
+    # DEC-443: the coolant emergency's limit and release point, as the engine
+    # acted on them. `None` on a daemon before 3.0.0, which has no coolant rung.
+    coolant_limit_c: float | None = None
+    coolant_release_c: float | None = None
+
+
+@dataclass
+class KernelModuleInfo:
+    name: str = ""
+    loaded: bool = False
+    in_mainline: bool = False
+    # DEC-405 (daemon >= 2.52.0). `/sys/module/<name>/version` — present only for
+    # a loaded module built with MODULE_VERSION, so `None` is common and means
+    # "not published", never "unknown version".
+    version: str | None = None
+    # DEC-405. The module source checksum: tells two builds of one version apart
+    # (a DKMS rebuild, a kernel update). `None` when not loaded or not published.
+    srcversion: str | None = None
+    # DEC-405. The kernel's `O` taint on the loaded module (built outside the
+    # kernel tree). `None` when not loaded or unreadable — never a guessed False.
+    out_of_tree: bool | None = None
+
+
+@dataclass
+class AcpiConflictInfo:
+    io_range: str = ""
+    claimed_by: str = ""
+    conflicts_with_driver: str = ""
+
+
+@dataclass
+class ModuleCollisionInfo:
+    """Pair of loaded driver modules that race for the same chip (DEC-105).
+
+    Distinct from `AcpiConflictInfo` (about I/O port ranges) and the
+    GUI-side `CONFLICTING_MODULE_SETS` (pairs the daemon does not check;
+    the daemon owns this field's pair, DC-cm). When the daemon reports a
+    collision the GUI renders a critical condition whose remediation tells the
+    user to deactivate the active profile until the load ordering is resolved
+    — the daemon refuses no writes (DEC-433).
+    """
+
+    module_a: str = ""
+    module_b: str = ""
+    # `severity` defaults to "info" deliberately — the conservative
+    # direction. The daemon always serializes the field on every entry it
+    # emits (no `skip_serializing_if`), so the default only applies when a
+    # malformed entry is missing the field. In that case we never want to
+    # misclassify a lower-severity future entry as CRITICAL. Mirrors the
+    # `KernelWarning.severity` default convention.
+    severity: str = "info"
+    summary: str = ""
+    remediation: str = ""
+
+
+@dataclass
+class BoardInfo:
+    vendor: str = ""
+    name: str = ""
+    bios_version: str = ""
+    # DEC-405 (daemon >= 2.52.0). DMI `bios_date` as the firmware reports it
+    # (commonly MM/DD/YYYY), passed through unparsed. `None` when absent — unlike
+    # the three fields above, which predate the rule and read "".
+    bios_date: str | None = None
+
+
+@dataclass
+class HwmonVerifyState:
+    pwm_enable: int | None = None
+    pwm_raw: int | None = None
+    pwm_percent: int | None = None
+    rpm: int | None = None
+
+
+@dataclass
+class HwmonVerifyResult:
+    header_id: str = ""
+    result: str = ""
+    initial_state: HwmonVerifyState = field(default_factory=HwmonVerifyState)
+    final_state: HwmonVerifyState = field(default_factory=HwmonVerifyState)
+    test_pwm_percent: int = 0
+    wait_seconds: int = 0
+    details: str = ""
+    # True if the daemon's post-verify restore-to-original-PWM failed. The
+    # daemon serializes this only when true (skip_serializing_if), so older
+    # daemons that lack the field appear here as the default ``False``.
+    restore_failed: bool = False
+
+
+@dataclass
+class GpuVerifyState:
+    """Snapshot of GPU fan state during a verify (DEC-120). Fields are
+    path-dependent: ``zero_rpm_enabled`` is set on the PMFW path,
+    ``pwm_enable`` on the legacy ``pwm1`` path. ``applied_speed_pct`` is the
+    read-back commanded speed (flat curve value for PMFW, ``pwm1`` percent for
+    legacy)."""
+
+    applied_speed_pct: int | None = None
+    rpm: int | None = None
+    pwm_enable: int | None = None
+    zero_rpm_enabled: bool | None = None
+
+
+@dataclass
+class GpuVerifyResult:
+    """Result of ``POST /gpu/{gpu_id}/fan/verify`` (DEC-120). ``result`` is one
+    of: ``effective``, ``curve_not_applied``, ``no_rpm_effect``,
+    ``zero_rpm_suppressed``, ``rpm_unavailable``, ``write_failed``, or
+    ``pwm_enable_reverted`` (legacy path)."""
+
+    gpu_id: str = ""
+    result: str = ""
+    initial_state: GpuVerifyState = field(default_factory=GpuVerifyState)
+    final_state: GpuVerifyState = field(default_factory=GpuVerifyState)
+    test_speed_pct: int = 0
+    wait_seconds: int = 0
+    fan_control_method: str = ""
+    details: str = ""
+    restore_failed: bool = False
+
+
+@dataclass
+class BoardFirmwareCounts:
+    """What the board's **firmware** declares it has (``X87-d``, daemon >= 2.36.0).
+
+    Decoded by the daemon from the Gigabyte SIV descriptor the ``it87`` driver
+    exports. Distinct in kind from :attr:`HardwareDiagnosticsResult.expected_chips`,
+    which is a curated DMI lookup and therefore an *inference*: this is a
+    measurement from the board, so the deficit is a statement of fact rather than
+    something derived from a hard-coded table.
+
+    It counts headers; it does not name chips. The DMI table stays authoritative
+    for *which* chip should be carrying them.
+
+    Compare :attr:`fan_count` against ``hwmon.total_headers`` — total *discovered*
+    headers, not writable ones: a BIOS-owned read-only header is discovered, and
+    counting it as missing reports a phantom deficit on a working board.
+
+    **Then say what you counted.** ``total_headers`` is ``pwmN``-capable headers
+    only; monitor-only tachometers (a ``fanN_input`` with no matching ``pwmN``)
+    are a **disjoint** set that lives on ``GET /inventory/hwmon``, which the
+    diagnostics path does not fetch. So the difference is "headers with no
+    controllable PWM", never "unreachable headers" — on a board with tach-only
+    headers on a *detected* chip the latter overstates the deficit by exactly
+    those headers. ``ui/hwmon_guidance.dual_chip_warning_html`` phrases it as
+    "N expose a controllable fan header" for that reason.
+    """
+
+    #: Platform id, bits 31:28. Non-zero for a valid descriptor.
+    platform: int = 0
+    #: Vendor "special" nibble, bits 27:24. No public decode; carried verbatim.
+    special: int = 0
+    #: Fan/pump headers the board declares.
+    fan_count: int = 0
+    #: Temperature channels the board declares.
+    temp_count: int = 0
+    #: Voltage rails the board declares.
+    volt_count: int = 0
+
+
+@dataclass
+class VoltageRail:
+    """One board voltage rail — an hwmon ``inN_input`` channel (``WIRE-ag``,
+    daemon >= 2.37.0).
+
+    **Display-only, and never a curve source.** Voltages are deliberately not
+    ``SensorReading`` objects: that type is temperature-shaped (``value_c``,
+    ``temp_type``, ``thresholds``) and feeds curve binding and the thermal
+    path, so a volt in it would be a lie in a field those consumers trust.
+
+    Read :attr:`identified` before presenting :attr:`value_v` as a named rail.
+    Boards feed rails through resistor dividers the driver knows nothing about,
+    so on an unidentified channel ``value_v`` is a genuine measurement of the
+    chip's input pin and is *not* evidence of what any named rail is doing.
+    """
+
+    id: str = ""
+    chip_name: str = ""
+    channel: int = 0
+    #: ``inN_label`` where the driver published one, else ``in{N}``.
+    label: str = ""
+    #: Volts at the chip's input pin. See :attr:`identified`.
+    value_v: float = 0.0
+    #: True when the driver published a label for this channel.
+    #:
+    #: Defaults ``False`` — the safe direction. An older daemon sends no rails
+    #: at all, but a malformed entry that omitted the flag would otherwise be
+    #: rendered as an identified rail, which is the one claim this field exists
+    #: to withhold.
+    identified: bool = False
+    #: The rail this input is wired to on this board, from the daemon's board
+    #: voltage catalogue (``VOLT-b``, DEC-464, daemon >= 3.3.0); ``""`` when the
+    #: catalogue says nothing or the daemon predates it. Never set alongside
+    #: :attr:`identified` — the driver's own label wins.
+    board_label: str = ""
+    #: The board's divider ratio: the rail voltage is ``value_v *
+    #: board_multiplier``. ``None`` exactly when :attr:`board_label` is empty —
+    #: the parser drops a name that arrives without a usable multiplier, since a
+    #: named rail showing the unscaled pin voltage would be the very lie
+    #: :attr:`identified` exists to prevent.
+    board_multiplier: float | None = None
+    #: True when the board's config does not map this input (upstream ``ignore
+    #: inN``). Not a named rail, and :attr:`value_v` is its pin reading — but not
+    #: known to be unconnected either: the X299 configs ignore an input for one
+    #: CPU family that they label ``DRAM CH(A/B)`` for the other (DEC-464).
+    board_unmapped: bool = False
+
+
+@dataclass
+class HardwareDiagnosticsResult:
+    api_version: int = 1
+    hwmon: HwmonDiagnostics = field(default_factory=HwmonDiagnostics)
+    gpu: GpuDiagnosticsInfo | None = None
+    # DEC-121: Intel discrete GPU diagnostics. None when no Intel GPU present
+    # or the daemon predates the field.
+    intel_gpu: IntelGpuDiagnosticsInfo | None = None
+    # DEC-204: NVIDIA discrete GPU diagnostics. None when no NVIDIA GPU present
+    # or the daemon predates the field.
+    nvidia_gpu: NvidiaGpuDiagnosticsInfo | None = None
+    thermal_safety: ThermalSafetyInfo = field(default_factory=ThermalSafetyInfo)
+    kernel_modules: list[KernelModuleInfo] = field(default_factory=list)
+    acpi_conflicts: list[AcpiConflictInfo] = field(default_factory=list)
+    board: BoardInfo = field(default_factory=BoardInfo)
+    # DEC-405 (daemon >= 2.52.0): the running kernel's release as the DAEMON read
+    # it (`/proc/sys/kernel/osrelease`) — the fact that separates a kernel update
+    # from a hardware change when two PWM Test Reports differ. `None` when
+    # unreadable or from an older daemon.
+    kernel_release: str | None = None
+    # DEC-101: chip names this DMI board is expected to expose, sourced
+    # from the daemon's curated dual-chip board table. Empty when the
+    # board is unknown or the daemon predates DEC-101 (the field is
+    # `skip_serializing_if = "Vec::is_empty"` on the wire). The
+    # diagnostics page compares this against `hwmon.chips_detected[]
+    # .chip_name` to render a missing-chip warning banner with the
+    # dual-chip remediation steps (driver update first; `mmio=on`
+    # modprobe.d line on pre-2026-03 builds — DEC-144).
+    expected_chips: list[str] = field(default_factory=list)
+    # `BRD-j` (daemon >= 3.7.0): the chips in `expected_chips` that carry no fan
+    # header on this board, from the same curated row. Empty for an unknown
+    # board, a chip that carries fans or is not known not to, and an older
+    # daemon — all of which keep the dual-chip alert's "missing PWM headers"
+    # wording. Never read as "fanless" by absence.
+    expected_fanless_chips: list[str] = field(default_factory=list)
+    # `X87-d` (daemon >= 2.36.0): the board's own firmware-declared counts, where
+    # the driver publishes them. `None` on every non-Gigabyte board, when `it87`
+    # is not loaded, when the descriptor does not decode, and on older daemons.
+    #
+    # `None` rather than a zeroed instance, deliberately: a `fan_count` of 0
+    # would read as "this board has no fan headers", a far stronger claim than
+    # "the firmware did not say", and the whole value of this field is that it is
+    # a measurement rather than an inference.
+    board_firmware_counts: BoardFirmwareCounts | None = None
+    # DEC-101: best-effort kernel-level chip detection (parsed from
+    # /dev/kmsg by the daemon). Empty in the shipped deployment (DEC-421):
+    # the packaged unit sets ProtectKernelLogs=true, which denies /dev/kmsg.
+    # Also empty when nothing matched. Useful for surfacing the
+    # "kernel found chip but driver did not bind" diagnostic; not
+    # authoritative for "what works".
+    kernel_detected_chips: list[str] = field(default_factory=list)
+    # DEC-105: simultaneous-load collisions detected by the daemon. Empty
+    # when the daemon predates DEC-105 (skip_serializing_if = "Vec::is_empty"
+    # on the wire). When present, the GUI renders a critical condition telling
+    # the user to deactivate the active profile until it is resolved (DEC-433).
+    module_collisions: list[ModuleCollisionInfo] = field(default_factory=list)
+    # DEC-110: CPU vendor string from `/proc/cpuinfo` vendor_id, normalised
+    # by the daemon to ``"Intel"`` / ``"AMD"`` / ``""`` (empty when unknown
+    # or the daemon predates DEC-110; `skip_serializing_if = "String::is_empty"`
+    # on the wire). Used by the diagnostics page to scope platform-specific
+    # vendor quirks (e.g. MSI Z890 vs MSI X870E) without inferring platform
+    # from board name.
+    cpu_vendor: str = ""
+    # DEC-119: AMD VGA-class PCI devices and their driver binding, detected
+    # independently of hwmon. Lets the diagnostics page distinguish "no AMD
+    # GPU" from "AMD GPU present but amdgpu not bound". Empty when no AMD VGA
+    # device exists or the daemon predates the field.
+    amd_pci_devices: list[AmdPciDeviceInfo] = field(default_factory=list)
+    # DEC-119: whether the amdgpu kernel module is loaded. Paired with
+    # amd_pci_devices to distinguish a blacklisted module from a bind failure.
+    amdgpu_module_loaded: bool = False
+    # `WIRE-ag` (daemon >= 2.37.0): board voltage rails from hwmon `inN_input`.
+    # Empty on older daemons and on boards whose chips expose no ADC channel —
+    # the daemon omits the key entirely rather than sending `[]`.
+    voltages: list[VoltageRail] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Hwmon inventory + readiness (Phase 4 — DEC-200)
+#
+# Daemon-authoritative, additive: GET /inventory/hwmon and /inventory/readiness.
+# Distinct from the GUI-authored ``readiness_report`` (derived from
+# /diagnostics/hardware) — these are the daemon's own structured views.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class InventoryTempSensor(SensorReading):
+    """A temperature sensor from ``GET /inventory/hwmon`` ``temp_sensors``.
+
+    The daemon's ``InventoryTempSensor`` is a ``#[serde(flatten)]`` over
+    ``SensorEntry`` plus three classification keys, so on the wire each object
+    carries the *whole* sensor — thresholds, ``temp_type``, ``age_ms`` and the
+    session min/max included — alongside the refinement. Subclassing
+    ``SensorReading`` mirrors that flatten exactly, which is the point: this
+    class previously redeclared a hand-picked ten of the sixteen keys and
+    quietly lost six of them, so the same sensor carried thresholds on
+    ``/sensors`` and none here (register row ``WIRE-h``). Inheriting means a
+    field added to ``SensorReading`` cannot go missing here again.
+
+    The classification is **advisory** — it refines the coarse ``kind`` and
+    never contradicts it, and the daemon's thermal safety is unaffected.
+    """
+
+    classification: str = ""  # cpu_tctl / cpu_package / vrm_temp / motherboard_temp / ...
+    confidence: str = ""  # high | medium | low | unknown
+    rationale: str = ""
+
+
+@dataclass
+class DefaultCpuSensor:
+    """The daemon's default-CPU recommendation from GET /inventory/hwmon.
+
+    ``source`` is ``"user"`` when it echoes the persisted preferred CPU sensor,
+    else ``"auto"`` for the deterministic auto-pick.
+    """
+
+    sensor_id: str = ""
+    confidence: str = ""
+    rationale: str = ""
+    source: str = "auto"
+
+
+@dataclass
+class InventoryPreferences:
+    """The user's persisted preferred sensors, echoed on GET /inventory/hwmon.
+
+    Each id may be stale (check the sensor list / readiness items).
+    """
+
+    cpu_sensor_id: str | None = None
+    mb_sensor_id: str | None = None
+
+
+# ``GET /inventory/hwmon`` ``pwm_controls`` is ``Vec<PwmHeaderEntry>`` — the
+# *same* daemon struct ``GET /hwmon/headers`` returns, which ``docs/08`` states
+# plainly ("same shape as /hwmon/headers"). It is therefore an alias, not a
+# mirror.
+#
+# It used to be a second dataclass whose docstring claimed to mirror
+# ``responses.rs::PwmHeaderEntry`` "field-for-field; CONTR-1, 2026-07-21 audit".
+# DEC-316 then added eight fields to that struct and updated ``HwmonHeader``
+# only, so the claim went stale and the copy silently dropped
+# ``effective_min_pwm_pct`` and ``stop_permitted`` among others — a safety floor
+# and a stop permission — while reading as authoritative (register rows
+# ``WIRE-h`` / ``WIRE-i``). The two also defaulted ``is_writable`` opposite ways
+# in the same module (``WIRE-t``). One name for one wire struct removes all
+# three failure modes by construction rather than by vigilance.
+InventoryPwmControl = HwmonHeader
+
+
+@dataclass
+class InventoryFanInput:
+    """One monitor-only fan line from GET /inventory/hwmon
+    ``monitor_only_fans`` (daemon ``FanInputEntry``): a ``fanN_input``
+    tachometer with no matching ``pwmN`` — visible, never controllable."""
+
+    id: str = ""
+    source: str = "hwmon"
+    chip_name: str = ""
+    label: str = ""
+    fan_index: int = 0
+
+
+@dataclass
+class HwmonInventory:
+    """Response from GET /inventory/hwmon: classified temp sensors, the
+    controllable PWM headers, monitor-only fan tachometers, the default-CPU
+    recommendation, and persisted sensor preferences."""
+
+    api_version: int = 1
+    temp_sensors: list[InventoryTempSensor] = field(default_factory=list)
+    pwm_controls: list[InventoryPwmControl] = field(default_factory=list)
+    # The daemon omits the key when empty (additive) → default [].
+    monitor_only_fans: list[InventoryFanInput] = field(default_factory=list)
+    default_cpu: DefaultCpuSensor | None = None
+    preferences: InventoryPreferences | None = None
+
+
+@dataclass
+class ReadinessItem:
+    """One structured readiness finding from GET /inventory/readiness."""
+
+    code: str = ""
+    # Conservative default: an entry missing its severity is treated as ``info``
+    # (never falsely "ok"/healthy nor over-alarming as "critical"). Mirrors the
+    # ``ModuleCollisionInfo.severity`` convention.
+    severity: str = "info"  # ok | info | warning | critical
+    component: str = ""  # cpu | pwm | hwmon | sensor
+    summary: str = ""
+    detail: str = ""
+    recommended_action: str = ""
+    can_automate: bool = False
+    blocks_monitoring: bool = False
+    blocks_control: bool = False
+    affects_safety: bool = False
+    reboot_may_be_required: bool = False
+
+
+@dataclass
+class InventoryReadiness:
+    """Response from GET /inventory/readiness — the daemon's structured,
+    read-only hardware-readiness list plus an ``overall`` rollup severity."""
+
+    api_version: int = 1
+    overall: str = "ok"  # ok | info | warning | critical
+    items: list[ReadinessItem] = field(default_factory=list)
+
+
+@dataclass
+class PreferredSensorResult:
+    """Response from POST /config/preferred-{cpu,mb}-sensor."""
+
+    updated: bool = False
+    role: str = ""  # "cpu" | "mb"
+    preferred_sensor: str | None = None
+
+
+@dataclass
+class OpenFanRole:
+    """One channel of ``GET /fans/openfan/roles`` (`ROLE-f`, DEC-475).
+
+    ``role`` is the DISPLAY role (the user's assignment, else ``"unknown"``) and
+    an opaque token (273-i). ``stop_permitted`` is the daemon's pump-protection
+    union — the safety answer; read it, never ``role == "pump"`` (DEC-312).
+    ``None`` means "not reported", never "stoppable".
+    """
+
+    fan_id: str = ""
+    channel: int = 0
+    role: str = "unknown"
+    role_source: str = "none"
+    stop_permitted: bool | None = None
+    effective_min_pwm_pct: int | None = None
+
+    @property
+    def id(self) -> str:
+        """The role write's key, as ``HwmonHeader.id`` is for a header."""
+        return self.fan_id
+
+
+@dataclass
+class HeaderRoleResult:
+    """Response from POST /config/header-role (DEC-311/312).
+
+    role echoes the assignment and is None after a clear; effective_role
+    is what the daemon actually resolved, which is NOT the same thing — a cleared
+    header falls back to the daemon's own inference, and an assignment on a header
+    whose label already says "pump" resolves to the assignment. Read
+    effective_role to confirm what happened; role only says what was stored.
+
+    effective_role is an OPAQUE TOKEN (the 273-i rule): render an unrecognised
+    value rather than dropping it, and never grant it pump semantics.
+    """
+
+    updated: bool = False
+    header_id: str = ""
+    role: str | None = None
+    effective_role: str = "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Daemon configuration (DEC-243) — GET /config + the extended POST /config/*
+#
+# The daemon is authoritative for every value here. Before this endpoint the
+# writable knobs were write-only, so the GUI kept a local mirror and pushed it on
+# save: a fresh GUI against a daemon set to 10 s displayed 0 s. `value` is what
+# the files say (what a restart would give); `running_value` is what the daemon
+# process actually started with. Never conflate them — `restart_pending` is the
+# daemon's own verdict and must not be re-derived GUI-side.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DaemonConfigKey:
+    """One configuration key as reported by GET /config."""
+
+    key: str = ""
+    value: object = None
+    running_value: object = None
+    source: str = "default"  # "runtime" | "admin" | "default"
+    mutable: bool = False
+    requires_restart: bool = False
+    restart_pending: bool = False
+    # Set when a config write alone cannot enable the feature — currently the two
+    # [detection] opt-ins, each of which also needs a root systemd drop-in. The
+    # UI must not present such a key as "on" merely because the flag is set.
+    requires_privilege: str | None = None
+
+    @property
+    def running_display(self) -> str:
+        """Human-readable rendering of what the daemon is actually running.
+
+        ``running_value`` is always sent by the daemon and ``None`` means the key
+        is genuinely unset (only ``serial.port`` can be null today). It must NOT
+        fall back to ``value`` on ``None`` — that is precisely the bug this
+        replaced, where a null running value read as "same as the file" and the
+        card claimed the daemon was running a port it had never been given.
+        """
+        return "not set" if self.running_value is None else str(self.running_value)
+
+
+@dataclass
+class DaemonConfig:
+    """Response from GET /config."""
+
+    api_version: int = 0
+    admin_config_path: str = ""
+    runtime_config_path: str = ""
+    restart_pending: bool = False
+    keys: list[DaemonConfigKey] = field(default_factory=list)
+
+    def get(self, key: str) -> DaemonConfigKey | None:
+        for k in self.keys:
+            if k.key == key:
+                return k
+        return None
+
+
+@dataclass
+class ConfigWriteResult:
+    """Response from the DEC-243 POST /config/* routes."""
+
+    updated: bool = False
+    key: str = ""
+    value: object = None
+    note: str = ""
+    requires_privilege: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Super-I/O detection (Phase 3 — DEC-202)
+#
+# Daemon-authoritative, additive, read-only: GET /inventory/superio. The daemon
+# owns every string here (chip names, recommendations, caveats), so the view
+# renders them as PlainText — never markup.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SuperIoRecommendation:
+    """A "load this driver" recommendation for an unbound Super-I/O chip."""
+
+    module: str = ""
+    in_mainline: bool = False
+    load_hint: str = ""
+    reason: str = ""
+    risk_notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SuperIoChip:
+    """One detected Super-I/O chip from GET /inventory/superio."""
+
+    chip_name: str = ""
+    vendor: str = ""  # ite|nuvoton|winbond|smsc|national|fintek|unknown
+    evidence: list[str] = field(
+        default_factory=list
+    )  # dmi_board_table|kernel_log|bound_hwmon|port_probe (opaque; DEC-203 added port_probe)
+    confidence: str = ""  # high|medium|low|unknown
+    bound_driver: str | None = None
+    expected_module: str = ""
+    module_loaded: bool = False
+    hwmon_present: bool = False
+    recommendation: SuperIoRecommendation | None = None
+    caveats: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SuperIoReport:
+    """Response from GET /inventory/superio — passive Super-I/O detection.
+
+    ``arch_supported`` is False on non-x86 daemons (with an empty ``chips``).
+    Read-only: detection proves a chip is present, never that fan control works.
+    """
+
+    api_version: int = 1
+    arch_supported: bool = True
+    chips: list[SuperIoChip] = field(default_factory=list)
+    acpi_conflict_drivers: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    # DEC-203: whether the opt-in active /dev/port probe can run right now, and
+    # (when it can't) why. Default False/"" so an older daemon degrades safely.
+    port_probe_available: bool = False
+    port_probe_reason: str = ""
+
+
+@dataclass
+class HardwareReadiness:
+    """Response from GET /inventory/hardware-readiness (DEC-207) — the combined
+    readiness + Super-I/O snapshot the merged "Cooling Hardware Readiness" page
+    fetches in ONE atomic request, all from a single shared daemon scan.
+
+    Every field defaults so a pre-field daemon (or a malformed response) degrades
+    safely. Daemon-authored strings (readiness items + Super-I/O) render as
+    PlainText; only GUI-authored guidance is trusted rich text.
+    """
+
+    api_version: int = 1
+    overall: str = "ok"  # ok | info | warning | critical
+    rollup: ReadinessRollup = field(default_factory=ReadinessRollup)
+    items: list[ReadinessItem] = field(default_factory=list)
+    superio: SuperIoReport = field(default_factory=SuperIoReport)
+    scanned_age_ms: int = 0
+    generation: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Parsing helpers
+# ---------------------------------------------------------------------------
+
+
+#: Wire keys the GUI uses as an *identity* — hashed into a dict, or compared for
+#: equality against a card/control id. Every one of them is declared ``str`` on
+#: every dataclass that carries it, so this set is the runtime half of a
+#: declaration the type annotations already make.
+_ID_KEYS = frozenset(
+    {"id", "control_id", "fan_id", "member_id", "curve_id", "sensor_id", "profile_id"}
+)
+
+#: Wire keys the GUI formats as a number. `output_pct` reaches an
+#: ``f"{v:.0f}%"`` in `ControlCard.set_output`, which raises on a str or a list.
+_FLOAT_KEYS = frozenset({"output_pct"})
+
+
+def _filter_fields(cls: type, data: dict) -> dict:
+    """Filter a dict to only keys that match dataclass field names, and coerce
+    identity fields to ``str``.
+
+    Filtering prevents TypeError from ``**`` unpacking when the daemon sends new
+    fields that the GUI's dataclass doesn't know about yet (forward
+    compatibility).
+
+    **The coercion is register row 277-h, decided once here rather than per
+    site.** The GUI hashes daemon-supplied ids in about half a dozen places
+    (``skipped_controls``, ``overrides``, ``fan_identify``, ``unavailable_sensors``,
+    ``services/session_stats.py``); a non-string id — ``"control_id": []`` — makes
+    ``{e.control_id: ...}`` raise ``TypeError: unhashable type`` inside a slot on
+    the 1 Hz poll path. 273-i patched exactly one of those comprehensions with an
+    ``isinstance`` guard, which closed one door of N and made the asymmetry *read*
+    as deliberate.
+
+    Coercing rather than dropping is the deliberate choice: a malformed id
+    becomes a string that cannot match any real control, so the entry is ignored
+    and the surface degrades quietly, where dropping the key would substitute the
+    dataclass default (``""``) and could collide with a genuinely empty id.
+
+    Unreachable against the shipping daemon — those fields are Rust ``String`` on
+    ``#[derive(Serialize)]``, so serde cannot emit anything else — and the blast
+    radius was overstated in an earlier comment: measured on PySide6 6.11.1, an
+    exception in a slot does **not** escape ``emit()``. This is about not leaving
+    a trap that reads as intentional, not about a live crash.
+    """
+    known = {f.name for f in fields(cls)}
+    return {k: _coerce_wire_value(k, v) for k, v in data.items() if k in known}
+
+
+def _coerce_wire_value(key: str, value: object) -> object:
+    """Normalise one wire field to the type its dataclass declares.
+
+    Identity fields become ``str``; ``output_pct`` becomes ``float``. Both are a
+    runtime restatement of the annotations already on those dataclasses, and both
+    exist because the value flows somewhere that a wrong type breaks: an id into a
+    dict key, ``output_pct`` into an ``f"{v:.0f}%"`` format.
+
+    Covering `output_pct` alongside the ids is the point. Coercing one and not the
+    other — on the *same new dataclass* — would recreate exactly the per-field
+    asymmetry 277-h existed to remove, where a guard on one comprehension made the
+    absence of a guard on its sibling read as deliberate.
+
+    A value that cannot be coerced is left alone rather than defaulted: the
+    dataclass default would be a plausible-looking number, where the original
+    keeps the fault visible at the point it is used.
+    """
+    if key in _ID_KEYS and not isinstance(value, str):
+        return str(value)
+    if key in _FLOAT_KEYS and not isinstance(value, float):
+        # `bool` is deliberately excluded. It is an `int` subclass, so `float(True)`
+        # is a perfectly ordinary 1.0 — which would silently turn a malformed
+        # `"output_pct": true` into a card confidently reporting 1%. Left as a
+        # bool, it fails the numeric check at the parse site and the entry is
+        # dropped, so it reads as "no value" instead.
+        if isinstance(value, bool):
+            return value
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _coalesce_pci_bdf(raw: dict) -> dict:
+    """Accept both ``pci_id`` and ``pci_bdf`` input keys on the same payload.
+
+    The daemon historically emitted ``pci_id`` in ``/capabilities`` and
+    ``pci_bdf`` in ``/diagnostics/hardware`` despite both fields carrying the
+    same PCI BDF address. Daemon is transitioning to emit both names on both
+    endpoints with the legacy name deprecated (M11). Normalising here lets
+    GUI code use either dataclass field indiscriminately during the
+    transition.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    result = dict(raw)
+    if "pci_bdf" in result and "pci_id" not in result:
+        result["pci_id"] = result["pci_bdf"]
+    elif "pci_id" in result and "pci_bdf" not in result:
+        result["pci_bdf"] = result["pci_id"]
+    return result
+
+
+def _parse_limits(raw: object) -> Limits:
+    """``/capabilities`` ``limits``. A temperature that is not a number is "did
+    not say" (``None``), never a figure the consent text would then promise."""
+    limits = Limits(**_filter_fields(Limits, raw if isinstance(raw, dict) else {}))
+    temp = limits.diagnostic_max_temp_c
+    limits.diagnostic_max_temp_c = (
+        float(temp) if isinstance(temp, (int, float)) and not isinstance(temp, bool) else None
+    )
+    return limits
+
+
+def parse_capabilities(data: dict) -> Capabilities:
+    # `or {}`, not just a `{}` default: `data.get(k, {})` returns None for an
+    # explicit JSON `null`, and every `_filter_fields` call below would then
+    # raise AttributeError on `.items()` and take the whole capabilities parse
+    # with it (register row `WIRE-aa`). Not reachable against the shipping
+    # daemon — both are non-Option Rust structs — but `diagnostics_workers.py`
+    # documents having been bitten by exactly this class of null before, and a
+    # capabilities parse is the startup gate for every control feature.
+    devices = data.get("devices") or {}
+    features = data.get("features") or {}
+
+    # DEC-098: kernel_warnings is a list of dicts on the wire; the
+    # `_filter_fields` helper would drop it if it landed here as a list of
+    # dicts (the dataclass-from-kwargs pattern can't construct nested
+    # dataclasses). Hand-parse it so each entry becomes a `KernelWarning`.
+    amd_gpu_raw = _coalesce_pci_bdf(devices.get("amd_gpu", {}))
+    kernel_warnings_raw = amd_gpu_raw.pop("kernel_warnings", []) or []
+    kernel_warnings = [
+        KernelWarning(**_filter_fields(KernelWarning, kw))
+        for kw in kernel_warnings_raw
+        if isinstance(kw, dict)
+    ]
+    amd_gpu = AmdGpuCapability(**_filter_fields(AmdGpuCapability, amd_gpu_raw))
+    amd_gpu.kernel_warnings = kernel_warnings
+
+    # `GPU-b`: one entry per AMD GPU. Absent on an older daemon → None, so the
+    # lookup falls back to the primary card alone. The advisories live on
+    # `amd_gpu`; any an entry carries are dropped with its nested list.
+    amd_gpus_raw = devices.get("amd_gpus")
+    amd_gpus: list[AmdGpuCapability] | None = None
+    if isinstance(amd_gpus_raw, list):
+        amd_gpus = []
+        for entry in amd_gpus_raw:
+            if not isinstance(entry, dict):
+                continue
+            entry_raw = _coalesce_pci_bdf(entry)
+            entry_raw.pop("kernel_warnings", None)
+            amd_gpus.append(AmdGpuCapability(**_filter_fields(AmdGpuCapability, entry_raw)))
+
+    # DEC-121: Intel discrete GPU — additive, read-only. No nested lists to
+    # hand-parse; `_coalesce_pci_bdf` normalises pci_bdf↔pci_id like amd_gpu.
+    intel_gpu = IntelGpuCapability(
+        **_filter_fields(IntelGpuCapability, _coalesce_pci_bdf(devices.get("intel_gpu", {})))
+    )
+    # DEC-204: NVIDIA discrete GPU capability (additive, read-only). Same
+    # tolerance as intel_gpu — absent key / old daemon → present=False.
+    nvidia_gpu = NvidiaGpuCapability(
+        **_filter_fields(NvidiaGpuCapability, _coalesce_pci_bdf(devices.get("nvidia_gpu", {})))
+    )
+
+    return Capabilities(
+        api_version=data.get("api_version", 1),
+        daemon_version=data.get("daemon_version", ""),
+        ipc_transport=data.get("ipc_transport", ""),
+        openfan=OpenfanCapability(**_filter_fields(OpenfanCapability, devices.get("openfan", {}))),
+        hwmon=HwmonCapability(**_filter_fields(HwmonCapability, devices.get("hwmon", {}))),
+        amd_gpu=amd_gpu,
+        amd_gpus=amd_gpus,
+        intel_gpu=intel_gpu,
+        nvidia_gpu=nvidia_gpu,
+        aio_hwmon=AioHwmonCapability(
+            **_filter_fields(AioHwmonCapability, devices.get("aio_hwmon", {}))
+        ),
+        aio_usb=UnsupportedCapability(
+            **_filter_fields(UnsupportedCapability, devices.get("aio_usb", {}))
+        ),
+        features=FeatureFlags(**_filter_fields(FeatureFlags, features)),
+        limits=_parse_limits(data.get("limits")),
+        # DEC-160: top-level ``control`` block; absent on pre-1.19 daemons →
+        # all-default (profile_storage=False), which disables the import offer.
+        control=ControlCapability(**_filter_fields(ControlCapability, data.get("control") or {})),
+    )
+
+
+def parse_status(data: dict) -> DaemonStatus:
+    return DaemonStatus(
+        api_version=data.get("api_version", 1),
+        daemon_version=data.get("daemon_version", ""),
+        overall_status=data.get("overall_status", "unknown"),
+        subsystems=[
+            SubsystemStatus(**_filter_fields(SubsystemStatus, s))
+            for s in data.get("subsystems", [])
+            if isinstance(s, dict)
+        ],
+        uptime_seconds=data.get("uptime_seconds"),
+        # DEC-132: absent on pre-1.13 daemons — treat as "normal".
+        thermal_state=data.get("thermal_state", "normal"),
+        # DEC-163/166/169: omitted from the wire when empty — default to [].
+        overrides=[
+            OverrideStatusEntry(**_filter_fields(OverrideStatusEntry, e))
+            for e in data.get("overrides", [])
+            if isinstance(e, dict)
+        ],
+        fan_identify=[
+            IdentifyStatusEntry(**_filter_fields(IdentifyStatusEntry, e))
+            for e in data.get("fan_identify", [])
+            if isinstance(e, dict)
+        ],
+        # DEC-193: omitted from the wire when empty — default to [].
+        unavailable_sensors=[
+            UnavailableSensor(**_filter_fields(UnavailableSensor, e))
+            for e in data.get("unavailable_sensors", [])
+            if isinstance(e, dict)
+        ],
+        # 273-i: omitted when empty, and absent entirely before daemon 2.21.0 —
+        # default to [] either way, so an older daemon simply reports nothing
+        # skipped rather than the GUI having to know its version.
+        skipped_controls=[
+            SkippedControl(**_filter_fields(SkippedControl, e))
+            for e in data.get("skipped_controls", [])
+            if isinstance(e, dict)
+        ],
+        # 277-k: omitted when empty, and absent entirely before daemon 2.22.0 —
+        # default to [] either way, so an older daemon simply reports no live
+        # output and the cards keep showing "—", exactly as they did before the
+        # field existed.
+        control_outputs=[
+            entry
+            for entry in (
+                ControlOutput(**_filter_fields(ControlOutput, e))
+                for e in data.get("control_outputs", [])
+                if isinstance(e, dict)
+            )
+            # An output that will not coerce to a number is an output we do not
+            # know, so drop the entry and let it read as ABSENT — which the
+            # contract already defines as "—". Keeping it would carry a value
+            # that raises inside `f"{v:.0f}%"` on the 1 Hz slot, and defaulting it
+            # to 0.0 would invent a duty the daemon never reported.
+            if isinstance(entry.output_pct, (int, float)) and not isinstance(entry.output_pct, bool)
+        ],
+        # AIO-MB Phase 5: omitted when no session has ever run, and absent
+        # entirely before daemon 2.32.0 — `None` either way.
+        validation_session=parse_validation_session_summary(data),
+        # DEC-194: absent key (older daemon, or no active profile) → None, so the
+        # polling fast-path leaves the /profile/active fallback authoritative. A
+        # present value updates the active profile every poll.
+        active_profile_id=data.get("active_profile_id"),
+        active_profile_name=data.get("active_profile_name"),
+        # `CTRL-d`: absent key → None ("unknown", old daemon). Coerced through an
+        # isinstance check rather than bool(): a malformed non-boolean must read
+        # as *unknown*, which preserves the pre-2.45.0 fallback, and not as
+        # `False`, which would clear a profile the daemon is really running.
+        has_active_profile=(
+            data.get("has_active_profile")
+            if isinstance(data.get("has_active_profile"), bool)
+            else None
+        ),
+        # DEC-206: the compact readiness rollup for the Dashboard chip. Absent
+        # key (old daemon / pre-seed) or a malformed object → None ⇒ chip hidden.
+        readiness=_parse_readiness_rollup(data.get("readiness")),
+        # DEC-321 / `WIRE-a`: absent when the config loaded cleanly and on every
+        # daemon before 2.34.0 → None, which the Dashboard reads as "fine".
+        runtime_config_degraded=_parse_runtime_config_degraded(data.get("runtime_config_degraded")),
+        # `WIRE-n`: absent on every daemon before 2.36.0 → False, which is what
+        # the cards render today. Coerced through `is True` rather than `bool()`
+        # deliberately: a malformed non-boolean must read as "the engine is
+        # writing", the state that shows the daemon's figures rather than
+        # suppressing them, so a bad payload cannot blank a live Controls page.
+        verify_active=data.get("verify_active") is True,
+        # DEC-443: omitted when empty, absent before daemon 3.0.0 → [].
+        emergency_causes=[c for c in _wire_list(data, "emergency_causes") if isinstance(c, str)],
+        pump_stalls=[
+            PumpStall(**_filter_fields(PumpStall, e))
+            for e in _wire_list(data, "pump_stalls")
+            if isinstance(e, dict)
+        ],
+        advisories=[
+            CoolingAdvisory(**_filter_fields(CoolingAdvisory, e))
+            for e in _wire_list(data, "advisories")
+            if isinstance(e, dict)
+        ],
+        # DEC-481: both omitted when there is nothing to say, and absent on an
+        # older daemon → None.
+        openfan_link=_opt_str(data.get("openfan_link")),
+        openfan_maintenance=_parse_openfan_maintenance_summary(data.get("openfan_maintenance")),
+        # DEC-484: omitted when there is none, absent on an older daemon → None.
+        openfan_silent_board=_parse_openfan_silent_board_entry(data.get("openfan_silent_board")),
+    )
+
+
+def _wire_list(data: dict, key: str) -> list:
+    """``data[key]`` when it is a list, else ``[]`` — a malformed value (a bare
+    string would iterate as characters) reads as absent."""
+    value = data.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _opt_str(value: object) -> str | None:
+    """*value* when it is a string, else ``None``."""
+    return value if isinstance(value, str) else None
+
+
+def _opt_int(value: object) -> int | None:
+    """*value* when it is an integer (never a bool), else ``None``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _opt_bool(value: object) -> bool | None:
+    """*value* when it is a bool, else ``None`` — unknown, never a guessed False."""
+    return value if isinstance(value, bool) else None
+
+
+def _str_map(value: object) -> dict[str, str] | None:
+    """A JSON object of strings, keeping only its string-to-string entries."""
+    if not isinstance(value, dict):
+        return None
+    return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _parse_openfan_maintenance_summary(raw: object) -> OpenFanMaintenanceSummary | None:
+    """``status.openfan_maintenance``, or ``None`` when absent or malformed."""
+    if not isinstance(raw, dict):
+        return None
+    return OpenFanMaintenanceSummary(
+        run_id=_opt_str(raw.get("run_id")) or "",
+        stage=_opt_str(raw.get("stage")) or "",
+        state=_opt_str(raw.get("state")) or "",
+        outcome=_opt_str(raw.get("outcome")),
+    )
+
+
+def _parse_openfan_silent_board_entry(raw: object) -> OpenFanSilentBoardEntry | None:
+    """``status.openfan_silent_board``, or ``None`` when absent or malformed.
+
+    A board without a serial is not one the start could name, so it reads as
+    absent rather than as a board with an empty serial.
+    """
+    if not isinstance(raw, dict):
+        return None
+    serial = _opt_str(raw.get("usb_serial"))
+    if not serial:
+        return None
+    return OpenFanSilentBoardEntry(usb_serial=serial, usb_port=_opt_str(raw.get("usb_port")) or "")
+
+
+def _parse_readiness_rollup(raw: object) -> ReadinessRollup | None:
+    """Parse the DEC-206 ``readiness`` rollup object, or ``None`` when absent or
+    malformed (old daemon / pre-seed) so the Dashboard chip stays hidden.
+
+    Defensive like the sibling status parsers: a non-dict (including the common
+    absent-key ``None``) yields ``None``; unknown fields are dropped so a newer
+    daemon that extends the rollup cannot break an older GUI.
+    """
+    if not isinstance(raw, dict):
+        return None
+    return ReadinessRollup(**_filter_fields(ReadinessRollup, raw))
+
+
+def _parse_runtime_config_degraded(raw: object) -> RuntimeConfigDegraded | None:
+    """Parse the DEC-321 ``runtime_config_degraded`` object, or ``None`` when it
+    is absent or malformed.
+
+    Defensive like the sibling status parsers: a non-dict (including the common
+    absent-key ``None``) yields ``None``; unknown fields are dropped so a newer
+    daemon that extends the object cannot break an older GUI.
+    """
+    if not isinstance(raw, dict):
+        return None
+    return RuntimeConfigDegraded(**_filter_fields(RuntimeConfigDegraded, raw))
+
+
+def parse_sensors(data: dict) -> list[SensorReading]:
+    sensors = data.get("sensors", [])
+    if not isinstance(sensors, list):
+        # Preserve the pre-DEC-117 contract: a non-list ``sensors`` field is
+        # a malformed daemon payload, not "no sensors". The polling worker
+        # wraps this in DaemonError handling so a clear error surfaces to
+        # the user rather than an empty list. Tests pin this behaviour.
+        raise TypeError(f"expected 'sensors' to be a list, got {type(sensors).__name__}")
+    # A non-object element is skipped, as `parse_fans` skips one. Handing it to
+    # `_parse_sensor_reading` made a blank sensor — id "", 0 °C, age 0, so
+    # "fresh" — that the tables and the history then showed as a real reading.
+    return [_parse_sensor_reading(s) for s in sensors if isinstance(s, dict)]
+
+
+def _parse_sensor_reading[T: SensorReading](raw: dict, cls: type[T] = SensorReading) -> T:
+    """Parse a single ``SensorEntry`` JSON payload into ``cls``.
+
+    Handles the DEC-117 nested ``thresholds`` object: the dict-comprehension
+    ``_filter_fields`` pattern can't construct a nested dataclass on its own,
+    so we hand-parse the threshold sub-payload and inject the result.
+
+    ``cls`` exists for ``GET /inventory/hwmon``'s ``temp_sensors``, which the
+    daemon builds by flattening this very struct into ``InventoryTempSensor``.
+    Routing that list through the same parser is what stops the two drifting —
+    the previous hand-rolled parse there dropped ``thresholds`` outright, and a
+    plain ``_filter_fields`` would leave it as a raw dict in a slot typed
+    ``SensorThresholds | None`` (register row ``WIRE-h``).
+    """
+    if not isinstance(raw, dict):
+        return cls()
+    fields_only = _filter_fields(cls, raw)
+    thresholds_raw = fields_only.pop("thresholds", None)
+    thresholds: SensorThresholds | None = None
+    if isinstance(thresholds_raw, dict):
+        thresholds = SensorThresholds(**_filter_fields(SensorThresholds, thresholds_raw))
+        if thresholds.is_empty():
+            thresholds = None
+    return cls(thresholds=thresholds, **fields_only)
+
+
+def parse_fans(data: dict) -> list[FanReading]:
+    fans = data.get("fans", [])
+    if not isinstance(fans, list):
+        # Mirror parse_sensors: a non-list ``fans`` field is a malformed daemon
+        # payload, not "no fans". The polling worker wraps this in DaemonError
+        # handling so a clear error surfaces rather than an empty fan table.
+        raise TypeError(f"expected 'fans' to be a list, got {type(fans).__name__}")
+    # Per-element guard mirrors parse_sensors' _parse_sensor_reading: a non-dict
+    # element (malformed daemon payload) is skipped, not crashed on — without this
+    # `_filter_fields(FanReading, non_dict)` raises AttributeError, which the poll
+    # worker's except clause does not catch, freezing the fan table on every poll.
+    return [FanReading(**_filter_fields(FanReading, s)) for s in fans if isinstance(s, dict)]
+
+
+def parse_hwmon_headers(data: dict) -> list[HwmonHeader]:
+    # A non-object element is skipped, as `parse_fans` does: `_hwmon_header_from`
+    # calls `.get` on it, and the AttributeError stopped every later poll update.
+    return [_hwmon_header_from(h) for h in data.get("headers", []) if isinstance(h, dict)]
+
+
+def _hwmon_header_from(h: dict) -> HwmonHeader:
+    """One ``/hwmon/headers`` entry. The nested DEC-456 record is built here, so
+    a malformed one (not an object) reads as "no verdict" rather than landing
+    on the header as a raw dict."""
+    header = HwmonHeader(**_filter_fields(HwmonHeader, h))
+    record = h.get("pwm_verification")
+    header.pwm_verification = (
+        PwmVerification(**_filter_fields(PwmVerification, record))
+        if isinstance(record, dict)
+        else None
+    )
+    return header
+
+
+def parse_cooling_devices(data: dict) -> CoolingDeviceInventory:
+    """Parse ``GET /inventory/cooling-devices`` (DEC-316).
+
+    A pre-2.31 daemon 404s the route, so the caller gates on
+    ``capabilities.control.cooling_devices``; this parser assumes a 200 body.
+    """
+    devices = data.get("cooling_devices", [])
+    policies = data.get("available_policies", [])
+    return CoolingDeviceInventory(
+        cooling_devices=[_cooling_device_from(d) for d in devices if isinstance(d, dict)],
+        available_policies=[
+            DevicePolicySummary(**_filter_fields(DevicePolicySummary, p))
+            for p in policies
+            if isinstance(p, dict)
+        ],
+    )
+
+
+def _cooling_device_from(d: dict) -> CoolingDevice:
+    dev = CoolingDevice(**_filter_fields(CoolingDevice, d))
+    policy = d.get("device_policy")
+    if isinstance(policy, dict):
+        dev.device_policy = DevicePolicySummary(**_filter_fields(DevicePolicySummary, policy))
+    return dev
+
+
+def parse_override_grant(data: dict) -> OverrideGrant:
+    return OverrideGrant(**_filter_fields(OverrideGrant, data))
+
+
+def parse_override_renew(data: dict) -> OverrideRenewResult:
+    return OverrideRenewResult(**_filter_fields(OverrideRenewResult, data))
+
+
+def parse_override_release(data: dict) -> OverrideReleaseResult:
+    return OverrideReleaseResult(**_filter_fields(OverrideReleaseResult, data))
+
+
+def parse_identify_result(data: dict) -> IdentifyResult:
+    return IdentifyResult(**_filter_fields(IdentifyResult, data))
+
+
+def parse_field_violations(details: object) -> list[FieldViolation]:
+    """Extract ``field_violations`` from a ``DaemonError.details`` payload (DEC-160).
+
+    Returns an empty list when ``details`` is not the validation-error shape, so
+    callers can render violations uniformly without shape-checking.
+
+    Field values are coerced to ``str``. ``_filter_fields`` screens KEYS only, so
+    a daemon answering ``{"field": 1, "reason": null}`` used to build a
+    ``FieldViolation`` holding an ``int`` and a ``None``, and the only consumer —
+    :func:`ventulus.services.profile_import_service` — calls ``.strip()`` on
+    both, raising ``AttributeError`` from inside a per-profile failure handler
+    documented never to raise, which aborted the whole batch import. The envelope
+    is not shape-enforced at parse time by design (see
+    :class:`ventulus.api.errors.DaemonError`), so degrading has to happen
+    here. ``None`` becomes ``""`` rather than ``"None"``: an absent reason must
+    render as absent, not as the word.
+    """
+    if not isinstance(details, dict):
+        return []
+    raw = details.get("field_violations", [])
+    if not isinstance(raw, list):
+        return []
+
+    def _text(value: object) -> str:
+        return "" if value is None else str(value)
+
+    return [
+        FieldViolation(**{k: _text(v) for k, v in _filter_fields(FieldViolation, item).items()})
+        for item in raw
+        if isinstance(item, dict)
+    ]
+
+
+def field_violation_lines(details: object) -> list[str]:
+    """One readable line per field violation in *details*: ``field: description``.
+
+    Falls back to the ``reason`` token when there is no description, and to
+    whichever half is present when one is empty. The one wording for a daemon's
+    validation findings — the profile import and the Controls page's save both
+    show it (FFA-d).
+    """
+    lines: list[str] = []
+    for v in parse_field_violations(details):
+        f = v.field.strip()
+        d = (v.description or v.reason).strip()
+        line = f"{f}: {d}" if f and d else (f or d)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def parse_openfan_calibration_run(data: dict) -> OpenFanCalibrationRun:
+    """Parse an OpenFan calibration run, tolerating unknown tokens and new fields."""
+    run = OpenFanCalibrationRun(**_filter_fields(OpenFanCalibrationRun, data))
+    run.points = [
+        CalPoint(**_filter_fields(CalPoint, p))
+        for p in (data.get("points") or [])
+        if isinstance(p, dict)
+    ]
+    return run
+
+
+@dataclass
+class OpenFanUsbDevice:
+    """The USB device behind the OpenFan controller's port, read from sysfs by
+    the daemon (DEC-481). ``port`` is its physical USB port path (``8-8``)."""
+
+    port: str = ""
+    vendor_id: str = ""
+    product_id: str = ""
+    manufacturer: str | None = None
+    product: str | None = None
+    serial: str | None = None
+    bcd_device: str | None = None
+    #: The configuration descriptor the kernel cached at enumeration, hex.
+    config_descriptor_hex: str | None = None
+
+
+@dataclass
+class OpenFanUpdateRefusal:
+    """One reason an update could not start now: its ``409``'s ``details.reason``
+    and the daemon's own message."""
+
+    reason: str = ""
+    message: str = ""
+
+
+@dataclass
+class OpenFanDaemonWrite:
+    """``daemon_write`` on ``GET /fans/openfan/device`` (DEC-483): whether the
+    daemon may write the firmware itself. ``reason`` is ``no_usb_access`` until
+    the opt-in drop-in grants it the USB devices."""
+
+    available: bool = False
+    reason: str | None = None
+    message: str | None = None
+
+
+@dataclass
+class OpenFanSilentBoard:
+    """``silent_board`` on ``GET /fans/openfan/device`` (DEC-484): an OpenFAN
+    board on USB that does not answer, and whether its update could start.
+
+    The daemon offers one only while no controller answers. ``tty`` and
+    ``interface_number`` are where it signals the board; the window names the
+    USB port instead.
+    """
+
+    usb: OpenFanUsbDevice | None = None
+    interface_number: int | None = None
+    tty: str | None = None
+    #: Informational, like the device answer's own: the start decides again.
+    update_available: bool = False
+    update_refusals: list[OpenFanUpdateRefusal] = field(default_factory=list)
+
+
+@dataclass
+class OpenFanDevice:
+    """``GET /fans/openfan/device`` (DEC-481)."""
+
+    present: bool = False
+    link: str | None = None
+    port: str | None = None
+    usb: OpenFanUsbDevice | None = None
+    interface_number: int | None = None
+    #: The firmware's own ``>05``/``>06`` answers; ``None`` when it did not
+    #: answer, or an update holds the port.
+    hw_info: dict[str, str] | None = None
+    fw_info: dict[str, str] | None = None
+    #: Whether the start would pass its checks now — informational; the start
+    #: decides again, atomically.
+    update_available: bool = False
+    update_refusals: list[OpenFanUpdateRefusal] = field(default_factory=list)
+    #: ``None`` from a daemon without ``control.openfan_firmware_write``.
+    daemon_write: OpenFanDaemonWrite | None = None
+    #: DEC-484: the board on USB that does not answer, while no controller
+    #: does. ``None`` otherwise, and from an older daemon.
+    silent_board: OpenFanSilentBoard | None = None
+
+
+@dataclass
+class OpenFanFirmwareStaged:
+    """``PUT /fans/openfan/firmware`` → ``200`` (DEC-483): what the daemon makes
+    of an uploaded file. It keeps the file only when ``verdict`` is
+    ``daemon_write``; ``manual_copy`` is copied by hand, ``refused`` by no one."""
+
+    sha256: str = ""
+    size: int = 0
+    #: The published release the daemon recognised, by fingerprint.
+    release: str | None = None
+    verdict: str = ""
+    #: ``unknown_build`` | ``invalid_image`` | ``firmware_known_broken``.
+    reason: str | None = None
+    message: str = ""
+
+
+@dataclass
+class OpenFanFirmwareWrite:
+    """``firmware_write`` on the run record (DEC-483): the daemon's own write.
+    ``None`` on a run whose file is copied by hand."""
+
+    release: str = ""
+    #: ``pending`` | ``identifying`` | ``writing`` | ``verifying`` |
+    #: ``rebooting`` | ``written`` | ``fell_back``.
+    phase: str = ""
+    done_bytes: int = 0
+    total_bytes: int = 0
+    #: The bootloader's flash id, shown as the firmware shows its USB serial.
+    flash_id: str | None = None
+    #: The first erase was sent: the old firmware is no longer whole.
+    flash_changed: bool = False
+    #: Every byte was read back as the file's.
+    verified: bool = False
+    fallback_reason: str | None = None
+    fallback_detail: str | None = None
+
+
+@dataclass
+class OpenFanBoardSnapshot:
+    """What the board looked like on one side of an update."""
+
+    usb: OpenFanUsbDevice | None = None
+    hw_info: dict[str, str] | None = None
+    fw_info: dict[str, str] | None = None
+
+
+@dataclass
+class OpenFanUpdateEvidence:
+    """The daemon's comparison of the board before, after, and with the file.
+    Each ``None`` is "unknown", never "no"."""
+
+    descriptor_changed: bool | None = None
+    descriptor_matches_file: bool | None = None
+    info_matches_file: bool | None = None
+    info_changed: bool | None = None
+    #: ``consistent_with_file`` | ``previous_firmware`` | ``inconclusive``.
+    verdict: str = ""
+
+
+@dataclass
+class OpenFanStageTiming:
+    stage: str = ""
+    started_unix_ms: int = 0
+    ended_unix_ms: int | None = None
+
+
+@dataclass
+class OpenFanFirmwareClaim:
+    """What the GUI said about the file it prepared. Never a path."""
+
+    sha256: str = ""
+    size: int = 0
+    usb_config_descriptor_hex: str | None = None
+    info: dict[str, str] | None = None
+
+
+@dataclass
+class OpenFanMaintenanceRecord:
+    """One firmware update run — ``GET /fans/openfan/maintenance`` (DEC-481).
+
+    ``state`` is ``running`` or ``finished``; ``stage`` the stage token, or the
+    one it ended in. ``outcome`` is set once finished. Every token is opaque:
+    an unknown one is rendered, not dropped. ``raw`` keeps the body as sent, for
+    the support bundle.
+    """
+
+    run_id: str = ""
+    state: str = ""
+    stage: str = ""
+    stage_started_unix_ms: int = 0
+    stage_deadline_unix_ms: int | None = None
+    cancellable: bool = False
+    started_unix_ms: int = 0
+    finished_unix_ms: int | None = None
+    outcome: str | None = None
+    outcome_detail: str | None = None
+    interrupted: bool = False
+    cancelled: bool = False
+    bootloader_requested: bool = False
+    bootloader_seen: bool = False
+    board_answered: bool = False
+    bootloader_trigger: str | None = None
+    bootloader_drive: str | None = None
+    other_bootloader_drives: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    stages: list[OpenFanStageTiming] = field(default_factory=list)
+    expected_usb_serial: str = ""
+    usb_port: str | None = None
+    interface_number: int | None = None
+    tty: str | None = None
+    firmware: OpenFanFirmwareClaim = field(default_factory=OpenFanFirmwareClaim)
+    before: OpenFanBoardSnapshot = field(default_factory=OpenFanBoardSnapshot)
+    after: OpenFanBoardSnapshot | None = None
+    evidence: OpenFanUpdateEvidence | None = None
+    firmware_write: OpenFanFirmwareWrite | None = None
+    #: DEC-484: ``connected`` — the adopted controller, parked first — or
+    #: ``silent``, a board that did not answer. A run from an older daemon is
+    #: the connected board's.
+    board: str = "connected"
+    raw: dict = field(default_factory=dict, repr=False, compare=False)
+
+    @property
+    def is_running(self) -> bool:
+        return self.state == "running"
+
+
+@dataclass
+class OpenFanMaintenanceCancel:
+    """``DELETE /fans/openfan/maintenance`` → ``202``."""
+
+    run_id: str = ""
+    cancel_requested: bool = False
+
+
+def _parse_openfan_usb(raw: object) -> OpenFanUsbDevice | None:
+    if not isinstance(raw, dict):
+        return None
+    return OpenFanUsbDevice(
+        port=_opt_str(raw.get("port")) or "",
+        vendor_id=_opt_str(raw.get("vendor_id")) or "",
+        product_id=_opt_str(raw.get("product_id")) or "",
+        manufacturer=_opt_str(raw.get("manufacturer")),
+        product=_opt_str(raw.get("product")),
+        serial=_opt_str(raw.get("serial")),
+        bcd_device=_opt_str(raw.get("bcd_device")),
+        config_descriptor_hex=_opt_str(raw.get("config_descriptor_hex")),
+    )
+
+
+def parse_openfan_device(data: dict) -> OpenFanDevice:
+    """Parse ``GET /fans/openfan/device``, tolerating new fields and bad types."""
+    return OpenFanDevice(
+        present=data.get("present") is True,
+        link=_opt_str(data.get("link")),
+        port=_opt_str(data.get("port")),
+        usb=_parse_openfan_usb(data.get("usb")),
+        interface_number=_opt_int(data.get("interface_number")),
+        hw_info=_str_map(data.get("hw_info")),
+        fw_info=_str_map(data.get("fw_info")),
+        update_available=data.get("update_available") is True,
+        update_refusals=_parse_update_refusals(data),
+        daemon_write=_parse_openfan_daemon_write(data.get("daemon_write")),
+        silent_board=_parse_openfan_silent_board(data.get("silent_board")),
+    )
+
+
+def _parse_update_refusals(data: dict) -> list[OpenFanUpdateRefusal]:
+    return [
+        OpenFanUpdateRefusal(
+            reason=_opt_str(r.get("reason")) or "",
+            message=_opt_str(r.get("message")) or "",
+        )
+        for r in _wire_list(data, "update_refusals")
+        if isinstance(r, dict)
+    ]
+
+
+def _parse_openfan_silent_board(raw: object) -> OpenFanSilentBoard | None:
+    if not isinstance(raw, dict):
+        return None
+    return OpenFanSilentBoard(
+        usb=_parse_openfan_usb(raw.get("usb")),
+        interface_number=_opt_int(raw.get("interface_number")),
+        tty=_opt_str(raw.get("tty")),
+        update_available=raw.get("update_available") is True,
+        update_refusals=_parse_update_refusals(raw),
+    )
+
+
+def _parse_openfan_daemon_write(raw: object) -> OpenFanDaemonWrite | None:
+    if not isinstance(raw, dict):
+        return None
+    return OpenFanDaemonWrite(
+        available=raw.get("available") is True,
+        reason=_opt_str(raw.get("reason")),
+        message=_opt_str(raw.get("message")),
+    )
+
+
+def parse_openfan_firmware_staged(data: dict) -> OpenFanFirmwareStaged:
+    """Parse ``PUT /fans/openfan/firmware``, tolerating new fields and bad types."""
+    return OpenFanFirmwareStaged(
+        sha256=(_opt_str(data.get("sha256")) or "").lower(),
+        size=_opt_int(data.get("size")) or 0,
+        release=_opt_str(data.get("release")),
+        verdict=_opt_str(data.get("verdict")) or "",
+        reason=_opt_str(data.get("reason")),
+        message=_opt_str(data.get("message")) or "",
+    )
+
+
+def _parse_openfan_firmware_write(raw: object) -> OpenFanFirmwareWrite | None:
+    if not isinstance(raw, dict):
+        return None
+    return OpenFanFirmwareWrite(
+        release=_opt_str(raw.get("release")) or "",
+        phase=_opt_str(raw.get("phase")) or "",
+        done_bytes=_opt_int(raw.get("done_bytes")) or 0,
+        total_bytes=_opt_int(raw.get("total_bytes")) or 0,
+        flash_id=_opt_str(raw.get("flash_id")),
+        flash_changed=raw.get("flash_changed") is True,
+        verified=raw.get("verified") is True,
+        fallback_reason=_opt_str(raw.get("fallback_reason")),
+        fallback_detail=_opt_str(raw.get("fallback_detail")),
+    )
+
+
+def _parse_openfan_snapshot(raw: object) -> OpenFanBoardSnapshot | None:
+    if not isinstance(raw, dict):
+        return None
+    return OpenFanBoardSnapshot(
+        usb=_parse_openfan_usb(raw.get("usb")),
+        hw_info=_str_map(raw.get("hw_info")),
+        fw_info=_str_map(raw.get("fw_info")),
+    )
+
+
+def parse_openfan_maintenance_record(data: dict) -> OpenFanMaintenanceRecord:
+    """Parse one firmware update run, tolerating new fields and bad types."""
+    firmware = data.get("firmware") if isinstance(data.get("firmware"), dict) else {}
+    evidence = data.get("evidence")
+    return OpenFanMaintenanceRecord(
+        run_id=_opt_str(data.get("run_id")) or "",
+        state=_opt_str(data.get("state")) or "",
+        stage=_opt_str(data.get("stage")) or "",
+        stage_started_unix_ms=_opt_int(data.get("stage_started_unix_ms")) or 0,
+        stage_deadline_unix_ms=_opt_int(data.get("stage_deadline_unix_ms")),
+        cancellable=data.get("cancellable") is True,
+        started_unix_ms=_opt_int(data.get("started_unix_ms")) or 0,
+        finished_unix_ms=_opt_int(data.get("finished_unix_ms")),
+        outcome=_opt_str(data.get("outcome")),
+        outcome_detail=_opt_str(data.get("outcome_detail")),
+        interrupted=data.get("interrupted") is True,
+        cancelled=data.get("cancelled") is True,
+        bootloader_requested=data.get("bootloader_requested") is True,
+        bootloader_seen=data.get("bootloader_seen") is True,
+        board_answered=data.get("board_answered") is True,
+        bootloader_trigger=_opt_str(data.get("bootloader_trigger")),
+        bootloader_drive=_opt_str(data.get("bootloader_drive")),
+        other_bootloader_drives=[
+            d for d in _wire_list(data, "other_bootloader_drives") if isinstance(d, str)
+        ],
+        notes=[n for n in _wire_list(data, "notes") if isinstance(n, str)],
+        stages=[
+            OpenFanStageTiming(
+                stage=_opt_str(t.get("stage")) or "",
+                started_unix_ms=_opt_int(t.get("started_unix_ms")) or 0,
+                ended_unix_ms=_opt_int(t.get("ended_unix_ms")),
+            )
+            for t in _wire_list(data, "stages")
+            if isinstance(t, dict)
+        ],
+        expected_usb_serial=_opt_str(data.get("expected_usb_serial")) or "",
+        usb_port=_opt_str(data.get("usb_port")),
+        interface_number=_opt_int(data.get("interface_number")),
+        tty=_opt_str(data.get("tty")),
+        firmware=OpenFanFirmwareClaim(
+            sha256=_opt_str(firmware.get("sha256")) or "",
+            size=_opt_int(firmware.get("size")) or 0,
+            usb_config_descriptor_hex=_opt_str(firmware.get("usb_config_descriptor_hex")),
+            info=_str_map(firmware.get("info")),
+        ),
+        before=_parse_openfan_snapshot(data.get("before")) or OpenFanBoardSnapshot(),
+        after=_parse_openfan_snapshot(data.get("after")),
+        evidence=(
+            OpenFanUpdateEvidence(
+                descriptor_changed=_opt_bool(evidence.get("descriptor_changed")),
+                descriptor_matches_file=_opt_bool(evidence.get("descriptor_matches_file")),
+                info_matches_file=_opt_bool(evidence.get("info_matches_file")),
+                info_changed=_opt_bool(evidence.get("info_changed")),
+                verdict=_opt_str(evidence.get("verdict")) or "",
+            )
+            if isinstance(evidence, dict)
+            else None
+        ),
+        firmware_write=_parse_openfan_firmware_write(data.get("firmware_write")),
+        board=_opt_str(data.get("board")) or "connected",
+        raw=dict(data),
+    )
+
+
+def parse_sensor_history(data: dict) -> SensorHistory:
+    return SensorHistory(
+        entity_id=data.get("entity_id", ""),
+        points=[HistoryPoint(**_filter_fields(HistoryPoint, p)) for p in data.get("points", [])],
+    )
+
+
+def parse_profile_activate(data: dict) -> ProfileActivateResult:
+    return ProfileActivateResult(
+        activated=data.get("activated", False),
+        profile_id=data.get("profile_id", ""),
+        profile_name=data.get("profile_name", ""),
+    )
+
+
+def parse_profile_deactivate(data: dict) -> ProfileDeactivateResult:
+    return ProfileDeactivateResult(
+        deactivated=bool(data.get("deactivated", False)),
+        previous_profile_id=data.get("previous_profile_id"),
+        previous_profile_name=data.get("previous_profile_name"),
+    )
+
+
+def parse_active_profile(data: dict) -> ActiveProfileInfo | None:
+    if not data.get("active", False):
+        return None
+    return ActiveProfileInfo(
+        active=True,
+        profile_id=data.get("profile_id", ""),
+        profile_name=data.get("profile_name", ""),
+    )
+
+
+def parse_gpu_fan_reset(data: dict) -> GpuFanResetResult:
+    return GpuFanResetResult(gpu_id=data.get("gpu_id", ""), reset=data.get("reset", False))
+
+
+def parse_profile_search_dirs(data: dict) -> ProfileSearchDirsResult:
+    return ProfileSearchDirsResult(
+        updated=data.get("updated", False),
+        search_dirs=data.get("search_dirs", []),
+    )
+
+
+def _parse_board_rail(v: dict) -> tuple[str, float | None]:
+    """The board-catalogue name and multiplier of one rail (``VOLT-b``).
+
+    Both or neither: a name whose multiplier is missing, non-numeric,
+    non-finite or not positive is dropped with it, so the rail falls back to
+    how it rendered before the catalogue existed rather than showing a named
+    rail at its unscaled pin voltage.
+    """
+    label = str(v.get("board_label") or "").strip()
+    if not label:
+        return "", None
+    try:
+        multiplier = float(v.get("board_multiplier"))
+    except (TypeError, ValueError):
+        return "", None
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        return "", None
+    return label, multiplier
+
+
+def parse_hardware_diagnostics(data: dict) -> HardwareDiagnosticsResult:
+    hwmon_raw = data.get("hwmon", {})
+    hwmon = HwmonDiagnostics(
+        chips_detected=[
+            HwmonChipInfo(**_filter_fields(HwmonChipInfo, c))
+            for c in hwmon_raw.get("chips_detected", [])
+        ],
+        total_headers=hwmon_raw.get("total_headers", 0),
+        writable_headers=hwmon_raw.get("writable_headers", 0),
+        enable_revert_counts=hwmon_raw.get("enable_revert_counts", {}),
+        enable_revert_last_seen_ms=hwmon_raw.get("enable_revert_last_seen_ms", {}),
+    )
+
+    gpu_raw = data.get("gpu")
+    gpu = None
+    if isinstance(gpu_raw, dict) and gpu_raw:
+        gpu_norm = _coalesce_pci_bdf(gpu_raw)
+        # DEC-119: kernel_warnings is a list of dicts on the wire — pop it
+        # before `**`-unpacking so it doesn't land as raw dicts, then
+        # hand-parse into KernelWarning (mirrors parse_capabilities).
+        gpu_kw_raw = gpu_norm.pop("kernel_warnings", []) or []
+        gpu = GpuDiagnosticsInfo(**_filter_fields(GpuDiagnosticsInfo, gpu_norm))
+        gpu.kernel_warnings = [
+            KernelWarning(**_filter_fields(KernelWarning, kw))
+            for kw in gpu_kw_raw
+            if isinstance(kw, dict)
+        ]
+
+    # DEC-121: Intel discrete GPU diagnostics (additive, read-only).
+    intel_gpu_raw = data.get("intel_gpu")
+    intel_gpu = None
+    if isinstance(intel_gpu_raw, dict) and intel_gpu_raw:
+        intel_gpu = IntelGpuDiagnosticsInfo(
+            **_filter_fields(IntelGpuDiagnosticsInfo, _coalesce_pci_bdf(intel_gpu_raw))
+        )
+
+    # DEC-204: NVIDIA discrete GPU diagnostics (additive, read-only).
+    nvidia_gpu_raw = data.get("nvidia_gpu")
+    nvidia_gpu = None
+    if isinstance(nvidia_gpu_raw, dict) and nvidia_gpu_raw:
+        nvidia_gpu = NvidiaGpuDiagnosticsInfo(
+            **_filter_fields(NvidiaGpuDiagnosticsInfo, _coalesce_pci_bdf(nvidia_gpu_raw))
+        )
+
+    thermal_raw = data.get("thermal_safety", {})
+    thermal = ThermalSafetyInfo(**_filter_fields(ThermalSafetyInfo, thermal_raw))
+
+    board_raw = data.get("board", {})
+    board = BoardInfo(**_filter_fields(BoardInfo, board_raw))
+
+    # DEC-101: dual-chip detection fields — daemon emits them only when
+    # non-empty (skip_serializing_if = "Vec::is_empty"), so older daemons
+    # that predate the field send no key and we default to []. The list
+    # comprehensions also coerce non-string entries to strings as a
+    # defensive measure against future shape drift.
+    expected_chips_raw = data.get("expected_chips") or []
+    expected_chips = [str(c) for c in expected_chips_raw if c]
+    # `BRD-j`: a list only — this one suppresses wording, so a malformed value
+    # falls back to "carries fans" rather than being iterated.
+    expected_fanless_raw = data.get("expected_fanless_chips")
+    expected_fanless_chips = (
+        [str(c) for c in expected_fanless_raw if c]
+        if isinstance(expected_fanless_raw, list)
+        else []
+    )
+    kernel_detected_chips_raw = data.get("kernel_detected_chips") or []
+    kernel_detected_chips = [str(c) for c in kernel_detected_chips_raw if c]
+
+    # DEC-105: module-collision pairs. Same wire convention — daemons
+    # without DEC-105 omit the key, so default to []. Only accept dict
+    # entries to avoid `**` unpack failures if the field is present but
+    # malformed.
+    module_collisions_raw = data.get("module_collisions") or []
+    module_collisions = [
+        ModuleCollisionInfo(**_filter_fields(ModuleCollisionInfo, mc))
+        for mc in module_collisions_raw
+        if isinstance(mc, dict)
+    ]
+
+    # DEC-119: AMD PCI driver-bound scan. Same wire convention — omitted when
+    # empty, so older daemons default to []. Only dict entries are accepted.
+    amd_pci_devices_raw = data.get("amd_pci_devices") or []
+    amd_pci_devices = [
+        AmdPciDeviceInfo(**_filter_fields(AmdPciDeviceInfo, d))
+        for d in amd_pci_devices_raw
+        if isinstance(d, dict)
+    ]
+
+    # `WIRE-ag`: board voltage rails. Coerced field-by-field rather than
+    # `**`-unpacked so a malformed numeric never reaches the renderer as a
+    # string; a rail that will not coerce is dropped rather than shown wrong.
+    voltages: list[VoltageRail] = []
+    for v in data.get("voltages") or []:
+        if not isinstance(v, dict):
+            continue
+        try:
+            board_label, board_multiplier = _parse_board_rail(v)
+            voltages.append(
+                VoltageRail(
+                    id=str(v.get("id") or ""),
+                    chip_name=str(v.get("chip_name") or ""),
+                    channel=int(v.get("channel") or 0),
+                    label=str(v.get("label") or ""),
+                    value_v=float(v.get("value_v")),
+                    identified=bool(v.get("identified", False)),
+                    board_label=board_label,
+                    board_multiplier=board_multiplier,
+                    board_unmapped=bool(v.get("board_unmapped", False)),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+
+    return HardwareDiagnosticsResult(
+        api_version=data.get("api_version", 1),
+        hwmon=hwmon,
+        gpu=gpu,
+        intel_gpu=intel_gpu,
+        nvidia_gpu=nvidia_gpu,
+        thermal_safety=thermal,
+        kernel_modules=[
+            KernelModuleInfo(**_filter_fields(KernelModuleInfo, m))
+            for m in data.get("kernel_modules", [])
+        ],
+        acpi_conflicts=[
+            AcpiConflictInfo(**_filter_fields(AcpiConflictInfo, c))
+            for c in data.get("acpi_conflicts", [])
+        ],
+        board=board,
+        kernel_release=(
+            data.get("kernel_release") if isinstance(data.get("kernel_release"), str) else None
+        ),
+        expected_chips=expected_chips,
+        expected_fanless_chips=expected_fanless_chips,
+        board_firmware_counts=_parse_board_firmware_counts(data.get("board_firmware_counts")),
+        kernel_detected_chips=kernel_detected_chips,
+        module_collisions=module_collisions,
+        cpu_vendor=str(data.get("cpu_vendor") or ""),
+        amd_pci_devices=amd_pci_devices,
+        amdgpu_module_loaded=bool(data.get("amdgpu_module_loaded", False)),
+        voltages=voltages,
+    )
+
+
+def _parse_board_firmware_counts(raw: object) -> BoardFirmwareCounts | None:
+    """Parse the ``X87-d`` ``board_firmware_counts`` object, or ``None``.
+
+    ``None`` for the absent key — the common case on every non-Gigabyte board —
+    and for a malformed one. Never a zeroed instance: a defaulted ``fan_count``
+    of 0 claims the board has no fan headers, which is the opposite of "the
+    firmware did not say" and would show a phantom deficit on every machine that
+    does not publish the descriptor.
+
+    Unknown fields are dropped so a newer daemon extending the object cannot
+    break an older GUI, matching the sibling status parsers.
+    """
+    if not isinstance(raw, dict):
+        return None
+    return BoardFirmwareCounts(**_filter_fields(BoardFirmwareCounts, raw))
+
+
+def parse_hwmon_inventory(data: dict) -> HwmonInventory:
+    temp_sensors = [
+        _parse_sensor_reading(s, InventoryTempSensor)
+        for s in data.get("temp_sensors", [])
+        if isinstance(s, dict)
+    ]
+    # The same builder as `/hwmon/headers` (the same wire struct): a bare
+    # `_filter_fields` would land the nested DEC-456 record here as a raw dict.
+    pwm_controls = [
+        _hwmon_header_from(p) for p in data.get("pwm_controls", []) if isinstance(p, dict)
+    ]
+    monitor_only_fans = [
+        InventoryFanInput(**_filter_fields(InventoryFanInput, f))
+        for f in data.get("monitor_only_fans", [])
+        if isinstance(f, dict)
+    ]
+    default_cpu = None
+    dc_raw = data.get("default_cpu")
+    if isinstance(dc_raw, dict) and dc_raw:
+        default_cpu = DefaultCpuSensor(**_filter_fields(DefaultCpuSensor, dc_raw))
+    preferences = None
+    pref_raw = data.get("preferences")
+    if isinstance(pref_raw, dict) and pref_raw:
+        preferences = InventoryPreferences(**_filter_fields(InventoryPreferences, pref_raw))
+    return HwmonInventory(
+        api_version=data.get("api_version", 1),
+        temp_sensors=temp_sensors,
+        pwm_controls=pwm_controls,
+        monitor_only_fans=monitor_only_fans,
+        default_cpu=default_cpu,
+        preferences=preferences,
+    )
+
+
+# NOTE: contract-coverage scaffolding. GET /inventory/readiness remains valid
+# daemon API (DEC-200); the GUI's only runtime consumer migrated to the merged
+# /inventory/hardware-readiness snapshot (DEC-207) and its client method was
+# removed in the 2026-07-21 sweep. The parser + InventoryReadiness model stay
+# (with tests) per the wire-mirroring policy, ready for any future consumer.
+def parse_inventory_readiness(data: dict) -> InventoryReadiness:
+    return InventoryReadiness(
+        api_version=data.get("api_version", 1),
+        overall=str(data.get("overall", "ok")),
+        items=[
+            ReadinessItem(**_filter_fields(ReadinessItem, i))
+            for i in data.get("items", [])
+            if isinstance(i, dict)
+        ],
+    )
+
+
+def parse_openfan_roles(data: dict) -> list[OpenFanRole]:
+    """Parse ``GET /fans/openfan/roles``; a malformed entry is skipped."""
+    return [
+        OpenFanRole(**_filter_fields(OpenFanRole, c))
+        for c in data.get("channels", [])
+        if isinstance(c, dict)
+    ]
+
+
+def parse_header_role(data: dict) -> HeaderRoleResult:
+    """Parse POST /config/header-role. role stays None when the daemon
+    reports a cleared assignment; it is never coerced to a string."""
+    raw_role = data.get("role")
+    return HeaderRoleResult(
+        updated=bool(data.get("updated", False)),
+        header_id=str(data.get("header_id", "")),
+        role=raw_role if isinstance(raw_role, str) else None,
+        effective_role=str(data.get("effective_role", "unknown")),
+    )
+
+
+def parse_preferred_sensor(data: dict) -> PreferredSensorResult:
+    return PreferredSensorResult(
+        updated=bool(data.get("updated", False)),
+        role=str(data.get("role", "")),
+        preferred_sensor=data.get("preferred_sensor"),
+    )
+
+
+def parse_daemon_config(data: dict) -> DaemonConfig:
+    """Parse GET /config (DEC-243). Tolerant: unknown keys are ignored and a
+    malformed entry is dropped rather than failing the whole read."""
+    keys: list[DaemonConfigKey] = []
+    for raw in data.get("keys", []):
+        if not isinstance(raw, dict) or not isinstance(raw.get("key"), str):
+            continue
+        keys.append(DaemonConfigKey(**_filter_fields(DaemonConfigKey, raw)))
+    return DaemonConfig(
+        api_version=int(data.get("api_version", 0) or 0),
+        admin_config_path=str(data.get("admin_config_path", "")),
+        runtime_config_path=str(data.get("runtime_config_path", "")),
+        restart_pending=bool(data.get("restart_pending", False)),
+        keys=keys,
+    )
+
+
+def parse_config_write(data: dict) -> ConfigWriteResult:
+    return ConfigWriteResult(
+        updated=bool(data.get("updated", False)),
+        key=str(data.get("key", "")),
+        value=data.get("value"),
+        note=str(data.get("note", "")),
+        requires_privilege=data.get("requires_privilege"),
+    )
+
+
+def parse_superio_report(data: dict) -> SuperIoReport:
+    chips: list[SuperIoChip] = []
+    for c in data.get("chips", []):
+        if not isinstance(c, dict):
+            continue
+        rec = None
+        rec_raw = c.get("recommendation")
+        if isinstance(rec_raw, dict) and rec_raw:
+            rec = SuperIoRecommendation(**_filter_fields(SuperIoRecommendation, rec_raw))
+        # Parse the nested recommendation explicitly; keep the rest via _filter_fields.
+        chip_fields = {
+            k: v for k, v in _filter_fields(SuperIoChip, c).items() if k != "recommendation"
+        }
+        chips.append(SuperIoChip(**chip_fields, recommendation=rec))
+    return SuperIoReport(
+        # Safe default: an absent support-flag reads as unsupported (AIP-180,
+        # matching capability flags). The daemon always emits it, so this only
+        # guards a malformed in-range response from falsely rendering the panel.
+        api_version=data.get("api_version", 1),
+        arch_supported=bool(data.get("arch_supported", False)),
+        chips=chips,
+        acpi_conflict_drivers=[
+            str(d) for d in data.get("acpi_conflict_drivers", []) if isinstance(d, str)
+        ],
+        notes=[str(n) for n in data.get("notes", []) if isinstance(n, str)],
+        port_probe_available=bool(data.get("port_probe_available", False)),
+        port_probe_reason=str(data.get("port_probe_reason", "")),
+    )
+
+
+def parse_hardware_readiness(data: dict) -> HardwareReadiness:
+    """Parse GET /inventory/hardware-readiness (DEC-207), reusing the readiness +
+    Super-I/O parsers so the nested shapes stay identical to their standalone
+    endpoints. Non-dict/absent nested objects degrade to empty defaults."""
+    rollup_raw = data.get("rollup")
+    rollup = (
+        ReadinessRollup(**_filter_fields(ReadinessRollup, rollup_raw))
+        if isinstance(rollup_raw, dict)
+        else ReadinessRollup()
+    )
+    superio_raw = data.get("superio")
+    superio = (
+        parse_superio_report(superio_raw) if isinstance(superio_raw, dict) else SuperIoReport()
+    )
+
+    def _int(v: object) -> int:
+        return v if isinstance(v, int) and not isinstance(v, bool) else 0
+
+    return HardwareReadiness(
+        api_version=data.get("api_version", 1),
+        overall=str(data.get("overall", "ok")),
+        rollup=rollup,
+        items=[
+            ReadinessItem(**_filter_fields(ReadinessItem, i))
+            for i in data.get("items", [])
+            if isinstance(i, dict)
+        ],
+        superio=superio,
+        scanned_age_ms=_int(data.get("scanned_age_ms")),
+        generation=_int(data.get("generation")),
+    )
+
+
+@dataclass
+class PointStability:
+    """§4 statistics over the tach samples retained during one step's hold.
+
+    Absent on a point that retained nothing at all — a failed write, or an abort
+    before the hold opened. ``verdict`` is an **opaque token**
+    (``stable`` | ``variable`` | ``unstable`` | ``insufficient_data`` |
+    ``unavailable``); render an unrecognised one rather than dropping it (273-i).
+
+    ``dropouts`` counts an unreadable reading, or a ``0`` recorded while the
+    window proved the fan was turning. A steadily stopped fan reports **no**
+    dropouts — the daemon distinguishes the two, and the GUI must not
+    re-derive the count from ``min_rpm == 0``.
+    """
+
+    samples: int = 0
+    usable: int = 0
+    dropouts: int = 0
+    outliers: int = 0
+    mean_rpm: float | None = None
+    median_rpm: int | None = None
+    min_rpm: int | None = None
+    max_rpm: int | None = None
+    stddev_rpm: float | None = None
+    #: ``None`` when the mean is zero; a stopped fan has no relative spread.
+    cv_pct: float | None = None
+    verdict: str = ""
+    #: The cadence these readings were actually taken at. §5 forbids implying
+    #: resolution the data does not have, so render timings against this.
+    sample_interval_ms: int = 0
+    dwell_ms: int = 0
+    #: DEC-405 (daemon >= 2.52.0): where the statistics window opens, measured
+    #: from the write — the settle point, so the figures describe the settled
+    #: tail rather than the transient (`PTR-a`). ``0`` on a point that never
+    #: settled (its statistics then span the whole hold and ``verdict`` says
+    #: ``not_settled``). ``None`` from an older daemon, whose window always
+    #: opened at the write.
+    window_start_ms: int | None = None
+    #: DEC-405: the tach register's own update interval these readings came
+    #: from — the driver's ``update_interval`` where published, otherwise the
+    #: median observed gap. ``None`` when neither is known.
+    update_interval_ms: int | None = None
+
+
+@dataclass
+class EstimatedRpm:
+    """§7 corrected physical RPM, carried with its provenance.
+
+    The wire's first ``{value, provenance}`` envelope, and the reason
+    :func:`ventulus.services.provenance.from_envelope` exists. Present only
+    where **trusted compiled-in device metadata** supplies a factor, which no
+    shipped daemon entry does — so this is ``None`` on every machine today and
+    the UI shows RPM as UNVERIFIED.
+
+    ``rpm_after`` remains the raw reported figure and is never overwritten by
+    this (§9: do not overwrite raw evidence with derived values).
+    """
+
+    value: int = 0
+    provenance: str = ""
+    correction_factor: float = 0.0
+    correction_source: str = ""
+
+
+@dataclass
+class PlateauSpan:
+    """A duty span over which reported RPM did not meaningfully change.
+
+    **Not a fault.** §3 is explicit that a plateau must not be reinterpreted as
+    pump failure, and §8.5 forbids a generic red "hardware failed" for it.
+    """
+
+    from_pct: int = 0
+    to_pct: int = 0
+    rpm_min: int = 0
+    rpm_max: int = 0
+
+
+@dataclass
+class CharPoint:
+    """One measured point of a PWM/RPM characterisation sweep (AIO-MB Phase 3).
+
+    The three axes stay separate — ``command_accepted`` (did the write land),
+    ``readback_verdict`` (did the header report the duty back), and
+    ``rpm_verdict`` (did the fan physically respond). ``AIO-Phase3.md`` is
+    explicit that collapsing them into one pass/fail is a defect: a pump whose
+    firmware overrides PWM during startup reports a correct readback with RPM
+    pinned high, and calling that a write failure is the wrong conclusion.
+
+    ``readback_verdict`` and ``rpm_verdict`` are **opaque tokens**. Render an
+    unrecognised value rather than dropping the point (the 273-i rule) — a newer
+    daemon may add one, and a dropped row is a silently shortened sweep.
+    """
+
+    requested_pct: int = 0
+    command_accepted: bool = False
+    readback_pct: int | None = None
+    readback_raw: int | None = None
+    pwm_enable: int | None = None
+    rpm_before: int | None = None
+    rpm_after: int | None = None
+    settle_ms: int = 0
+    first_change_ms: int | None = None
+    readback_verdict: str = ""
+    rpm_verdict: str = ""
+
+    # ── AIO Phase 8 Batch 2 (DEC-334), daemon >= 2.40.0 ──────────────
+    #: Which leg of the walk this step belongs to: ``ramp`` | ``falling`` |
+    #: ``rising``. ``ramp`` is the first step in either mode — the only one
+    #: whose approach direction is unknown, because it is entered from the
+    #: captured pre-sweep duty. A hysteresis comparison must exclude it.
+    #: Empty from a daemon that predates the field.
+    direction: str = ""
+    #: 0-based position in the walked plan. A bidirectional walk visits some
+    #: duties twice, so ``requested_pct`` alone does not order the points.
+    step_index: int = 0
+    #: §5. When reported RPM entered its settled band, measured from the write.
+    #: ``None`` means it never settled within the hold — **not** that it settled
+    #: instantly, the same distinction ``first_change_ms`` carries.
+    settled_ms: int | None = None
+    stability: PointStability | None = None
+    #: §7. Present only where trusted device metadata supplies a correction.
+    estimated_physical_rpm: EstimatedRpm | None = None
+
+
+@dataclass
+class CharSummary:
+    """Derived diagnostics over a whole characterisation sweep.
+
+    ``possible_device_override`` is NOT a fault verdict — it means PWM was
+    accepted and read back correctly while RPM never moved, which is exactly what
+    a pump in its startup/self-bleeding period looks like. The UI must say so
+    rather than reporting a broken fan.
+    """
+
+    command_acceptance: str = ""
+    pwm_readback: str = ""
+    rpm_response: str = ""
+    min_tested_pct: int | None = None
+    max_tested_pct: int | None = None
+    min_rpm: int | None = None
+    max_rpm: int | None = None
+    monotonic: bool | None = None
+    #: DEC-405 (daemon >= 2.52.0, `PTR-d`): a bidirectional run judges each leg
+    #: separately, each ordered by duty; ``monotonic`` is then false if any
+    #: judged leg is. ``None`` for a leg that was not judged, and from an older
+    #: daemon (which judged the whole walk in walk order).
+    monotonic_falling: bool | None = None
+    monotonic_rising: bool | None = None
+    dead_zone_upper_pct: int | None = None
+    clamp_pct: int | None = None
+    possible_device_override: bool = False
+    interference_detected: bool = False
+
+    # ── AIO Phase 8 Batch 2 (DEC-334), daemon >= 2.40.0 ──────────────
+    #: §2. Largest rising/falling gap as a percentage of the observed RPM span.
+    hysteresis_pct: float | None = None
+    #: ``none`` | ``present`` | ``insufficient_data`` | ``not_tested``.
+    #: **Never a fault verdict** — §2 lists six legitimate explanations,
+    #: starting with an internal device controller. Opaque token (273-i).
+    hysteresis_verdict: str = ""
+    hysteresis_worst_duty_pct: int | None = None
+    hysteresis_worst_delta_rpm: int | None = None
+    #: How many duties carried readings in **both** directions.
+    hysteresis_compared_points: int = 0
+
+    #: §3. Where PWM changes actually move reported RPM.
+    min_responsive_pct: int | None = None
+    max_responsive_pct: int | None = None
+    low_plateau_to_pct: int | None = None
+    saturation_from_pct: int | None = None
+    plateaus: list[PlateauSpan] = field(default_factory=list)
+
+    #: §4. The **worst** per-point classification, not an average: one unstable
+    #: duty is the finding, and averaging would bury it. Opaque token.
+    stability_verdict: str = ""
+    worst_cv_pct: float | None = None
+    total_dropouts: int = 0
+    total_outliers: int = 0
+
+    #: §5. The cadence the timings were measured at. Render the timings against
+    #: **this**; never assume milliseconds.
+    measurement_resolution_ms: int | None = None
+    typical_response_ms: int | None = None
+    typical_settling_ms: int | None = None
+
+    #: §6. ``True`` outside the learned band, ``False`` inside it, ``None`` when
+    #: nothing has been learned for this header yet. **Three states on purpose:**
+    #: "no model" must not read as "passed".
+    outside_learned_range: bool | None = None
+    learned_range_note: str | None = None
+    #: §6 interpretation states, e.g. ``DEVICE_OVERRIDE_POSSIBLE``.
+    #: **Possibilities, never conclusions.**
+    interpretation_states: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RunStep:
+    """What a running diagnostic is holding right now (`P8-bg`, daemon >= 2.55.0).
+
+    Shared by :class:`CharacterizationRun` and :class:`ControlPathRun`. Both
+    publish a result only when a hold ends, so this is the one signal that a run
+    is alive between results. ``phase`` is an opaque token — ``settle`` /
+    ``dwell`` for a sweep, ``settle_wait`` / ``baseline`` / ``perturbed`` for
+    discovery — and an unrecognised one is rendered, never dropped (273-i).
+    ``index`` is the sweep's 0-based ``step_index`` or discovery's 1-based cycle.
+    """
+
+    phase: str = ""
+    index: int = 0
+    duty_pct: int = 0
+    started_unix_ms: int = 0
+    max_ms: int = 0
+
+
+def parse_run_step(raw: object) -> RunStep | None:
+    """``current_step``, or ``None`` when the daemon sent none (terminal, not yet
+    started, or a daemon that predates it)."""
+    if not isinstance(raw, dict):
+        return None
+    step = RunStep(**_filter_fields(RunStep, raw))
+    step.phase = str(step.phase)
+    for name in ("index", "duty_pct", "started_unix_ms", "max_ms"):
+        value = getattr(step, name)
+        setattr(
+            step,
+            name,
+            value if isinstance(value, int) and not isinstance(value, bool) else 0,
+        )
+    return step
+
+
+@dataclass
+class CharacterizationRun:
+    """A characterisation run — the body of ``GET /diagnostics/characterization``
+    and of the ``202`` from ``POST /hwmon/{id}/characterize``.
+
+    ``state`` is an opaque token (``running``/``complete``/``cancelled``/
+    ``aborted``/``failed`` today). ``len(points)`` against
+    ``len(requested_points_pct)`` is the progress indicator; ``summary`` is
+    ``None`` until the run reaches a terminal state.
+    """
+
+    run_id: str = ""
+    header_id: str = ""
+    state: str = ""
+    requested_points_pct: list[int] = field(default_factory=list)
+    settle_seconds: int = 0
+    points: list[CharPoint] = field(default_factory=list)
+    summary: CharSummary | None = None
+    original_pct: int | None = None
+    #: The header was NOT put back where the sweep found it — a failed restore
+    #: write, a deliberately skipped one, or an unreadable pre-sweep duty.
+    #: ``restore_outcome`` says which; daemon < 2.30.0 reported ``False`` on the
+    #: three non-write exits, so an older daemon under-reports rather than lies
+    #: in a new way.
+    restore_failed: bool = False
+    #: Stable token: ``pending`` | ``restored`` | ``write_failed`` |
+    #: ``skipped_shutting_down`` | ``skipped_thermal_force`` |
+    #: ``no_original_duty``. Empty from a daemon that predates it. The client
+    #: owns the wording and must render an unrecognised token (273-i).
+    restore_outcome: str = ""
+    detail: str | None = None
+
+    # ── AIO Phase 8 Batch 2 (DEC-334), daemon >= 2.40.0 ──────────────
+    #: Whether this run walked both directions. ``False`` from an older daemon.
+    bidirectional: bool = False
+    #: The clamped dwell actually used; ``0`` when none was requested.
+    stability_seconds: int = 0
+    completed_unix_ms: int | None = None
+    #: §9 provenance legend: field name -> classification token. A sidecar, so
+    #: the export needs no per-field wrapping. Empty from an older daemon, in
+    #: which case :mod:`ventulus.services.provenance`'s static table applies.
+    provenance: dict[str, str] = field(default_factory=dict)
+    #: `P8-bg`: the phase being held right now; ``None`` when not running or
+    #: from a daemon before 2.55.0.
+    current_step: RunStep | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self.state == "running"
+
+
+def _parse_char_point(raw: dict) -> CharPoint:
+    """One point, with its DEC-334 nested blocks.
+
+    ``stability`` and ``estimated_physical_rpm`` are parsed **only when the
+    daemon sent an object**. Absent stays ``None`` rather than becoming an empty
+    record — a zeroed ``PointStability`` would render as "0 samples, 0 dropouts,
+    stable", which is a claim about hardware from a daemon that said nothing.
+    """
+    point = CharPoint(**_filter_fields(CharPoint, raw))
+    raw_stab = raw.get("stability")
+    point.stability = (
+        PointStability(**_filter_fields(PointStability, raw_stab))
+        if isinstance(raw_stab, dict)
+        else None
+    )
+    raw_est = raw.get("estimated_physical_rpm")
+    point.estimated_physical_rpm = (
+        EstimatedRpm(**_filter_fields(EstimatedRpm, raw_est)) if isinstance(raw_est, dict) else None
+    )
+    return point
+
+
+def _parse_char_summary(raw: dict) -> CharSummary:
+    summary = CharSummary(**_filter_fields(CharSummary, raw))
+    summary.plateaus = [
+        PlateauSpan(**_filter_fields(PlateauSpan, pl))
+        for pl in (raw.get("plateaus") or [])
+        if isinstance(pl, dict)
+    ]
+    summary.interpretation_states = [
+        str(t) for t in (raw.get("interpretation_states") or []) if isinstance(t, str)
+    ]
+    return summary
+
+
+def parse_characterization_run(data: dict) -> CharacterizationRun:
+    """Parse a characterisation run, tolerating unknown tokens and new fields."""
+    raw_points = data.get("points") or []
+    points = [_parse_char_point(p) for p in raw_points if isinstance(p, dict)]
+    raw_summary = data.get("summary")
+    summary = _parse_char_summary(raw_summary) if isinstance(raw_summary, dict) else None
+    requested = data.get("requested_points_pct") or []
+    raw_prov = data.get("provenance")
+    provenance = {str(k): str(v) for k, v in raw_prov.items()} if isinstance(raw_prov, dict) else {}
+    return CharacterizationRun(
+        run_id=str(data.get("run_id", "")),
+        header_id=str(data.get("header_id", "")),
+        state=str(data.get("state", "")),
+        requested_points_pct=[int(p) for p in requested if isinstance(p, (int, float))],
+        settle_seconds=int(data.get("settle_seconds") or 0),
+        points=points,
+        summary=summary,
+        original_pct=data.get("original_pct"),
+        restore_failed=bool(data.get("restore_failed", False)),
+        restore_outcome=str(data.get("restore_outcome", "")),
+        detail=data.get("detail"),
+        bidirectional=bool(data.get("bidirectional", False)),
+        stability_seconds=int(data.get("stability_seconds") or 0),
+        completed_unix_ms=data.get("completed_unix_ms"),
+        provenance=provenance,
+        current_step=parse_run_step(data.get("current_step")),
+    )
+
+
+# ── AIO Phase 8 Batch 1: preflight, control-path discovery, provenance ───────
+
+#: Preflight check states. Stable tokens; render an unrecognised one rather than
+#: dropping it (273-i).
+PREFLIGHT_PASS = "pass"
+PREFLIGHT_WARN = "warn"
+PREFLIGHT_FAIL = "fail"
+PREFLIGHT_UNKNOWN = "unknown"
+PREFLIGHT_NOT_APPLICABLE = "not_applicable"
+
+#: Overall preflight verdicts.
+PREFLIGHT_READY = "ready"
+PREFLIGHT_VERDICT_WARN = "warn"
+PREFLIGHT_BLOCKED = "blocked"
+
+#: Diagnostic tokens a preflight may be requested for.
+DIAGNOSTIC_VERIFY = "pwm_verify"
+DIAGNOSTIC_CHARACTERIZATION = "pwm_characterization"
+DIAGNOSTIC_CONTROL_PATH = "control_path_discovery"
+#: AIO Phase 8 Batch 2 (DEC-334). The same route and run slot as
+#: ``pwm_characterization``, with the bidirectional walk and the stability dwell
+#: enabled. Requesting both in one session runs only this one — the daemon treats
+#: it as a strict superset and supersedes the basic sweep.
+DIAGNOSTIC_BEHAVIOUR = "pwm_behaviour_characterization"
+#: DEC-407 (daemon >= 2.54.0, capability ``control.stall_probe``). The preflight
+#: token for the below-20 % stall/restart probe; its eligibility row is
+#: ``stall_probe_eligible``.
+DIAGNOSTIC_STALL_PROBE = "pwm_stall_probe"
+
+#: Stall-probe outcomes (DEC-407). Stable tokens; the client owns the wording
+#: and renders an unrecognised one rather than dropping it (273-i).
+STALL_PROBE_STALL_AND_RESTART = "stall_and_restart_found"
+STALL_PROBE_NO_STALL_DOWN_TO_0 = "no_stall_down_to_0"
+STALL_PROBE_DID_NOT_RESTART = "did_not_restart_below_20"
+STALL_PROBE_NO_FAN = "no_fan_detected"
+STALL_PROBE_STALLED_AT_OR_ABOVE_20 = "stalled_at_or_above_20"
+STALL_PROBE_ABORTED = "aborted"
+STALL_PROBE_CANCELLED = "cancelled"
+
+#: Relationship outcomes from control-path discovery.
+CONTROL_PATH_CONFIRMED = "confirmed"
+CONTROL_PATH_PROBABLE = "probable"
+CONTROL_PATH_AMBIGUOUS = "ambiguous"
+CONTROL_PATH_NO_RESPONSE = "no_tach_response"
+CONTROL_PATH_MULTIPLE = "multiple_responses"
+
+#: Confidence vocabulary.
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_MEDIUM = "medium"
+CONFIDENCE_LOW = "low"
+CONFIDENCE_UNKNOWN = "unknown"
+
+#: Provenance classifications (Overview § "Non-negotiable design principle").
+#: **Never silently promote a derived or user-supplied value into a direct
+#: hardware observation** — that rule is what these tokens exist to keep visible.
+PROVENANCE_COMMANDED = "COMMANDED"
+PROVENANCE_OBSERVED = "OBSERVED"
+PROVENANCE_DERIVED = "DERIVED"
+PROVENANCE_USER_METADATA = "USER_METADATA"
+PROVENANCE_DEVICE_METADATA = "DEVICE_METADATA"
+PROVENANCE_UNVERIFIED = "UNVERIFIED"
+
+
+@dataclass
+class PreflightCheck:
+    """One row of a preflight report."""
+
+    check_id: str = ""
+    #: ``pass`` | ``warn`` | ``fail`` | ``unknown`` | ``not_applicable``.
+    state: str = ""
+    detail: str = ""
+
+
+@dataclass
+class PreflightReport:
+    """Body of ``GET /diagnostics/preflight``.
+
+    The daemon authors the verdict; the GUI renders it. ``blocking`` names the
+    ``check_id``s that produced ``blocked``, so a client never has to re-derive
+    the roll-up rule — and therefore cannot disagree with it.
+    """
+
+    header_id: str = ""
+    diagnostic: str = ""
+    #: ``ready`` | ``warn`` | ``blocked``.
+    verdict: str = ""
+    checks: list[PreflightCheck] = field(default_factory=list)
+    blocking: list[str] = field(default_factory=list)
+
+    @property
+    def is_blocked(self) -> bool:
+        return self.verdict == PREFLIGHT_BLOCKED
+
+
+@dataclass
+class TachChannel:
+    """A tach channel a discovery run watched."""
+
+    tach_id: str = ""
+    label: str = ""
+    #: ``fanN_input`` with no matching ``pwmN``. Invisible to ``/hwmon/headers``
+    #: and absent from the 1 Hz poll — the daemon reads it only for the duration
+    #: of a discovery run.
+    monitor_only: bool = False
+    is_target_header: bool = False
+
+
+@dataclass
+class TachObservation:
+    """One channel's behaviour across one perturbation cycle."""
+
+    tach_id: str = ""
+    baseline_rpm: int | None = None
+    perturbed_rpm: int | None = None
+    delta_rpm: int | None = None
+    noise_floor_rpm: int = 0
+    responded: bool = False
+    #: DEC-405 (daemon >= 2.52.0, `PTR-c`): this cycle's baseline never settled
+    #: within its bounded wait, so its noise floor was taken from cycle 1's
+    #: unperturbed baseline instead. ``None`` from an older daemon.
+    noise_floor_from_cycle_1: bool | None = None
+
+
+@dataclass
+class DiscoveryCycle:
+    """One perturbation cycle."""
+
+    cycle: int = 0
+    baseline_pct: int = 0
+    perturbed_pct: int = 0
+    direction: str = ""
+    observations: list[TachObservation] = field(default_factory=list)
+    #: DEC-405 (daemon >= 2.52.0): whether every channel that could move had
+    #: settled before this cycle's baseline window opened. ``None`` when no wait
+    #: ran (the baseline write did not move the duty) and from an older daemon.
+    baseline_settled: bool | None = None
+    #: DEC-405: how long this cycle waited for that settle; ``0`` when no wait
+    #: ran. ``None`` from an older daemon, which never waited.
+    settle_wait_ms: int | None = None
+
+
+@dataclass
+class ControlPathCandidate:
+    """A candidate PWM to tach relationship."""
+
+    tach_id: str = ""
+    label: str = ""
+    monitor_only: bool = False
+    #: ``high`` | ``medium`` | ``low``.
+    confidence: str = ""
+    #: ``positive`` | ``negative`` — measured, never assumed.
+    direction: str = ""
+    baseline_rpm: int | None = None
+    perturbed_rpm: int | None = None
+    change_pct: float | None = None
+    cycles_responded: int = 0
+    cycles_total: int = 0
+
+
+@dataclass
+class DiscoverySummary:
+    """Derived result over a whole discovery run."""
+
+    #: ``confirmed`` | ``probable`` | ``ambiguous`` | ``no_tach_response`` |
+    #: ``multiple_responses``.
+    relationship: str = ""
+    #: ``high`` | ``medium`` | ``low`` | ``unknown``.
+    confidence: str = ""
+    candidates: list[ControlPathCandidate] = field(default_factory=list)
+    #: ``None`` means UNKNOWN, which the spec requires in preference to a guess.
+    measurement_resolution_ms: int | None = None
+    sample_interval_ms: int = 0
+    sample_count: int = 0
+    confidence_notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ControlPathRun:
+    """A discovery run — the ``202`` body and the ``run`` field of
+    ``GET /diagnostics/control-path``."""
+
+    run_id: str = ""
+    header_id: str = ""
+    state: str = ""
+    delta_pct: int = 0
+    requested_cycles: int = 0
+    window_seconds: int = 0
+    baseline_pct: int = 0
+    perturbed_pct: int = 0
+    direction: str = ""
+    channels: list[TachChannel] = field(default_factory=list)
+    cycles: list[DiscoveryCycle] = field(default_factory=list)
+    summary: DiscoverySummary | None = None
+    original_pct: int | None = None
+    restore_failed: bool = False
+    restore_outcome: str = ""
+    detail: str | None = None
+    completed_unix_ms: int | None = None
+    #: `P8-bg`: the window being held right now; ``None`` when not running or
+    #: from a daemon before 2.55.0.
+    current_step: RunStep | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self.state == "running"
+
+
+@dataclass
+class ControlPathRecord:
+    """A persisted relationship, keyed by header id.
+
+    Survives a daemon restart, which is what makes the card's "Last validated"
+    row real. The daemon drops a record whose header id no longer appears in
+    discovery, so a board or driver change invalidates it by construction.
+    """
+
+    header_id: str = ""
+    relationship: str = ""
+    confidence: str = ""
+    tach_ids: list[str] = field(default_factory=list)
+    tach_labels: list[str] = field(default_factory=list)
+    direction: str = ""
+    baseline_rpm: int | None = None
+    perturbed_rpm: int | None = None
+    change_pct: float | None = None
+    run_id: str = ""
+    validated_unix_ms: int = 0
+
+
+@dataclass
+class ControlPathStatus:
+    """Body of ``GET /diagnostics/control-path``: the current or most recent run
+    plus every persisted relationship."""
+
+    run: ControlPathRun | None = None
+    records: list[ControlPathRecord] = field(default_factory=list)
+    #: True only when this came from the status endpoint, which is the only reply
+    #: that carries ``records`` at all.
+    #:
+    #: Load-bearing rather than bookkeeping: ``POST`` and ``DELETE`` return a bare
+    #: run, which the client wraps with an empty ``records`` list. Without this
+    #: flag an empty wrapper is indistinguishable from a **legitimately empty**
+    #: ``GET`` — a store discarded as corrupt, say — and a caller that treats
+    #: "no records" as "no news" then keeps showing a relationship the daemon has
+    #: already dropped. That is exactly the stale-truth §6.3 warns against.
+    from_status_endpoint: bool = False
+
+    def record_for(self, header_id: str) -> ControlPathRecord | None:
+        for r in self.records:
+            if r.header_id == header_id:
+                return r
+        return None
+
+
+@dataclass
+class ProbePoint:
+    """One held duty of a stall/restart probe (DEC-407).
+
+    ``phase`` (``baseline`` | ``descent`` | ``ascent`` | ``kick``) and
+    ``observation`` (``spinning`` | ``stalled`` | ``restarted`` | ``stopped`` |
+    ``no_fan`` | ``unreadable`` | ``interrupted`` | ``unconfirmed``) are opaque
+    tokens: render an unrecognised one rather than dropping the point (273-i).
+    """
+
+    phase: str = ""
+    step_index: int = 0
+    commanded_pct: int = 0
+    #: ``False`` when the write itself failed.
+    command_accepted: bool = False
+    readback_pct: int | None = None
+    pwm_enable: int | None = None
+    #: The tach just before the write, and the last reading of the hold.
+    rpm_before: int | None = None
+    rpm_after: int | None = None
+    held_ms: int = 0
+    #: When, from the write, the stall or restart was confirmed; ``None`` when
+    #: it was not — never "instantly".
+    confirmed_at_ms: int | None = None
+    samples: int = 0
+    zero_samples: int = 0
+    observation: str = ""
+
+
+@dataclass
+class StallProbeRun:
+    """A stall/restart probe run — the ``202`` body of
+    ``POST /hwmon/{id}/stall-probe`` and of ``GET``/``DELETE
+    /diagnostics/stall-probe`` (DEC-407, daemon >= 2.54.0).
+
+    ``state`` shares the characterisation vocabulary (``running`` |
+    ``complete`` | ``cancelled`` | ``aborted`` | ``failed``); ``outcome`` is
+    ``None`` while running, then one of the ``STALL_PROBE_*`` tokens.
+    Every duty, dwell and budget below is derived **by the daemon** from the
+    header's own refresh — there are no request tunables to echo, so these
+    published values are what makes a run reproducible.
+    """
+
+    run_id: str = ""
+    header_id: str = ""
+    state: str = ""
+    outcome: str | None = None
+    #: Set when ``outcome`` is ``aborted``: an abort token or a thermal token.
+    abort_reason: str | None = None
+    detail: str | None = None
+    #: The highest duty at which the fan was confirmed stopped on the way down
+    #: (``0`` is a stall too), and the lowest at which it was confirmed spinning
+    #: again on the way back up (at most 20).
+    stall_duty_pct: int | None = None
+    restart_duty_pct: int | None = None
+    hysteresis_pct: int | None = None
+    lowest_commanded_pct: int | None = None
+    time_below_floor_ms: int = 0
+    baseline_rpm: int | None = None
+    baseline_settled: bool | None = None
+    #: The tach refresh the timing was derived from, and where it came from
+    #: (``driver_update_interval`` | ``observed``).
+    refresh_ms: int | None = None
+    refresh_source: str | None = None
+    dwell_ms: int | None = None
+    confirm_ms: int | None = None
+    budget_ms: int | None = None
+    start_cpu_temp_c: float | None = None
+    max_cpu_temp_c: float | None = None
+    rise_limit_c: float = 0.0
+    #: The recovery kick held 100 % for its whole window and the fan still read
+    #: 0 rpm — the fan may be physically stuck. The header is restored anyway.
+    restart_failed_at_full: bool = False
+    points: list[ProbePoint] = field(default_factory=list)
+    original_pct: int | None = None
+    restore_failed: bool = False
+    #: DEC-315 vocabulary, shared with characterisation and discovery.
+    restore_outcome: str = ""
+    completed_unix_ms: int | None = None
+    provenance: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_running(self) -> bool:
+        return self.state == "running"
+
+
+def parse_stall_probe_run(data: dict) -> StallProbeRun:
+    """Parse a stall-probe run, tolerating unknown tokens and new fields."""
+    run = StallProbeRun(**_filter_fields(StallProbeRun, data))
+    run.points = [
+        ProbePoint(**_filter_fields(ProbePoint, p))
+        for p in (data.get("points") or [])
+        if isinstance(p, dict)
+    ]
+    raw_prov = data.get("provenance")
+    run.provenance = (
+        {str(k): str(v) for k, v in raw_prov.items()} if isinstance(raw_prov, dict) else {}
+    )
+    return run
+
+
+def parse_preflight_report(data: dict) -> PreflightReport:
+    """Parse a preflight report, tolerating unknown check ids and states."""
+    raw = data.get("checks") or []
+    checks = [
+        PreflightCheck(**_filter_fields(PreflightCheck, c)) for c in raw if isinstance(c, dict)
+    ]
+    blocking = data.get("blocking") or []
+    return PreflightReport(
+        header_id=str(data.get("header_id", "")),
+        diagnostic=str(data.get("diagnostic", "")),
+        verdict=str(data.get("verdict", "")),
+        checks=checks,
+        blocking=[str(b) for b in blocking],
+    )
+
+
+def parse_control_path_run(data: dict) -> ControlPathRun:
+    """Parse a discovery run, tolerating unknown tokens and new fields."""
+    channels = [
+        TachChannel(**_filter_fields(TachChannel, c))
+        for c in (data.get("channels") or [])
+        if isinstance(c, dict)
+    ]
+    cycles = []
+    for c in data.get("cycles") or []:
+        if not isinstance(c, dict):
+            continue
+        obs = [
+            TachObservation(**_filter_fields(TachObservation, o))
+            for o in (c.get("observations") or [])
+            if isinstance(o, dict)
+        ]
+        raw_settled = c.get("baseline_settled")
+        raw_wait = c.get("settle_wait_ms")
+        cycles.append(
+            DiscoveryCycle(
+                cycle=int(c.get("cycle") or 0),
+                baseline_pct=int(c.get("baseline_pct") or 0),
+                perturbed_pct=int(c.get("perturbed_pct") or 0),
+                direction=str(c.get("direction", "")),
+                observations=obs,
+                baseline_settled=raw_settled if isinstance(raw_settled, bool) else None,
+                settle_wait_ms=(
+                    raw_wait
+                    if isinstance(raw_wait, int) and not isinstance(raw_wait, bool)
+                    else None
+                ),
+            )
+        )
+    raw_summary = data.get("summary")
+    summary = None
+    if isinstance(raw_summary, dict):
+        candidates = [
+            ControlPathCandidate(**_filter_fields(ControlPathCandidate, c))
+            for c in (raw_summary.get("candidates") or [])
+            if isinstance(c, dict)
+        ]
+        notes = [str(n) for n in (raw_summary.get("confidence_notes") or [])]
+        summary = DiscoverySummary(
+            relationship=str(raw_summary.get("relationship", "")),
+            confidence=str(raw_summary.get("confidence", "")),
+            candidates=candidates,
+            measurement_resolution_ms=raw_summary.get("measurement_resolution_ms"),
+            sample_interval_ms=int(raw_summary.get("sample_interval_ms") or 0),
+            sample_count=int(raw_summary.get("sample_count") or 0),
+            confidence_notes=notes,
+        )
+    return ControlPathRun(
+        run_id=str(data.get("run_id", "")),
+        header_id=str(data.get("header_id", "")),
+        state=str(data.get("state", "")),
+        delta_pct=int(data.get("delta_pct") or 0),
+        requested_cycles=int(data.get("requested_cycles") or 0),
+        window_seconds=int(data.get("window_seconds") or 0),
+        baseline_pct=int(data.get("baseline_pct") or 0),
+        perturbed_pct=int(data.get("perturbed_pct") or 0),
+        direction=str(data.get("direction", "")),
+        channels=channels,
+        cycles=cycles,
+        summary=summary,
+        original_pct=data.get("original_pct"),
+        restore_failed=bool(data.get("restore_failed", False)),
+        restore_outcome=str(data.get("restore_outcome", "")),
+        detail=data.get("detail"),
+        completed_unix_ms=data.get("completed_unix_ms"),
+        current_step=parse_run_step(data.get("current_step")),
+    )
+
+
+def parse_control_path_status(data: dict) -> ControlPathStatus:
+    """Parse ``GET /diagnostics/control-path``."""
+    raw_run = data.get("run")
+    records = [
+        ControlPathRecord(**_filter_fields(ControlPathRecord, r))
+        for r in (data.get("records") or [])
+        if isinstance(r, dict)
+    ]
+    return ControlPathStatus(
+        run=parse_control_path_run(raw_run) if isinstance(raw_run, dict) else None,
+        records=records,
+        from_status_endpoint=True,
+    )
+
+
+def parse_hwmon_verify_result(data: dict) -> HwmonVerifyResult:
+    def _parse_state(raw: dict) -> HwmonVerifyState:
+        return HwmonVerifyState(**_filter_fields(HwmonVerifyState, raw))
+
+    return HwmonVerifyResult(
+        header_id=data.get("header_id", ""),
+        result=data.get("result", ""),
+        initial_state=_parse_state(data.get("initial_state") or {}),
+        final_state=_parse_state(data.get("final_state") or {}),
+        test_pwm_percent=data.get("test_pwm_percent", 0),
+        wait_seconds=data.get("wait_seconds", 0),
+        details=data.get("details", ""),
+        restore_failed=bool(data.get("restore_failed", False)),
+    )
+
+
+def parse_gpu_verify_result(data: dict) -> GpuVerifyResult:
+    def _parse_state(raw: dict) -> GpuVerifyState:
+        return GpuVerifyState(**_filter_fields(GpuVerifyState, raw or {}))
+
+    return GpuVerifyResult(
+        gpu_id=data.get("gpu_id", ""),
+        result=data.get("result", ""),
+        initial_state=_parse_state(data.get("initial_state") or {}),
+        final_state=_parse_state(data.get("final_state") or {}),
+        test_speed_pct=data.get("test_speed_pct", 0),
+        wait_seconds=data.get("wait_seconds", 0),
+        fan_control_method=data.get("fan_control_method", ""),
+        details=data.get("details", ""),
+        restore_failed=bool(data.get("restore_failed", False)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Validation sessions (AIO-MB Phase 5, daemon >= 2.32.0)
+# ---------------------------------------------------------------------------
+#
+# A validation session records what an already-configured cooler actually did,
+# and may orchestrate the existing PWM verify and characterisation to produce
+# evidence about it. Phase 5 shipped the model and the serializers; **Phase 6
+# (DEC-318) added every pixel**, in `ui/widgets/validation_session_dialog.py`.
+# There is still deliberately no page, dialog or button in THIS module.
+#
+# Two rules run through all of it, and both are the daemon's semantics rather
+# than the GUI's to reinterpret:
+#
+#   * The daemon owns result meaning. A finding arrives pre-decided; the GUI
+#     renders wording for a token and never recalculates PASS/FAIL/override.
+#   * Every enum-ish value is an opaque token. An unrecognised one is RENDERED
+#     humanised, never dropped (273-i) — a newer daemon may add one.
+
+# Session lifecycle tokens.
+VALIDATION_STATE_IDLE = "idle"
+VALIDATION_STATE_RECORDING = "recording"
+VALIDATION_STATE_COMPLETED = "completed"
+VALIDATION_STATE_CANCELLED = "cancelled"
+VALIDATION_STATE_INTERRUPTED = "interrupted"
+VALIDATION_STATE_ERROR = "error"
+
+# Result tokens. `UNAVAILABLE` is NOT a failure — the hardware simply does not
+# expose what the finding would need — and absence of a diagnostic is
+# `NOT_TESTED`, never `PASS`.
+VALIDATION_RESULT_PASS = "pass"
+VALIDATION_RESULT_FAIL = "fail"
+VALIDATION_RESULT_OBSERVED = "observed"
+VALIDATION_RESULT_NOT_OBSERVED = "not_observed"
+VALIDATION_RESULT_NOT_TESTED = "not_tested"
+VALIDATION_RESULT_UNKNOWN = "unknown"
+VALIDATION_RESULT_UNAVAILABLE = "unavailable"
+VALIDATION_RESULT_INTERRUPTED = "interrupted"
+
+# Orchestratable diagnostics.
+VALIDATION_DIAG_CHARACTERIZATION = "pwm_characterization"
+VALIDATION_DIAG_CONTROL_PATH = "control_path_discovery"
+#: AIO Phase 8 Batch 2 (DEC-334). Capability-gated on
+#: ``control.pwm_behaviour_characterization``: an unknown token in
+#: ``diagnostics[]`` makes the daemon reject the WHOLE session, so offering it
+#: against an older daemon would break validation entirely rather than degrade
+#: it. Requesting it alongside ``VALIDATION_DIAG_CHARACTERIZATION`` runs only
+#: this one — the daemon supersedes the basic sweep with its superset.
+VALIDATION_DIAG_BEHAVIOUR = "pwm_behaviour_characterization"
+VALIDATION_DIAG_VERIFY = "pwm_verify"
+
+# Session kinds.
+VALIDATION_KIND_VALIDATION = "validation"
+VALIDATION_KIND_LIFECYCLE = "lifecycle"
+#: A thermal observation (DEC-335, daemon >= 2.41.0).
+#:
+#: **Gate on ``control.thermal_observation`` before sending it.** Unlike an
+#: unknown ``diagnostics[]`` token — which the daemon rejects along with the
+#: whole session — an unknown ``kind`` falls back to ``"validation"`` and
+#: returns 200. So an older daemon accepts this request, records an ordinary
+#: validation session, and the client has no way to tell from the response that
+#: it did. The capability flag is the only thing that distinguishes them.
+VALIDATION_KIND_THERMAL = "thermal_observation"
+
+# Steady-state verdicts (DEC-335 §3). Stable tokens; the client owns the
+# wording and must render an unrecognised one rather than dropping it.
+STEADY_STATE_DETECTED = "detected"
+STEADY_STATE_NOT_ESTABLISHED = "not_established"
+#: Distinct from ``not_established``: too little data to judge, rather than a
+#: run that genuinely never settled. §3 asks for both, and collapsing them would
+#: report a short recording as a cooler that cannot stabilise.
+STEADY_STATE_INSUFFICIENT = "insufficient_data"
+
+# Startup-fingerprint interpretations (DEC-335 §1).
+#: The override ended and the commanded duty was honoured throughout — a device
+#: behaviour, explicitly **not** a control fault.
+STARTUP_DEVICE_OVERRIDE = "device_startup_override"
+STARTUP_UNRESOLVED = "override_did_not_resolve"
+STARTUP_NONE_OBSERVED = "no_override_observed"
+#: Command and readback disagreed during the elevated period. Still not a
+#: failure verdict — it says the benign reading is unsupported, which is a
+#: different claim from asserting a fault.
+STARTUP_COMMAND_MISMATCH = "command_readback_mismatch"
+
+
+@dataclass
+class ValidationMemberRole:
+    """A member's role and safety posture, snapshotted at session start."""
+
+    member_id: str = ""
+    label: str = ""
+    # The DISPLAY role. For any safety or truthfulness decision use
+    # ``pump_protected`` below, which is the daemon's own union predicate
+    # (DEC-312) — a user may assign `chassis_fan` to a header the hardware
+    # labels `PUMP`, and the display role then lies about what the daemon does.
+    role: str = "unknown"
+    # "pump" | "radiator" | "auxiliary" — this member's place in the device.
+    member_kind: str = ""
+    pump_protected: bool = False
+    effective_min_pwm_pct: int | None = None
+    stop_permitted: bool | None = None
+    writable: bool = False
+
+
+@dataclass
+class ValidationDevicePolicy:
+    """The compiled-in device policy in force for a session."""
+
+    id: str = ""
+    display_name: str = ""
+    minimum_safe_pwm_pct: float = 0.0
+    supports_stop: bool = False
+    startup_override_seconds: int | None = None
+    expected_rpm_min: int | None = None
+    expected_rpm_max: int | None = None
+    internal_control_possible: bool = False
+
+
+@dataclass
+class ValidationMetadata:
+    """Everything fixed at session start — topology, roles, policy, profile."""
+
+    cooling_device_id: str = ""
+    device_name: str = ""
+    device_kind: str = "unknown"
+    pump_member: str | None = None
+    radiator_members: list[str] = field(default_factory=list)
+    auxiliary_members: list[str] = field(default_factory=list)
+    temperature_sensor: str | None = None
+    coolant_sensor: str | None = None
+    # "available" | "unavailable". Unavailable is the NORMAL case for a
+    # motherboard-connected AIO and is never an error.
+    coolant_telemetry: str = "unavailable"
+    device_policy: ValidationDevicePolicy = field(default_factory=ValidationDevicePolicy)
+    members: list[ValidationMemberRole] = field(default_factory=list)
+    active_profile_id: str | None = None
+    active_profile_name: str | None = None
+    daemon_version: str = ""
+    # User/test metadata. Metadata only — it reaches no safety decision, and the
+    # daemon does not claim to have detected any of it electronically.
+    user_metadata: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class ValidationMemberSample:
+    """One member's telemetry at one instant.
+
+    ``requested_pct`` and ``readback_pct`` are separate on purpose and must never
+    be conflated: the first is what the daemon commanded, the second what the
+    hardware reports. A device-side override is exactly the case where they agree
+    with each other and disagree with the RPM.
+    """
+
+    member_id: str = ""
+    role: str = ""
+    requested_pct: int | None = None
+    readback_pct: int | None = None
+    rpm: int | None = None
+    pwm_enable_mode: int | None = None
+    alarm: bool | None = None
+    enable_revert_count: int = 0
+    # "daemon" | "external" | "unknown"
+    ownership: str = "unknown"
+
+
+@dataclass
+class ValidationSample:
+    elapsed_ms: int = 0
+    unix_ms: int = 0
+    temperature_c: float | None = None
+    temperature_sensor: str | None = None
+    coolant_c: float | None = None
+    #: CPU package power in watts (DEC-335 §2), or ``None`` for **not known**.
+    #:
+    #: Never render ``None`` as 0 W or as an idle machine. Three unrelated
+    #: causes produce it and none is zero watts: the host exposes no readable
+    #: source (measured — ``k10temp`` publishes no power attribute at all), this
+    #: is the first tick of a session whose source is a cumulative RAPL counter,
+    #: or the derived value failed the daemon's plausibility guard.
+    package_power_w: float | None = None
+    #: GPU power in watts where the GPU exposes it. A separate heat source in
+    #: the same case; never summed with ``package_power_w``.
+    gpu_power_w: float | None = None
+    thermal_state: str = "normal"
+    members: list[ValidationMemberSample] = field(default_factory=list)
+
+
+@dataclass
+class ValidationEvent:
+    """A point on the session timeline. Phase 6 places these as chart markers."""
+
+    elapsed_ms: int = 0
+    unix_ms: int = 0
+    kind: str = ""
+    detail: str | None = None
+    member_id: str | None = None
+
+
+@dataclass
+class ValidationVerifyEvidence:
+    header_id: str = ""
+    write_ok: bool = False
+    readback_pct: int | None = None
+    requested_pct: int | None = None
+    rpm_before: int | None = None
+    rpm_after: int | None = None
+    detail: str | None = None
+    #: DEC-405 (daemon >= 2.52.0): verify's own ``result`` token. ``None`` from
+    #: an older daemon, which never stored it — and whose three readings above
+    #: were always ``None`` too (`PTR-e`), so absence is not evidence of anything.
+    result: str | None = None
+    #: DEC-405: the verify's restore write failed; the header was left at the
+    #: test duty.
+    restore_failed: bool = False
+
+
+@dataclass
+class ValidationEvidence:
+    """One orchestrated diagnostic, carried by reference.
+
+    ``characterization`` is the Phase 3 run verbatim — every verdict on it is the
+    daemon's, and the GUI recomputes none of them.
+    """
+
+    kind: str = ""
+    member_id: str = ""
+    run_id: str | None = None
+    started_unix_ms: int = 0
+    completed_unix_ms: int | None = None
+    # How the ORCHESTRATION went, not a verdict on the hardware. A diagnostic the
+    # daemon refused is `unavailable`, which never means failure.
+    outcome: str = "unknown"
+    detail: str | None = None
+    characterization: CharacterizationRun | None = None
+    verify: ValidationVerifyEvidence | None = None
+    #: The AIO Phase 8 Batch 1 discovery run, verbatim. Same rule as
+    #: ``characterization``: the relationship, the confidence and the
+    #: measurement resolution are the daemon's, recomputed nowhere.
+    control_path: ControlPathRun | None = None
+
+
+@dataclass
+class ValidationFinding:
+    """One line of the evidence summary.
+
+    ``id`` is a stable token and the GUI owns the wording. An unrecognised id
+    must be rendered humanised, never dropped.
+    """
+
+    id: str = ""
+    state: str = "unknown"
+    detail: str | None = None
+    member_id: str | None = None
+    evidence_kind: str | None = None
+
+
+@dataclass
+class ValidationExternalMeasurement:
+    """A meter reading typed in by a person. Explicitly untrusted; the daemon
+    stores and returns these and no control path consults one."""
+
+    unix_ms: int = 0
+    kind: str = ""
+    value: float = 0.0
+    unit: str = ""
+    member_id: str | None = None
+    note: str | None = None
+
+
+@dataclass
+class ValidationStartupFingerprint:
+    """What one member's fans did just after control was established (§1).
+
+    **Observational, always.** §1 is explicit that a temporary high-RPM period
+    must be representable without being treated as a control failure, so
+    ``interpretation`` carries the daemon's reading and the GUI renders it —
+    it never re-derives a verdict from ``peak_rpm`` alone. A large number beside
+    a duty that was honoured is a device ramping, not a fault.
+    """
+
+    member_id: str = ""
+    role: str = ""
+    override_observed: bool = False
+    override_duration_ms: int | None = None
+    peak_rpm: int | None = None
+    #: The commanded duty during the override, paired with its readback because
+    #: the two agreeing is precisely what rules a control fault out.
+    requested_pct_during: int | None = None
+    readback_pct_during: int | None = None
+    post_override_rpm: int | None = None
+    transition_ms: int | None = None
+    #: A stable token. Render an unrecognised one rather than dropping it.
+    interpretation: str = STARTUP_NONE_OBSERVED
+
+
+@dataclass
+class ValidationSteadyState:
+    """§3's outcome. Every magnitude is optional: unknown is not zero."""
+
+    verdict: str = STEADY_STATE_INSUFFICIENT
+    start_ms: int | None = None
+    warmup_ms: int | None = None
+    slope_c_per_min: float | None = None
+    stddev_c: float | None = None
+    mean_c: float | None = None
+    #: Peak across the WHOLE observation, including warm-up — a spike during
+    #: the ramp is still the hottest moment the run saw.
+    peak_c: float | None = None
+    confidence: str = "low"
+    #: The exact rule the daemon applied, which §3 requires be reported.
+    #:
+    #: **Render this string; never restate the thresholds in GUI copy.** The
+    #: daemon builds it from its own constants, so a hardcoded copy here would
+    #: be falsified the moment either constant moved — the failure the project rulebook
+    #: records for the emergency threshold, one domain over.
+    criterion: str = ""
+
+
+@dataclass
+class ValidationSession:
+    session_id: str = ""
+    kind: str = VALIDATION_KIND_VALIDATION
+    state: str = VALIDATION_STATE_IDLE
+    started_unix_ms: int = 0
+    completed_unix_ms: int | None = None
+    metadata: ValidationMetadata = field(default_factory=ValidationMetadata)
+    requested_diagnostics: list[str] = field(default_factory=list)
+    sweep_members: list[str] = field(default_factory=list)
+    samples: list[ValidationSample] = field(default_factory=list)
+    events: list[ValidationEvent] = field(default_factory=list)
+    evidence: list[ValidationEvidence] = field(default_factory=list)
+    external_measurements: list[ValidationExternalMeasurement] = field(default_factory=list)
+    findings: list[ValidationFinding] = field(default_factory=list)
+    sample_limit_reached: bool = False
+    interrupted_reason: str | None = None
+    truncated_at_unix_ms: int | None = None
+    #: Opened by the daemon at startup rather than by an operator (DEC-335 §1,
+    #: ``[startup] record_startup``). Display-only here — the daemon owns both
+    #: behaviours that hang off it (operator pre-emption and its own retention
+    #: slot), and the GUI must not re-derive either.
+    auto_started: bool = False
+    #: This session finalises itself when its orchestrated diagnostics finish,
+    #: because the start request asked it to (`P8-az`, daemon >= 2.43.0).
+    #:
+    #: **Render THIS, never what the dialog asked for.** A client that remembers
+    #: its own request cannot tell an accepted flag from one an older daemon
+    #: parsed and dropped; this field is the daemon's own answer. Absent — every
+    #: daemon before 2.43.0 — reads as ``False``, which is exactly right: that
+    #: daemon does not stop the session either.
+    stop_when_diagnostics_complete: bool = False
+    #: Per-member startup behaviour (DEC-335 §1). Empty when nothing was
+    #: derivable; never a row of zeroes.
+    startup_fingerprints: list[ValidationStartupFingerprint] = field(default_factory=list)
+    #: Steady-state analysis of the control temperature (DEC-335 §3).
+    #:
+    #: ``None`` means the session recorded no temperature at all. A session that
+    #: recorded temperature and did not settle carries a result whose verdict is
+    #: ``not_established`` — a finding, not an absence.
+    steady_state: ValidationSteadyState | None = None
+
+    @property
+    def is_recording(self) -> bool:
+        return self.state == VALIDATION_STATE_RECORDING
+
+
+@dataclass
+class ValidationSessionSummary:
+    """The miniature that rides ``/status`` + ``/poll``."""
+
+    session_id: str = ""
+    kind: str = VALIDATION_KIND_VALIDATION
+    state: str = VALIDATION_STATE_IDLE
+    elapsed_ms: int = 0
+    sample_count: int = 0
+    event_count: int = 0
+    sample_limit_reached: bool = False
+    cooling_device_id: str = ""
+
+    @property
+    def is_recording(self) -> bool:
+        return self.state == VALIDATION_STATE_RECORDING
+
+
+@dataclass
+class ValidationSessionIndexEntry:
+    """One row of ``GET /validation/sessions`` — enough to pick a session."""
+
+    session_id: str = ""
+    kind: str = VALIDATION_KIND_VALIDATION
+    state: str = VALIDATION_STATE_IDLE
+    started_unix_ms: int = 0
+    completed_unix_ms: int | None = None
+    cooling_device_id: str = ""
+    device_name: str = ""
+    sample_count: int = 0
+    event_count: int = 0
+    sample_limit_reached: bool = False
+    interrupted_reason: str | None = None
+
+
+def parse_validation_session(data: dict) -> ValidationSession:
+    """Parse a full session body from ``GET/POST /validation/session``.
+
+    A pre-2.32 daemon 404s the route, so the caller gates on
+    ``capabilities.control.validation_sessions``; this assumes a 200 body.
+    """
+    session = ValidationSession(**_filter_fields(ValidationSession, data))
+
+    # Unconditional, unlike the `isinstance` guards below it. An explicit
+    # ``"metadata": null`` on the wire passes straight through ``_filter_fields``
+    # and overwrites the default factory with ``None``, which every consumer then
+    # dereferences — the view-model raises ``AttributeError`` on the first field
+    # it reads. The list fields are already reassigned unconditionally; this one
+    # was the exception.
+    meta_raw = data.get("metadata")
+    session.metadata = (
+        _validation_metadata_from(meta_raw) if isinstance(meta_raw, dict) else ValidationMetadata()
+    )
+
+    # Same defensiveness for the two token lists: a non-list here would be
+    # iterated character-by-character by anything rendering it.
+    for name in ("requested_diagnostics", "sweep_members"):
+        value = getattr(session, name)
+        if not isinstance(value, list):
+            setattr(session, name, [])
+        else:
+            setattr(session, name, [str(v) for v in value])
+
+    session.samples = [
+        _validation_sample_from(s) for s in data.get("samples", []) if isinstance(s, dict)
+    ]
+    session.events = [
+        ValidationEvent(**_filter_fields(ValidationEvent, e))
+        for e in data.get("events", [])
+        if isinstance(e, dict)
+    ]
+    session.evidence = [
+        _validation_evidence_from(e) for e in data.get("evidence", []) if isinstance(e, dict)
+    ]
+    session.external_measurements = [
+        ValidationExternalMeasurement(**_filter_fields(ValidationExternalMeasurement, m))
+        for m in data.get("external_measurements", [])
+        if isinstance(m, dict)
+    ]
+    # DEC-335. Both are absent from a pre-2.41.0 daemon and default empty/None,
+    # which every consumer must treat as "this daemon does not derive it" rather
+    # than as a negative result.
+    session.startup_fingerprints = [
+        ValidationStartupFingerprint(**_filter_fields(ValidationStartupFingerprint, f))
+        for f in data.get("startup_fingerprints", [])
+        if isinstance(f, dict)
+    ]
+    steady = data.get("steady_state")
+    session.steady_state = (
+        ValidationSteadyState(**_filter_fields(ValidationSteadyState, steady))
+        if isinstance(steady, dict)
+        else None
+    )
+    session.findings = [
+        ValidationFinding(**_filter_fields(ValidationFinding, f))
+        for f in data.get("findings", [])
+        if isinstance(f, dict)
+    ]
+    return session
+
+
+def _validation_metadata_from(raw: dict) -> ValidationMetadata:
+    meta = ValidationMetadata(**_filter_fields(ValidationMetadata, raw))
+    policy = raw.get("device_policy")
+    if isinstance(policy, dict):
+        meta.device_policy = ValidationDevicePolicy(
+            **_filter_fields(ValidationDevicePolicy, policy)
+        )
+    meta.members = [
+        ValidationMemberRole(**_filter_fields(ValidationMemberRole, m))
+        for m in raw.get("members", [])
+        if isinstance(m, dict)
+    ]
+    user_meta = raw.get("user_metadata")
+    meta.user_metadata = (
+        {str(k): str(v) for k, v in user_meta.items()} if isinstance(user_meta, dict) else {}
+    )
+    return meta
+
+
+def _validation_sample_from(raw: dict) -> ValidationSample:
+    sample = ValidationSample(**_filter_fields(ValidationSample, raw))
+    sample.members = [
+        ValidationMemberSample(**_filter_fields(ValidationMemberSample, m))
+        for m in raw.get("members", [])
+        if isinstance(m, dict)
+    ]
+    return sample
+
+
+def _validation_evidence_from(raw: dict) -> ValidationEvidence:
+    ev = ValidationEvidence(**_filter_fields(ValidationEvidence, raw))
+    char = raw.get("characterization")
+    if isinstance(char, dict):
+        # Reuse the Phase 3 parser rather than a second copy — the run is the
+        # daemon's verbatim, and parsing it differently here is how the two would
+        # drift.
+        ev.characterization = parse_characterization_run(char)
+    verify = raw.get("verify")
+    if isinstance(verify, dict):
+        ev.verify = ValidationVerifyEvidence(**_filter_fields(ValidationVerifyEvidence, verify))
+    path = raw.get("control_path")
+    if isinstance(path, dict):
+        # Same rule as `characterization` above: reuse the one parser, so the
+        # run means the same thing whether it arrived on its own endpoint or
+        # inside a session's evidence.
+        ev.control_path = parse_control_path_run(path)
+    return ev
+
+
+def parse_validation_session_summary(data: dict) -> ValidationSessionSummary | None:
+    """Parse the ``validation_session`` block from ``/status`` or ``/poll``.
+
+    ``None`` when the daemon omitted it — no session has ever run, or the daemon
+    predates Phase 5. Absence is not an error.
+    """
+    raw = data.get("validation_session")
+    if not isinstance(raw, dict):
+        return None
+    return ValidationSessionSummary(**_filter_fields(ValidationSessionSummary, raw))
+
+
+def parse_validation_session_index(data: dict) -> list[ValidationSessionIndexEntry]:
+    """Parse ``GET /validation/sessions``, newest first."""
+    return [
+        ValidationSessionIndexEntry(**_filter_fields(ValidationSessionIndexEntry, s))
+        for s in data.get("sessions", [])
+        if isinstance(s, dict)
+    ]

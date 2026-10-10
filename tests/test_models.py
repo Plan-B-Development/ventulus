@@ -1,0 +1,1040 @@
+"""Tests for API response model parsing."""
+
+from __future__ import annotations
+
+from ventulus.api.models import (
+    DEFAULT_DAEMON_POLL_INTERVAL_MS,
+    FanReading,
+    Freshness,
+    SensorReading,
+    parse_capabilities,
+    parse_fans,
+    parse_hwmon_inventory,
+    parse_inventory_readiness,
+    parse_openfan_calibration_run,
+    parse_preferred_sensor,
+    parse_sensor_history,
+    parse_sensors,
+    parse_status,
+)
+
+
+def test_parse_capabilities_minimal():
+    data = {"api_version": 1, "daemon_version": "0.1.0", "ipc_transport": "uds"}
+    caps = parse_capabilities(data)
+    assert caps.api_version == 1
+    assert caps.daemon_version == "0.1.0"
+    assert caps.openfan.present is False
+
+
+def test_parse_capabilities_full():
+    data = {
+        "api_version": 1,
+        "daemon_version": "0.1.0",
+        "ipc_transport": "uds",
+        "devices": {
+            "openfan": {"present": True, "channels": 8, "rpm_support": True, "write_support": True},
+            "hwmon": {
+                "present": True,
+                "pwm_header_count": 3,
+                "write_support": True,
+            },
+            "aio_hwmon": {"present": False, "status": "unsupported"},
+            "aio_usb": {"present": False, "status": "unsupported"},
+        },
+        "features": {
+            "openfan_write_supported": True,
+            "hwmon_write_supported": True,
+        },
+        "limits": {
+            "pwm_percent_min": 0,
+            "pwm_percent_max": 100,
+            "openfan_stop_timeout_s": 8,
+        },
+    }
+    caps = parse_capabilities(data)
+    assert caps.openfan.present is True
+    assert caps.openfan.channels == 8
+    assert caps.hwmon.pwm_header_count == 3
+
+
+def test_parse_capabilities_ignores_legacy_lease_fields():
+    # DEC-170: the lease capability surface was retired. A payload from an older
+    # daemon may still carry lease_required / lease_required_for_hwmon_writes; the
+    # GUI must parse it without error and simply drop the now-unknown fields.
+    data = {
+        "devices": {
+            "hwmon": {
+                "present": True,
+                "pwm_header_count": 2,
+                "lease_required": True,
+                "write_support": True,
+            },
+        },
+        "features": {
+            "hwmon_write_supported": True,
+            "lease_required_for_hwmon_writes": True,
+        },
+    }
+    caps = parse_capabilities(data)
+    assert caps.hwmon.present is True
+    assert caps.hwmon.write_support is True
+    assert not hasattr(caps.hwmon, "lease_required")
+    assert not hasattr(caps.features, "lease_required_for_hwmon_writes")
+
+
+def test_parse_status():
+    data = {
+        "api_version": 1,
+        "overall_status": "healthy",
+        "subsystems": [
+            {"name": "openfan", "status": "ok", "age_ms": 500, "reason": ""},
+        ],
+    }
+    status = parse_status(data)
+    assert status.overall_status == "healthy"
+    assert len(status.subsystems) == 1
+    assert status.subsystems[0].name == "openfan"
+
+
+def test_parse_status_extracts_uptime():
+    data = {
+        "overall_status": "ok",
+        "subsystems": [],
+        "uptime_seconds": 3600,
+    }
+    status = parse_status(data)
+    assert status.uptime_seconds == 3600
+
+
+def test_parse_status_missing_uptime_is_none():
+    data = {"overall_status": "ok", "subsystems": []}
+    status = parse_status(data)
+    assert status.uptime_seconds is None
+
+
+def test_parse_status_preserves_daemon_health_vocabulary():
+    # Source of truth: the daemon's HealthStatus::Display emits exactly
+    # "ok"/"warn"/"crit" (ventulusd daemon/src/health/staleness.rs;
+    # paired tripwire test `health_status_display_wire_strings`). See
+    # docs/08_API_Integration_Contract.md (GET /status). parse_status must keep
+    # them verbatim — the GUI distinguishes them from the "unknown" fallback.
+    data = {
+        "overall_status": "warn",
+        "subsystems": [
+            {"name": "openfan", "status": "ok", "age_ms": 100, "reason": ""},
+            {"name": "hwmon", "status": "warn", "age_ms": 3000, "reason": "readings stale"},
+        ],
+        "counters": {},
+    }
+    status = parse_status(data)
+    assert status.overall_status == "warn"
+    assert [s.status for s in status.subsystems] == ["ok", "warn"]
+    # "crit" is the third documented value — pin it too.
+    crit = parse_status({"overall_status": "crit", "subsystems": [], "counters": {}})
+    assert crit.overall_status == "crit"
+
+
+def test_parse_status_overrides_and_fan_identify():
+    """DEC-163/166/169: /status carries daemon-held overrides + identify holds.
+    A non-empty payload must round-trip into the model so the Controls page can
+    reconcile foreign overrides and Diagnostics can surface both."""
+    data = {
+        "overall_status": "ok",
+        "subsystems": [],
+        "counters": {},
+        "overrides": [
+            {"control_id": "pump", "pwm_percent": 40, "expires_in_secs": 12},
+            {"control_id": "cpu", "pwm_percent": 75, "expires_in_secs": 3},
+        ],
+        "fan_identify": [
+            {"fan_id": "openfan:ch00", "expires_in_secs": 8},
+        ],
+    }
+    status = parse_status(data)
+    assert [(o.control_id, o.pwm_percent, o.expires_in_secs) for o in status.overrides] == [
+        ("pump", 40, 12),
+        ("cpu", 75, 3),
+    ]
+    assert len(status.fan_identify) == 1
+    assert status.fan_identify[0].fan_id == "openfan:ch00"
+    assert status.fan_identify[0].expires_in_secs == 8
+
+
+def test_parse_status_missing_overrides_defaults_to_empty():
+    """The daemon omits both Vecs from the wire when empty (skip_serializing_if).
+    The model must default to [] so the common-case poll never trips reconcile."""
+    status = parse_status({"overall_status": "ok", "subsystems": [], "counters": {}})
+    assert status.overrides == []
+    assert status.fan_identify == []
+
+
+def test_parse_status_overrides_ignore_unknown_fields():
+    """Forward-compatible: an override/identify entry with extra daemon fields
+    parses (via _filter_fields) rather than crashing the polling loop."""
+    data = {
+        "overall_status": "ok",
+        "subsystems": [],
+        "counters": {},
+        "overrides": [
+            {"control_id": "pump", "pwm_percent": 40, "expires_in_secs": 12, "future": "ignored"},
+        ],
+        "fan_identify": [
+            {"fan_id": "gpu:fan", "expires_in_secs": 5, "added_later": True},
+        ],
+    }
+    status = parse_status(data)
+    assert status.overrides[0].control_id == "pump"
+    assert status.fan_identify[0].fan_id == "gpu:fan"
+
+
+def test_parse_status_unavailable_sensors():
+    """DEC-193: /status carries sensors the daemon discovered but can't read
+    (e.g. an ath12k WiFi temp while the radio is off). A non-empty payload must
+    round-trip so Diagnostics can surface them display-only."""
+    data = {
+        "overall_status": "ok",
+        "subsystems": [],
+        "unavailable_sensors": [
+            {
+                "id": "hwmon:ath12k_hwmon:phy0:temp1",
+                "label": "temp1",
+                "reason": "read error: Network is down (os error 100)",
+                "unavailable_for_ms": 4200,
+            },
+        ],
+    }
+    status = parse_status(data)
+    assert len(status.unavailable_sensors) == 1
+    u = status.unavailable_sensors[0]
+    assert u.id == "hwmon:ath12k_hwmon:phy0:temp1"
+    assert u.label == "temp1"
+    assert "Network is down" in u.reason
+    assert u.unavailable_for_ms == 4200
+
+
+def test_parse_status_missing_unavailable_sensors_defaults_to_empty():
+    """The daemon omits the Vec from the wire when empty — model defaults to []."""
+    status = parse_status({"overall_status": "ok", "subsystems": []})
+    assert status.unavailable_sensors == []
+
+
+def test_parse_status_active_profile_present():
+    """DEC-194: when the daemon mirrors the active profile onto the status, the
+    id+name round-trip so the GUI reflects an external activation every poll."""
+    status = parse_status(
+        {
+            "overall_status": "ok",
+            "subsystems": [],
+            "active_profile_id": "silent",
+            "active_profile_name": "Silent",
+        }
+    )
+    assert status.active_profile_id == "silent"
+    assert status.active_profile_name == "Silent"
+
+
+def test_parse_status_active_profile_absent_is_none():
+    """DEC-194: an absent key (older daemon, or genuinely no active profile) parses
+    to None — NOT "" — so the polling fast-path leaves the /profile/active fallback
+    authoritative rather than clobbering the shown profile with a blank."""
+    status = parse_status({"overall_status": "ok", "subsystems": []})
+    assert status.active_profile_id is None
+    assert status.active_profile_name is None
+
+
+def test_parse_status_readiness_rollup_present():
+    """DEC-206: the daemon mirrors a compact readiness rollup onto the status for
+    the Dashboard chip; overall + counts + top_* round-trip."""
+    status = parse_status(
+        {
+            "overall_status": "ok",
+            "subsystems": [],
+            "readiness": {
+                "overall": "warning",
+                "critical": 0,
+                "warning": 2,
+                "info": 1,
+                "top_summary": "No motherboard PWM fan controls detected",
+                "top_code": "no_pwm_controls",
+            },
+        }
+    )
+    assert status.readiness is not None
+    assert status.readiness.overall == "warning"
+    assert status.readiness.warning == 2
+    assert status.readiness.to_fix_count == 2  # critical + warning, info excluded
+    assert status.readiness.top_code == "no_pwm_controls"
+
+
+def test_parse_status_readiness_absent_is_none():
+    """DEC-206: an absent readiness key (older daemon, or before the daemon's
+    startup seed runs) parses to None so the Dashboard chip stays hidden."""
+    status = parse_status({"overall_status": "ok", "subsystems": []})
+    assert status.readiness is None
+
+
+def test_parse_status_readiness_malformed_or_unknown_fields_tolerated():
+    """A non-dict readiness value → None (chip hidden); unknown nested fields are
+    dropped so a newer daemon that extends the rollup cannot break an older GUI."""
+    assert parse_status({"subsystems": [], "readiness": "nope"}).readiness is None
+    rollup = parse_status(
+        {"subsystems": [], "readiness": {"overall": "critical", "future_field": 9}}
+    ).readiness
+    assert rollup is not None
+    assert rollup.overall == "critical"
+    assert rollup.to_fix_count == 0  # counts absent → 0
+
+
+def test_parse_status_skips_nondict_subsystem_entries():
+    """A non-dict entry in `subsystems` is dropped, not crashed on — matching the
+    overrides/fan_identify/unavailable_sensors comprehensions (audit 2026-07-15
+    Phase 4)."""
+    status = parse_status(
+        {
+            "subsystems": [
+                {"name": "openfan", "status": "ok"},
+                "garbage",
+                None,
+                {"name": "hwmon", "status": "warn"},
+            ]
+        }
+    )
+    assert [s.name for s in status.subsystems] == ["openfan", "hwmon"]
+
+
+def test_parse_sensors():
+    data = {
+        "sensors": [
+            {
+                "id": "hwmon:k10temp:Tctl",
+                "kind": "cpu_temp",
+                "label": "CPU Tctl",
+                "value_c": 45.5,
+                "source": "hwmon",
+                "age_ms": 500,
+            },
+        ]
+    }
+    sensors = parse_sensors(data)
+    assert len(sensors) == 1
+    assert sensors[0].id == "hwmon:k10temp:Tctl"
+    assert sensors[0].value_c == 45.5
+    assert sensors[0].freshness_at(DEFAULT_DAEMON_POLL_INTERVAL_MS) == Freshness.FRESH
+    # DEC-193: a sensor with no control_eligible field defaults to selectable.
+    assert sensors[0].control_eligible is True
+
+
+def test_parse_sensor_control_eligible_false():
+    """DEC-193: the daemon flags wireless-radio temps control_eligible=false so
+    the GUI drops them from the curve picker."""
+    data = {
+        "sensors": [
+            {
+                "id": "hwmon:ath12k_hwmon:phy0:temp1",
+                "kind": "mb_temp",
+                "label": "temp1",
+                "value_c": 48.0,
+                "source": "hwmon",
+                "age_ms": 100,
+                "chip_name": "ath12k_hwmon",
+                "control_eligible": False,
+            },
+        ]
+    }
+    sensors = parse_sensors(data)
+    assert sensors[0].control_eligible is False
+
+
+def test_parse_fans():
+    data = {
+        "fans": [
+            {"id": "openfan:ch00", "source": "openfan", "rpm": 850, "age_ms": 300},
+            {
+                "id": "openfan:ch01",
+                "source": "openfan",
+                "rpm": 900,
+                "last_commanded_pwm": 50,
+                "age_ms": 300,
+            },
+        ]
+    }
+    fans = parse_fans(data)
+    assert len(fans) == 2
+    assert fans[0].rpm == 850
+    assert fans[0].last_commanded_pwm is None
+    assert fans[1].last_commanded_pwm == 50
+
+
+def test_sensor_freshness_stale():
+    s = SensorReading(id="test", age_ms=5000)
+    assert s.freshness_at(DEFAULT_DAEMON_POLL_INTERVAL_MS) == Freshness.STALE
+
+
+def test_sensor_freshness_invalid():
+    s = SensorReading(id="test", age_ms=15000)
+    assert s.freshness_at(DEFAULT_DAEMON_POLL_INTERVAL_MS) == Freshness.INVALID
+
+
+def test_fan_freshness():
+    f = FanReading(id="test", age_ms=500)
+    assert f.freshness_at(DEFAULT_DAEMON_POLL_INTERVAL_MS) == Freshness.FRESH
+
+
+def test_parse_sensor_history():
+    data = {
+        "api_version": 1,
+        "entity_id": "hwmon:k10temp:Tctl",
+        "points": [
+            {"ts": 1711000000000, "v": 42.5},
+            {"ts": 1711000001000, "v": 43.0},
+        ],
+    }
+    result = parse_sensor_history(data)
+    assert result.entity_id == "hwmon:k10temp:Tctl"
+    assert len(result.points) == 2
+    assert result.points[0].ts == 1711000000000
+    assert result.points[0].v == 42.5
+    assert result.points[1].v == 43.0
+
+
+def test_parse_sensor_history_empty():
+    data = {"entity_id": "x", "points": []}
+    result = parse_sensor_history(data)
+    assert result.entity_id == "x"
+    assert result.points == []
+
+
+def test_parse_openfan_calibration_run():
+    """DEC-452's run shape, field for field (DEC-453)."""
+    data = {
+        "run_id": "ofcal-7",
+        "fan_id": "openfan:ch03",
+        "channel": 3,
+        "state": "complete",
+        "phase": None,
+        "current_pct": 18,
+        "hold_ms": 5000,
+        "outcome": "stall_and_restart_found",
+        "abort_reason": None,
+        "detail": None,
+        "stall_duty_pct": 12,
+        "restart_duty_pct": 18,
+        "hysteresis_pct": 6,
+        "min_rpm": 310,
+        "max_rpm": 1650,
+        "restart_failed_at_full": False,
+        "start_cpu_temp_c": 44.5,
+        "max_cpu_temp_c": 46.0,
+        "rise_limit_c": 5.0,
+        "points": [
+            {"pwm_percent": 100, "rpm": 1650, "phase": "descent", "observation": "spinning"},
+            {"pwm_percent": 12, "rpm": 0, "phase": "descent", "observation": "stopped"},
+            {"pwm_percent": 18, "rpm": 310, "phase": "ascent", "observation": "spinning"},
+        ],
+        "original_pct": 40,
+        "restore_outcome": "restored",
+        "restore_failed": False,
+        "started_unix_ms": 1_000,
+        "completed_unix_ms": 181_000,
+    }
+    result = parse_openfan_calibration_run(data)
+    assert result.run_id == "ofcal-7"
+    assert result.channel == 3
+    assert result.stall_duty_pct == 12
+    assert result.restart_duty_pct == 18
+    assert result.hysteresis_pct == 6
+    assert [(p.pwm_percent, p.rpm, p.phase, p.observation) for p in result.points] == [
+        (100, 1650, "descent", "spinning"),
+        (12, 0, "descent", "stopped"),
+        (18, 310, "ascent", "spinning"),
+    ]
+    assert result.original_pct == 40
+    assert result.completed_unix_ms == 181_000
+    assert result.is_running is False
+
+
+# ---------------------------------------------------------------------------
+# Parser resilience — forward-compatibility and missing fields
+# ---------------------------------------------------------------------------
+
+
+class TestParserResilience:
+    """Parsers must handle unknown fields and missing optional fields."""
+
+    def test_sensors_with_extra_fields_ignored(self):
+        """Unknown fields from future daemon versions are silently dropped."""
+        data = {
+            "sensors": [
+                {
+                    "id": "cpu_temp",
+                    "kind": "cpu_temp",
+                    "label": "CPU",
+                    "value_c": 55.0,
+                    "age_ms": 200,
+                    "new_future_field": "should_be_ignored",
+                    "another_unknown": 42,
+                }
+            ]
+        }
+        result = parse_sensors(data)
+        assert len(result) == 1
+        assert result[0].id == "cpu_temp"
+        assert result[0].value_c == 55.0
+
+    def test_fans_with_extra_fields_ignored(self):
+        data = {
+            "fans": [
+                {
+                    "id": "openfan:ch00",
+                    "source": "openfan",
+                    "rpm": 1200,
+                    "age_ms": 100,
+                    "future_metric": True,
+                }
+            ]
+        }
+        result = parse_fans(data)
+        assert len(result) == 1
+        assert result[0].rpm == 1200
+
+    def test_sensors_missing_optional_fields_use_defaults(self):
+        """Missing optional fields fall back to dataclass defaults."""
+        data = {"sensors": [{"id": "s1", "kind": "cpu_temp", "label": "CPU"}]}
+        result = parse_sensors(data)
+        assert result[0].value_c == 0.0
+        assert result[0].age_ms == 0
+
+    def test_fans_empty_list(self):
+        assert parse_fans({"fans": []}) == []
+
+    def test_sensors_empty_list(self):
+        assert parse_sensors({"sensors": []}) == []
+
+    def test_capabilities_with_unknown_device(self):
+        """Extra device entries don't crash parsing."""
+        data = {
+            "devices": {
+                "openfan": {"present": True},
+                "future_device": {"present": True, "model": "X"},
+            },
+            "features": {},
+            "limits": {},
+        }
+        caps = parse_capabilities(data)
+        assert caps.openfan.present is True
+
+    def test_status_with_extra_subsystem_fields(self):
+        """Subsystem entries with unknown fields are handled."""
+        data = {
+            "api_version": 1,
+            "daemon_version": "0.2.0",
+            "overall_status": "ok",
+            "subsystems": [
+                {
+                    "name": "serial",
+                    "status": "ok",
+                    "age_ms": 100,
+                    "reason": None,
+                    "extra_detail": "should_be_ignored",
+                }
+            ],
+            "counters": {},
+        }
+        result = parse_status(data)
+        assert len(result.subsystems) == 1
+        assert result.subsystems[0].name == "serial"
+
+
+# ---------------------------------------------------------------------------
+# T2 (test-tests audit): parser failure-path coverage.
+#
+# Audit finding: parse_* functions are exercised on the happy path and on
+# missing-field / extra-field shapes, but never on type-mismatch shapes
+# (string where int expected, null where string expected, etc.). The
+# `_filter_fields` helper makes most parsers permissive — they drop unknown
+# keys — but a wrong-type value can still raise inside the dataclass
+# constructor. These tests pin the *documented* behaviour: the parsers
+# return safe defaults via .get() rather than propagating raw KeyError /
+# TypeError surfaces, and any required-field omission yields the default
+# value the GUI is built around.
+# ---------------------------------------------------------------------------
+
+
+class TestParserFailureModes:
+    def test_parse_sensors_with_missing_id_uses_empty_string_default(self):
+        """SensorReading.id defaults to "" so a malformed daemon response
+        produces a parseable reading with empty id rather than crashing
+        the polling loop. Locks the safe-defaults contract: bad upstream
+        data degrades gracefully, the UI flags it later."""
+        sensors = parse_sensors({"sensors": [{"value_c": 50.0}]})
+        assert len(sensors) == 1
+        assert sensors[0].id == ""
+        assert sensors[0].value_c == 50.0
+
+    def test_parse_sensors_with_wrong_type_in_value_field_passes_through(self):
+        """_filter_fields does no type coercion — strings flow into float
+        fields. The downstream consumer (UI) is responsible for handling
+        bad types. Lock the behaviour: parser does not raise, value is
+        stored verbatim. Catches accidental introduction of coercion that
+        would mask upstream daemon bugs."""
+        sensors = parse_sensors(
+            {"sensors": [{"id": "cpu", "value_c": "not-a-number", "age_ms": 0}]}
+        )
+        assert len(sensors) == 1
+        assert sensors[0].value_c == "not-a-number"
+
+    def test_parse_status_missing_overall_status_defaults_to_unknown(self):
+        """Required-on-the-wire field missing → parser falls back to
+        'unknown' string rather than raising. The UI distinguishes
+        'unknown' from 'ok' so this default carries meaning."""
+        result = parse_status({})
+        assert result.overall_status == "unknown"
+        assert result.subsystems == []
+
+    def test_parse_capabilities_with_completely_empty_input(self):
+        """The smoke test: an empty dict must yield sensible defaults
+        across every nested capability field. This is the
+        worst-case-still-survivable shape.
+
+        `limits` is deliberately absent from the assertions and from the model:
+        `SafetyLimits` was deleted with the P3 capability cleanup because nothing
+        ever read it — the daemon clamps authoritatively (DEC-163), so a GUI-side
+        mirror of its limits described a decision the GUI does not make.
+        Precedent: DEC-224 dropped four written-never-read settings keys. The
+        daemon still sends the block; `_filter_fields` drops unknown keys, so
+        parsing is unaffected — which the assertion below pins."""
+        caps = parse_capabilities({})
+        assert caps.api_version == 1
+        assert caps.daemon_version == ""
+        assert caps.openfan.present is False
+        assert caps.hwmon.present is False
+        assert caps.amd_gpu.present is False
+        # `limits` models only fields with a consumer. The P3 capability cleanup
+        # deleted the whole `SafetyLimits` block because nothing read it, and
+        # set the bar for re-adding at "find a consumer first". `WIRE-d` re-added
+        # `openfan_stop_timeout_s` for the Fan Wizard's spin-down ceiling; DEC-426
+        # removed that ceiling (the daemon does not restart a stopped OpenFan
+        # fan), so it is unmodelled again beside the PWM band. The assertions
+        # below keep that deliberate (all three are declared `unmodelled` in
+        # wire_fields.json, which since `AU-d` is a different bucket from `inert`).
+        assert caps.limits.diagnostic_max_temp_c is None
+        assert not hasattr(caps.limits, "openfan_stop_timeout_s")
+        assert not hasattr(caps.limits, "pwm_percent_min"), (
+            "The daemon clamps authoritatively (DEC-163); a GUI mirror of the PWM "
+            "band describes a decision the GUI does not make. Find a consumer first."
+        )
+
+    def test_parse_capabilities_with_null_devices_field_falls_back(self):
+        """A JSON `null` for `devices` degrades to defaults instead of raising.
+
+        This test used to assert the opposite, deliberately: it locked the
+        AttributeError in place "so a future contributor cannot quietly fix it
+        without an audit". Register row `WIRE-aa` is that audit, and it went the
+        other way — `parse_capabilities` is the startup gate for every control
+        feature, so a malformed response should cost the GUI its capabilities,
+        not its startup. Still unreachable against the shipping daemon (both
+        keys are non-Option Rust structs); the sibling row `WIRE-t` is the same
+        judgement about defaults, one field over.
+        """
+        caps = parse_capabilities({"devices": None})
+        assert caps.amd_gpu.present is False
+        # The guard must not flatten the healthy path.
+        assert (
+            parse_capabilities({"devices": {"amd_gpu": {"present": True}}}).amd_gpu.present is True
+        )
+
+    def test_parse_sensors_with_nonlist_sensors_field_raises(self):
+        """If `sensors` is a dict instead of a list (bad daemon shape),
+        the list comprehension raises — not silently treats it as empty.
+        This blast-radius is acceptable because the only callsite (the
+        polling worker) wraps parse_sensors in DaemonError handling."""
+        import pytest
+
+        with pytest.raises((TypeError, AttributeError)):
+            parse_sensors({"sensors": {"cpu": {"value_c": 50.0}}})
+
+    def test_parse_fans_with_nonlist_fans_field_raises(self):
+        """`fans` as a dict (bad daemon shape) raises, matching parse_sensors —
+        a malformed payload is not silently treated as an empty fan table. The
+        only callsite (the polling worker) wraps this in DaemonError handling."""
+        import pytest
+
+        with pytest.raises(TypeError):
+            parse_fans({"fans": {"ch00": {"rpm": 850}}})
+
+    def test_parse_fans_skips_non_dict_elements(self):
+        """A non-dict element inside a well-formed `fans` list (malformed daemon
+        payload) is skipped, not crashed on. Without the per-element dict guard,
+        `_filter_fields(FanReading, None)` raises AttributeError — which the poll
+        worker's except clause does NOT catch — freezing the fan table every 1 Hz
+        poll (release-review finding B). Mirrors parse_sensors' per-element guard."""
+        result = parse_fans({"fans": [{"id": "f1", "source": "openfan"}, None, "junk", 42]})
+        assert [f.id for f in result] == ["f1"]
+
+    def test_parse_openfan_calibration_run_tolerates_null_and_junk_points(self):
+        """A run refused before its first write has no points; a null list or a
+        non-dict element must yield an empty or filtered list, not a crash."""
+        result = parse_openfan_calibration_run({"fan_id": "openfan:ch00", "points": None})
+        assert result.points == []
+        assert result.min_rpm is None
+        result = parse_openfan_calibration_run(
+            {"points": [None, "junk", {"pwm_percent": 30, "rpm": 0}]}
+        )
+        assert [p.pwm_percent for p in result.points] == [30]
+
+    def test_parse_sensor_history_missing_v_uses_zero_default(self):
+        """HistoryPoint.v defaults to 0.0 so a malformed point still parses
+        (charts may render a zero line briefly until the next poll). Locks
+        the safe-defaults contract — the alternative is the entire poll
+        cycle bombing out on one bad point."""
+        result = parse_sensor_history({"entity_id": "cpu", "points": [{"ts": 1234}]})
+        assert result.entity_id == "cpu"
+        assert len(result.points) == 1
+        assert result.points[0].ts == 1234
+        assert result.points[0].v == 0.0
+
+
+# --- Phase 4 (DEC-200): inventory + readiness + preferred-sensor parsers ---
+
+
+def test_parse_hwmon_inventory_full():
+    data = {
+        "api_version": 1,
+        "temp_sensors": [
+            {
+                "id": "hwmon:k10temp:x:Tctl",
+                "label": "Tctl",
+                "kind": "cpu_temp",
+                "classification": "cpu_tctl",
+                "confidence": "high",
+                "rationale": "k10temp Tctl control temperature",
+            }
+        ],
+        "default_cpu": {
+            "sensor_id": "hwmon:k10temp:x:Tctl",
+            "confidence": "high",
+            "source": "user",
+        },
+        "preferences": {"cpu_sensor_id": "hwmon:k10temp:x:Tctl"},
+        "pwm_controls": [
+            {
+                "id": "hwmon:nct6799:isa:pwm2",
+                "label": "pwm2",
+                "chip_name": "nct6799",
+                "device_id": "isa",
+                "pwm_index": 2,
+                "supports_enable": True,
+                "rpm_available": True,
+                # Deliberately non-default values so a field-name typo cannot
+                # hide behind the dataclass default.
+                "min_pwm_percent": 5,
+                "max_pwm_percent": 95,
+                "is_writable": True,
+                "pwm_mode": 1,
+                "is_aio": False,
+            }
+        ],
+        "monitor_only_fans": [
+            {
+                "id": "hwmon:nct6799:isa:fan5",
+                "source": "hwmon",
+                "chip_name": "nct6799",
+                "label": "fan5",
+                "fan_index": 5,
+            }
+        ],
+    }
+    inv = parse_hwmon_inventory(data)
+    assert inv.temp_sensors[0].classification == "cpu_tctl"
+    assert inv.temp_sensors[0].control_eligible is True  # absent → default True
+    assert inv.default_cpu.source == "user"
+    assert inv.preferences.cpu_sensor_id == "hwmon:k10temp:x:Tctl"
+    assert inv.preferences.mb_sensor_id is None
+    # CONTR-1 (2026-07-21 audit): the previously-dropped lists are modelled.
+    # Every field IN THIS PAYLOAD is asserted, so a dataclass field-name typo —
+    # which `_filter_fields` silently drops, substituting the default — trips
+    # here. The qualifier is not pedantry: this comment used to claim "every
+    # field" outright and was falsified the moment DEC-316 added eight more to
+    # the wire struct without touching this fixture, which is precisely the
+    # `WIRE-i` failure one file over. The DEC-316 fields have their own parse
+    # test in `test_wire_g3_inventory_models.py`; their absence from THIS
+    # payload is asserted below, because absent must mean None and never 0.
+    pwm = inv.pwm_controls[0]
+    assert pwm.id == "hwmon:nct6799:isa:pwm2"
+    assert pwm.label == "pwm2"
+    assert pwm.chip_name == "nct6799"
+    assert pwm.device_id == "isa"
+    assert pwm.pwm_index == 2
+    assert pwm.supports_enable is True
+    assert pwm.rpm_available is True
+    assert pwm.min_pwm_percent == 5
+    assert pwm.max_pwm_percent == 95
+    assert pwm.is_writable is True
+    assert pwm.pwm_mode == 1
+    assert pwm.is_aio is False
+    # DEC-316 fields absent from the payload → None, never 0. `WIRE-h`/`WIRE-t`:
+    # a 0 here would advertise a 0% floor on a pump, and a True `is_writable`
+    # would make a read-only header look controllable.
+    assert pwm.effective_min_pwm_pct is None
+    assert pwm.stop_permitted is None
+    assert pwm.cooling_device_id is None
+    fan = inv.monitor_only_fans[0]
+    assert fan.id == "hwmon:nct6799:isa:fan5"
+    assert fan.source == "hwmon"
+    assert fan.chip_name == "nct6799"
+    assert fan.label == "fan5"
+    assert fan.fan_index == 5
+
+
+def test_parse_hwmon_inventory_absent_optionals_default_none():
+    inv = parse_hwmon_inventory({"api_version": 1, "temp_sensors": []})
+    assert inv.default_cpu is None
+    assert inv.preferences is None
+    assert inv.temp_sensors == []
+    # monitor_only_fans is omitted-when-empty on the wire; pwm_controls may be
+    # absent from older payloads — both default to [].
+    assert inv.pwm_controls == []
+    assert inv.monitor_only_fans == []
+
+
+def test_parse_hwmon_inventory_ignores_unknown_fields():
+    # Forward-compat: unknown daemon fields must not break parsing, and a
+    # minimal entry parses to per-field defaults (additive tolerance).
+    data = {
+        "temp_sensors": [{"id": "s1", "classification": "vrm_temp", "future_field": 99}],
+        "pwm_controls": [{"id": "p1", "future_field": 1}],
+        "monitor_only_fans": [{"id": "f1", "future_field": 2}],
+    }
+    inv = parse_hwmon_inventory(data)
+    assert inv.temp_sensors[0].classification == "vrm_temp"
+    assert inv.pwm_controls[0].id == "p1"
+    assert inv.pwm_controls[0].pwm_mode is None  # absent optional
+    assert inv.pwm_controls[0].is_writable is False  # safe default
+    assert inv.monitor_only_fans[0].id == "f1"
+    assert inv.monitor_only_fans[0].source == "hwmon"
+
+
+def test_parse_inventory_readiness_and_defensive_entries():
+    data = {
+        "api_version": 1,
+        "overall": "critical",
+        "items": [
+            {
+                "code": "cpu_sensor_missing",
+                "severity": "critical",
+                "component": "cpu",
+                "summary": "No CPU temperature sensor detected",
+                "recommended_action": "Load the CPU driver",
+                "affects_safety": True,
+            },
+            "not-a-dict",  # defensive: non-dict entries dropped
+        ],
+    }
+    r = parse_inventory_readiness(data)
+    assert r.overall == "critical"
+    assert len(r.items) == 1
+    assert r.items[0].affects_safety is True
+    assert r.items[0].blocks_control is False  # absent → default False
+
+
+def test_parse_inventory_readiness_missing_severity_defaults_info():
+    r = parse_inventory_readiness({"overall": "ok", "items": [{"code": "x"}]})
+    assert r.items[0].severity == "info"
+
+
+def test_parse_preferred_sensor_set_and_clear():
+    set_res = parse_preferred_sensor(
+        {"updated": True, "role": "cpu", "preferred_sensor": "hwmon:x:Tctl"}
+    )
+    assert set_res.updated is True
+    assert set_res.role == "cpu"
+    assert set_res.preferred_sensor == "hwmon:x:Tctl"
+
+    clear_res = parse_preferred_sensor({"updated": True, "role": "mb", "preferred_sensor": None})
+    assert clear_res.preferred_sensor is None
+
+
+def test_parse_status_defaults_skipped_controls_for_an_older_daemon():
+    """273-i: daemons before 2.21.0 omit the key entirely, and any daemon omits
+    it when nothing is skipped. Both must read as "nothing skipped" — the GUI
+    must never need to know the daemon's version to interpret this."""
+    from ventulus.api.models import parse_status
+
+    assert parse_status({}).skipped_controls == []
+
+
+def test_parse_status_reads_skipped_controls():
+    from ventulus.api.models import parse_status
+
+    status = parse_status(
+        {
+            "skipped_controls": [
+                {
+                    "control_id": "lc1",
+                    "control_name": "Front intake",
+                    "reason": "mix_unresolvable",
+                    "skipped_for_ms": 9000,
+                }
+            ]
+        }
+    )
+    assert len(status.skipped_controls) == 1
+    entry = status.skipped_controls[0]
+    assert entry.control_id == "lc1"
+    assert entry.control_name == "Front intake"
+    assert entry.reason == "mix_unresolvable"
+    assert entry.skipped_for_ms == 9000
+
+
+def test_parse_status_ignores_malformed_skipped_entries():
+    """A non-dict entry must not take the whole poll down — the same tolerance
+    every other list on this surface already has."""
+    from ventulus.api.models import parse_status
+
+    status = parse_status({"skipped_controls": ["not-a-dict", None, 42]})
+    assert status.skipped_controls == []
+
+
+class TestWireValueCoercion:
+    """277-h: the parse boundary normalises what the dataclasses declare.
+
+    Decided once here rather than per consumer. The GUI hashes daemon-supplied
+    ids in about half a dozen places and formats `output_pct` into an
+    `f"{v:.0f}%"`; a guard on one site made the absence of a guard on its
+    siblings read as deliberate.
+    """
+
+    def test_every_id_key_is_coerced_not_just_control_id(self):
+        """The docstring claims 'every identity field'. Prove more than one.
+
+        Previously only `control_id` was exercised, via `skipped_controls` — so
+        dropping any other key from `_ID_KEYS` was uncaught while the claim stood.
+        """
+        from dataclasses import dataclass, fields
+
+        from ventulus.api.models import _ID_KEYS, _filter_fields
+
+        # Build a probe dataclass carrying every id key, so this test widens
+        # automatically if `_ID_KEYS` gains one.
+        ns = {"__annotations__": {k: str for k in sorted(_ID_KEYS)}}
+        ns.update({k: "" for k in sorted(_ID_KEYS)})
+        Probe = dataclass(type("Probe", (), ns))
+
+        raw = {k: [1, 2] for k in sorted(_ID_KEYS)}
+        out = _filter_fields(Probe, raw)
+
+        assert set(out) == set(_ID_KEYS), "the probe must exercise every key"
+        for key, value in out.items():
+            assert isinstance(value, str), f"{key} was not coerced: {value!r}"
+        assert {f.name for f in fields(Probe)} == set(_ID_KEYS)
+
+    def test_a_coerced_id_cannot_match_a_real_one(self):
+        """Coercion must fail CLOSED — a malformed id must not collide."""
+        from ventulus.api.models import SkippedControl, _filter_fields
+
+        out = _filter_fields(SkippedControl, {"control_id": [], "control_name": "x"})
+        assert out["control_id"] == "[]"
+        assert out["control_id"] not in {"lc1", "", "openfan:ch00"}
+
+    def test_an_unparseable_output_is_dropped_not_defaulted(self):
+        """An output we cannot read is an ABSENT output, which renders as '—'.
+
+        Keeping it would carry a value that raises inside `f"{v:.0f}%"` on the
+        1 Hz slot; defaulting it to 0.0 would invent a duty the daemon never
+        reported, which is what the contract's "never as 0" clause forbids.
+        """
+        from ventulus.api.models import parse_status
+
+        status = parse_status(
+            {
+                "control_outputs": [
+                    {"control_id": "ok-str", "output_pct": "42.5"},
+                    {"control_id": "ok-int", "output_pct": 60},
+                    {"control_id": "bad-list", "output_pct": []},
+                    {"control_id": "bad-bool", "output_pct": True},
+                ]
+            }
+        )
+
+        got = {e.control_id: e.output_pct for e in status.control_outputs}
+        assert got == {"ok-str": 42.5, "ok-int": 60.0}, (
+            "a string or int duty coerces; a list is unparseable and a bool is "
+            f"not a duty — both must drop rather than render. Got {got!r}"
+        )
+        assert all(isinstance(v, float) for v in got.values())
+
+
+class TestHeaderRolesDec311:
+    """AIO-MB Phase 1 wire fields. Every one is additive and must default to the
+    pre-2.28.0 behaviour when a daemon omits it (AIP-180)."""
+
+    def test_hwmon_header_parses_role_and_role_source(self):
+        from ventulus.api.models import parse_hwmon_headers
+
+        headers = parse_hwmon_headers(
+            {
+                "headers": [
+                    {
+                        "id": "hwmon:it8696:isa:pwm5:pwm5",
+                        "label": "pwm5",
+                        "chip_name": "it8696",
+                        "pwm_index": 5,
+                        "role": "pump",
+                        "role_source": "user_assigned",
+                    }
+                ]
+            }
+        )
+        assert headers[0].role == "pump"
+        assert headers[0].role_source == "user_assigned"
+
+    def test_pre_2_28_daemon_defaults_to_unknown(self):
+        from ventulus.api.models import parse_hwmon_headers
+
+        headers = parse_hwmon_headers(
+            {"headers": [{"id": "hwmon:x:pwm1:CPU_FAN", "label": "CPU_FAN"}]}
+        )
+        assert headers[0].role == "unknown"
+        assert headers[0].role_source == "none"
+
+    def test_an_unrecognised_role_token_is_preserved_not_dropped(self):
+        # 273-i rule: render what you do not recognise. Dropping the header, or
+        # coercing the token to "unknown", would both lose information the user
+        # can see in the daemon's own logs.
+        from ventulus.api.models import parse_hwmon_headers
+
+        headers = parse_hwmon_headers(
+            {"headers": [{"id": "hwmon:x:pwm1:A", "label": "A", "role": "impeller"}]}
+        )
+        assert len(headers) == 1
+        assert headers[0].role == "impeller"
+
+    def test_identify_result_carries_the_mode_and_duties(self):
+        from ventulus.api.models import parse_identify_result
+
+        r = parse_identify_result(
+            {
+                "fan_id": "hwmon:x:pwm1:PUMP",
+                "action": "stop",
+                "expires_in_secs": 15,
+                "mode": "pump_perturb",
+                "identify_pwm_percent": 85,
+                "baseline_pwm_percent": 60,
+            }
+        )
+        assert r.mode == "pump_perturb"
+        assert r.identify_pwm_percent == 85
+        assert r.baseline_pwm_percent == 60
+
+    def test_identify_result_from_an_older_daemon_has_no_mode(self):
+        from ventulus.api.models import parse_identify_result
+
+        r = parse_identify_result({"fan_id": "openfan:ch00", "action": "stop"})
+        assert r.mode is None
+        assert r.identify_pwm_percent is None
+
+    def test_capability_defaults_false_so_the_copy_stays_honest(self):
+        from ventulus.api.models import ControlCapability
+
+        assert ControlCapability().header_roles is False

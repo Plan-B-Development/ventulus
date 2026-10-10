@@ -1,0 +1,2996 @@
+"""Hardware page — readiness, cooling hardware, and diagnostics (DEC-212, DEC-318).
+
+A thin renderer over the Qt-free ``services.hardware_view`` view-models (which
+reuse the existing ``ui/cooling_readiness`` mapping), styled with the Stage-1
+components. Presents the readiness checklist (verdict + grouped PASS/WARN rows —
+no fabricated score), the recommended-action cards (with routed action buttons),
+and the Super-I/O table (real per-chip columns only, with a per-chip "How to
+enable" + copy-command) + the opt-in port probe.
+
+Owns its own ``_HardwareReadinessWorker`` (fetch/refresh/probe) — the same
+``_SocketWorker`` class the old tab uses — and a ``_HwDiagWorker`` with which
+Re-scan re-reads ``/diagnostics/hardware`` for the Voltages panel (`VOLT-a`).
+Presentation-only: no daemon/API/schema/control/safety change. Action deep-links
+are re-pointed to the already-migrated pages (System State / Overview / Settings).
+The old ``CoolingReadinessView`` + Diagnostics Readiness tab are left untouched.
+
+**AIO-MB Phase 6 (DEC-318)** adds two sections between Recommended Actions and
+Super-I/O — *Cooling Hardware* (cooling-device assemblies + per-header cards) and
+*Hardware Diagnostics* (PWM test, characterisation, lifecycle recording,
+validation sessions) — making this the primary GUI entry point for PWM testing
+(§7). Nothing existing is removed and System State keeps its own controls; both
+pages launch the **same** implementation, which is why the verify wording lives
+in ``services/verify_view`` and the workers/dialog are reused verbatim rather
+than reimplemented (§21).
+
+Still presentation-only. **Nothing on this page writes PWM.** Every active test
+goes through a daemon diagnostic endpoint that already owns the hwmon lease, the
+pump floor clamp, the thermal refusal and restore-on-drop, so the page cannot
+lower a floor or stop a pump even by accident (§23).
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import TYPE_CHECKING
+
+from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLayout,
+    QMessageBox,
+    QScrollArea,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ventulus.api.models import (
+    VALIDATION_KIND_LIFECYCLE,
+    VALIDATION_KIND_THERMAL,
+    VALIDATION_KIND_VALIDATION,
+    ControlPathRecord,
+    OperationMode,
+)
+from ventulus.knowledge.sensor_knowledge import sensor_display_name
+from ventulus.services.cooling_device_view import build_cooling_device_views
+from ventulus.services.daemon_features import daemon_supports, unsupported_feature_message
+from ventulus.services.diagnostics_service import DiagnosticsService
+from ventulus.services.hardware_view import (
+    build_checklist,
+    build_readiness_summary,
+    build_recommended_actions,
+    build_superio_panel,
+    build_voltage_panel,
+)
+from ventulus.services.header_inspector_view import build_header_inspector_views
+from ventulus.services.header_role_view import (
+    failure_message,
+    nct6687_label_note,
+    nct6687_label_prompt,
+    outcome_message,
+    plan_role_change,
+    role_choices,
+    role_editable,
+)
+from ventulus.services.header_role_writes import WRITE_ERRORS, apply_role_writes
+from ventulus.services.openfan_calibration_view import build_channel_options
+from ventulus.services.openfan_firmware_view import channel_lines
+from ventulus.services.openfan_role_view import (
+    OPENFAN_ROLE_INTRO,
+    OpenFanRoleRow,
+    build_openfan_role_rows,
+    openfan_outcome_message,
+    openfan_role_choices,
+    openfan_roles_supported,
+)
+from ventulus.services.profile_service import ProfileService
+from ventulus.services.pump_protection import (
+    header_is_pump_protected,
+    openfan_channel_is_pump_protected,
+)
+from ventulus.services.pwm_report.runner import VERIFY_PAGE_HARDWARE, VERIFY_PAGE_SYSTEM_STATE
+from ventulus.services.pwm_verification import verification_signature
+from ventulus.services.verify_evidence import VerifyEvidence
+from ventulus.services.verify_view import build_verify_result_view
+from ventulus.ui.components.badges import StatusPill
+from ventulus.ui.components.buttons import make_button
+from ventulus.ui.components.cards import Card, SectionHeader
+from ventulus.ui.components.tables import apply_dense_table
+from ventulus.ui.cooling_readiness import build_readiness_items
+from ventulus.ui.pages.diagnostics_workers import (
+    _CharacterizationWorker,
+    _ControlPathWorker,
+    _HardwareReadinessWorker,
+    _HwDiagWorker,
+    _OpenFanCalibrationWorker,
+    _OpenFanFirmwareWorker,
+    _ValidationWorker,
+    _VerifyWorker,
+)
+from ventulus.ui.pages.pwm_report_controller import RUN_ACTIVE_REASON, PwmReportController
+from ventulus.ui.qt_util import set_chip_class
+from ventulus.ui.readiness_merge import ACTION_NONE
+from ventulus.ui.theme import active_theme
+from ventulus.ui.widgets.collapsible_section import CollapsibleSection
+from ventulus.ui.widgets.control_path_dialog import ControlPathDiscoveryDialog
+from ventulus.ui.widgets.cooling_device_card import CoolingDeviceCard
+from ventulus.ui.widgets.flow_layout import FlowLayout
+from ventulus.ui.widgets.header_role_dialog import (
+    HeaderRoleDialog,
+    confirm_remove_pump_protection,
+)
+from ventulus.ui.widgets.openfan_calibration_dialog import OpenFanCalibrationDialog
+from ventulus.ui.widgets.openfan_firmware_dialog import OpenFanFirmwareDialog
+from ventulus.ui.widgets.pwm_characterization_dialog import PwmCharacterizationDialog
+from ventulus.ui.widgets.pwm_header_card import PwmHeaderCard
+from ventulus.ui.widgets.pwm_report_window import PwmReportWindow
+from ventulus.ui.widgets.validation_session_dialog import ValidationSessionDialog
+from ventulus.ui.widgets.verify_evidence_panel import VerifyEvidencePanel
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ventulus.api.client import DaemonClient
+    from ventulus.api.models import (
+        HardwareReadiness,
+        HwmonVerifyResult,
+        SuperIoReport,
+    )
+    from ventulus.services.app_settings_service import AppSettingsService
+    from ventulus.services.app_state import AppState
+
+log = logging.getLogger(__name__)
+
+#: Why a header card's tests stand down while this page's own verify runs
+#: (`PTA-n`). The daemon has one diagnostic slot, so a second press would only
+#: queue a second probe behind the first.
+VERIFY_ACTIVE_REASON = (
+    "A PWM control test is running on this page. The header tests are available "
+    "again when it finishes."
+)
+
+_SUPERIO_COLS = [
+    "Chip",
+    "Vendor",
+    "Driver",
+    "Module loaded",
+    "Confidence",
+    # WIRE-w: how the daemon knows the chip is there. Sits beside Confidence
+    # because it is what justifies it — and it is the only place the opt-in
+    # /dev/port probe's result is visible as such.
+    "Evidence",
+    "Health",
+    "Notes",
+]
+_SIO_EVIDENCE = 5
+_SIO_HEALTH = 6
+_SIO_NOTES = 7
+
+# `WIRE-ag` Voltages table. Named constants, not literals: WIRE-w recorded that
+# inserting a column silently repointed a test that hardcoded an index.
+_VOLTAGE_COLS = ["Rail", "Chip", "Reading", "Identification"]
+_VOLT_NAME = 0
+_VOLT_CHIP = 1
+_VOLT_VALUE = 2
+_VOLT_IDENT = 3
+
+
+class HardwarePage(QWidget):
+    """The migrated Cooling Hardware Readiness content as a standalone page."""
+
+    # Cross-page deep-links (routed by main_window).
+    open_preferred_sensors = Signal(str)  # "cpu" | "mb"
+    open_system_state = Signal()  # advanced troubleshooting shortcut
+    open_overview = Signal()  # sensors
+    #: "Edit Configuration" on a cooling-device card. The AIO configuration
+    #: workflow lives on the Controls page and is REUSED, never duplicated here
+    #: (§2: "do not duplicate profile configuration logic inside the Hardware
+    #: page"; §21: reuse the existing AIO configuration workflow).
+    open_controls = Signal()
+    #: DEC-404: a PWM Test Report run started (True) or ended (False). MainWindow
+    #: routes it to the System State page, whose hwmon diagnostics share the
+    #: daemon's one slot (S4-13).
+    pwm_report_active_changed = Signal(bool)
+
+    # Main-thread → worker-thread requests (queued).
+    _readiness_request = Signal()
+    _readiness_refresh_request = Signal()
+    _readiness_probe_request = Signal()
+    #: `VOLT-a`: Re-scan also re-reads `/diagnostics/hardware` for the Voltages
+    #: panel, on its own worker — the same class System State uses.
+    _hw_diag_request = Signal()
+    _verify_request = Signal(str)
+    _char_start_request = Signal(str, object, object, object, object)
+    #: AIO Phase 8 Batch 1 §6.1, wired by DEC-334 (header_id, diagnostic).
+    _char_preflight_request = Signal(str, str)
+    _char_poll_request = Signal()
+    _char_cancel_request = Signal()
+    _discover_preflight_request = Signal(str, str)
+    _discover_start_request = Signal(str)
+    _discover_poll_request = Signal()
+    _discover_cancel_request = Signal()
+    #: DEC-453, the OpenFan calibration dialog (channel).
+    _ofancal_start_request = Signal(int)
+    _ofancal_poll_request = Signal()
+    _ofancal_cancel_request = Signal()
+    #: DEC-481, the OpenFAN firmware update window.
+    _ofw_device_request = Signal()
+    _ofw_stage_request = Signal(object)
+    _ofw_start_request = Signal(str, dict, object, str)
+    _ofw_poll_request = Signal()
+    _ofw_cancel_request = Signal()
+    _validation_start_request = Signal(str, str, list, list, dict, bool)
+    _validation_poll_request = Signal()
+    _validation_stop_request = Signal()
+    _validation_cancel_request = Signal()
+    _validation_marker_request = Signal(str, str)
+    _validation_measurement_request = Signal(str, float, str, str, str)
+
+    def __init__(
+        self,
+        state: AppState | None = None,
+        diagnostics_service: DiagnosticsService | None = None,
+        client: DaemonClient | None = None,
+        profile_service: ProfileService | None = None,
+        parent: QWidget | None = None,
+        *,
+        settings_service: AppSettingsService | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("Hardware_Root")
+        self._state = state
+        # DEC-404 decision 7: the PWM Test Report remembers "Your setup" facts
+        # here. The shared service, never a second instance (DEC-357's rule).
+        self._settings_service = settings_service
+        # DEC-404 decision 10: one report window, one controller. The controller
+        # lives on this page so a run outlives its window (pwm_report_controller).
+        self._report_controller: PwmReportController | None = None
+        self._report_window: PwmReportWindow | None = None
+        self._report_active = False
+        #: `PTA-d`: whether a verify started on System State is still running.
+        #: MainWindow sets it; standalone (tests, no System State) nothing is.
+        self._local_verify_query: Callable[[], bool] = lambda: False
+        #: `PTA-l`: this page's own verifies that have not answered yet. A
+        #: count, not a flag: the header cards' *Test* stays live during a
+        #: verify, so a second one can be queued behind the first, and the
+        #: first answer must not clear the record while the second is pending.
+        #: Every request produces exactly one `verify_ok` or `verify_error`.
+        self._verifies_in_flight = 0
+        self._diag = diagnostics_service or DiagnosticsService(state)
+        self._client = client
+        # Read-only, and deliberately NOT defaulted to a fresh `ProfileService()`:
+        # constructing one loads profiles from disk, which this page has no
+        # business doing. `None` means "no profile information", and the pump
+        # strategy degrades honestly to "Not controlled" rather than guessing.
+        self._profile_service = profile_service
+
+        self._readiness_thread: QThread | None = None
+        self._readiness_worker: _HardwareReadinessWorker | None = None
+        self._readiness_auto_fetched = False
+        self._readiness_unsupported = False
+        self._last_report: HardwareReadiness | None = None
+        # True only between a user-pressed Refresh and its answer, so the
+        # generation comparison reports on a rescan the user actually asked for
+        # (`WIRE-af`). It is only *attributable* because at most one readiness
+        # request is ever outstanding — see `_readiness_in_flight`.
+        self._awaiting_rescan = False
+        # There are two independent triggers for a readiness fetch — the
+        # first-show auto-fetch and the Re-scan button — and both land on the
+        # same `_on_readiness_ok`. With both in flight the replies arrive in
+        # request order and nothing distinguishes them, so the auto-fetch's
+        # answer would be read as the rescan's: the wrong verdict shown, and the
+        # user's actual re-scan then reporting nothing at all. Serialising the
+        # requests is what makes the flag mean what it says.
+        self._readiness_in_flight = False
+        # DEC-456: the checklist's PWM items count against the daemon's
+        # per-header verdicts, which arrive on `/hwmon/headers`. The last
+        # verdict set seen (`None` until the first headers update), and a
+        # re-fetch that waits for an in-flight one to answer first.
+        self._verification_seen: frozenset[tuple[str, str]] | None = None
+        self._readiness_refetch_pending = False
+        # `VOLT-a`: the Voltages panel's own re-read. Independent of the
+        # readiness request (different endpoint, different reply slot), so it
+        # has its own in-flight guard rather than sharing `_readiness_in_flight`.
+        self._hw_diag_thread: QThread | None = None
+        self._hw_diag_worker: _HwDiagWorker | None = None
+        self._hw_diag_in_flight = False
+        #: The last failed re-read's message; cleared by the next result from
+        #: any writer of the shared cache.
+        self._voltage_refresh_error = ""
+
+        # AIO-MB Phase 6 workers. Each is created lazily by `_ensure_worker`
+        # and torn down in `cleanup`, exactly like the readiness worker.
+        self._verify_thread: QThread | None = None
+        self._verify_worker: _VerifyWorker | None = None
+        self._char_thread: QThread | None = None
+        self._char_worker: _CharacterizationWorker | None = None
+        self._char_dialog: PwmCharacterizationDialog | None = None
+        # AIO Phase 8 Batch 1.
+        self._discover_thread: QThread | None = None
+        self._discover_worker: _ControlPathWorker | None = None
+        self._discover_dialog: ControlPathDiscoveryDialog | None = None
+        # DEC-453.
+        self._ofancal_thread: QThread | None = None
+        self._ofancal_worker: _OpenFanCalibrationWorker | None = None
+        self._ofancal_dialog: OpenFanCalibrationDialog | None = None
+        # DEC-481.
+        self._ofw_thread: QThread | None = None
+        self._ofw_worker: _OpenFanFirmwareWorker | None = None
+        self._ofw_dialog: OpenFanFirmwareDialog | None = None
+        #: The (link, update) the firmware button was last synced to, so the
+        #: 1 Hz status only re-syncs it on a change.
+        self._ofw_status_key: tuple | None = None
+        #: Persisted PWM to tach relationships, keyed by header id (§6.3). The
+        #: DAEMON owns these and their invalidation; this is a render cache.
+        self._control_paths: dict[str, ControlPathRecord] = {}
+        self._validation_thread: QThread | None = None
+        self._validation_worker: _ValidationWorker | None = None
+        self._validation_dialog: ValidationSessionDialog | None = None
+
+        # Live card registries, keyed by id so a poll updates in place rather
+        # than rebuilding the section (which would drop scroll position and any
+        # open "Details" disclosure on every tick).
+        self._device_cards: dict[str, CoolingDeviceCard] = {}
+        self._header_cards: dict[str, PwmHeaderCard] = {}
+        #: `ROLE-d`: the card showing the last role change's outcome, if any,
+        #: and that header's (role, role_source) when it was shown.
+        self._role_outcome_header = ""
+        self._role_outcome_role: tuple[str, str] | None = None
+
+        self._build_ui()
+
+        # `VOLT-a`: redraw the Voltages panel whenever ANY writer lands a new
+        # diagnostics result — the poll worker's connect-time fetch, System
+        # State's refresh or rescan, or this page's Re-scan.
+        self._diag.hw_diagnostics_changed.connect(self._on_hw_diagnostics_changed)
+
+        # Live data comes entirely from signals AppState already emits — no new
+        # polling is introduced for any dynamic field (§19). Topology arrives on
+        # the capabilities interval, not the 1 Hz poll.
+        if self._state is not None:
+            self._state.fans_updated.connect(self._refresh_cooling_section)
+            self._state.headers_updated.connect(self._refresh_cooling_section)
+            self._state.headers_updated.connect(self._on_headers_for_readiness)
+            self._state.headers_updated.connect(self._expire_role_outcome)
+            self._state.capabilities_updated.connect(self._refresh_cooling_section)
+            self._state.cooling_devices_updated.connect(self._refresh_cooling_section)
+            self._state.openfan_roles_updated.connect(self._refresh_openfan_roles)
+            # DEC-481: the firmware button follows the OpenFAN link and any update.
+            self._state.status_updated.connect(self._on_status_for_firmware)
+            # §6.3's "Last validated" row is daemon-persisted, so it must be
+            # fetched once the capability handshake says the route exists. Keyed
+            # to `capabilities_updated` rather than the 1 Hz poll deliberately:
+            # a discovered relationship changes only when someone runs a
+            # discovery, and polling it every second would add a request per
+            # tick for data that is static between runs (§19).
+            self._state.capabilities_updated.connect(self._refresh_control_paths)
+        # The pump strategy is derived from the active profile's curve, so it
+        # must re-render when that changes — a poll tick alone would leave the
+        # line stale until the next fan update happened to arrive.
+        if self._profile_service is not None:
+            self._profile_service.active_changed.connect(self._refresh_cooling_section)
+            self._profile_service.profiles_changed.connect(self._refresh_cooling_section)
+
+    # ── UI construction ──────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        outer.addWidget(self._scroll)
+
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        self._scroll.setWidget(body)
+
+        # Header.
+        header_row = QHBoxLayout()
+        head = QVBoxLayout()
+        title = QLabel("Hardware")
+        title.setObjectName("Hardware_Label_title")
+        title.setProperty("class", "PageTitle")
+        head.addWidget(title)
+        subtitle = QLabel("Cooling hardware · readiness · diagnostics · Super-I/O architecture")
+        subtitle.setObjectName("Hardware_Label_subtitle")
+        subtitle.setProperty("class", "PageSubtitle")
+        head.addWidget(subtitle)
+        header_row.addLayout(head)
+        header_row.addStretch(1)
+        self._refresh_btn = make_button("Re-scan", "secondary", object_name="Hardware_Btn_refresh")
+        self._refresh_btn.clicked.connect(self._rescan)
+        header_row.addWidget(self._refresh_btn)
+        layout.addLayout(header_row)
+
+        self._status_label = QLabel("")
+        self._status_label.setObjectName("Hardware_Label_status")
+        self._status_label.setProperty("class", "CardMeta")
+        self._status_label.setWordWrap(True)
+        self._status_label.setVisible(False)
+        layout.addWidget(self._status_label)
+
+        # Hero grid.
+        hero = QHBoxLayout()
+        hero.setSpacing(12)
+        hero.addWidget(self._build_checklist_card(), 1)
+        hero.addWidget(self._build_actions_card(), 1)
+        layout.addLayout(hero)
+
+        # Cooling Hardware + Hardware Diagnostics (AIO-MB Phase 6). Inserted
+        # between the existing hero grid and Super-I/O, per the brief's page
+        # structure; nothing above or below is disturbed.
+        layout.addWidget(self._build_cooling_card())
+        layout.addWidget(self._build_diagnostics_card())
+
+        # Super-I/O.
+        layout.addWidget(self._build_superio_card())
+
+        # Voltages (`WIRE-ag`) — display-only, below Super-I/O because it is
+        # reference information rather than something to act on.
+        layout.addWidget(self._build_voltages_card())
+        layout.addStretch(1)
+
+    def _build_checklist_card(self) -> QWidget:
+        card = Card(object_name="Hardware_Card_checklist")
+        v = QVBoxLayout(card)
+        # "Hardware", not "System": this checklist is the Hardware page's own
+        # narrower question, and the System State page owns the other one
+        # (`SSN-i`, DEC-379). The explicit `object_name` is what keeps the
+        # rename a copy change — `SectionHeader` would otherwise derive its
+        # objectName from the title, and every findChild test would move with it.
+        header = SectionHeader(
+            "Hardware Readiness Checklist", object_name="Hardware_SectionHeader_checklist"
+        )
+        self._verdict_pill = StatusPill("—", "neutral")
+        self._verdict_pill.setObjectName("Hardware_Pill_verdict")
+        header.add_trailing(self._verdict_pill)
+        v.addWidget(header)
+
+        self._top_label = QLabel("")
+        self._top_label.setObjectName("Hardware_Label_topStep")
+        self._top_label.setProperty("class", "CardMeta")
+        self._top_label.setWordWrap(True)
+        self._top_label.setVisible(False)
+        v.addWidget(self._top_label)
+
+        self._checklist_container = QWidget()
+        self._checklist_layout = QVBoxLayout(self._checklist_container)
+        self._checklist_layout.setContentsMargins(0, 0, 0, 0)
+        self._checklist_layout.setSpacing(6)
+        v.addWidget(self._checklist_container)
+
+        self._scanned_label = QLabel("")
+        self._scanned_label.setObjectName("Hardware_Label_scanned")
+        self._scanned_label.setProperty("class", "SmallLabel")
+        self._scanned_label.setWordWrap(True)
+        v.addWidget(self._scanned_label)
+        v.addStretch(1)
+        return card
+
+    def _build_actions_card(self) -> QWidget:
+        card = Card(object_name="Hardware_Card_actions")
+        v = QVBoxLayout(card)
+        header = SectionHeader("Recommended Actions", object_name="Hardware_SectionHeader_actions")
+        self._action_count_label = QLabel("—")
+        self._action_count_label.setObjectName("Hardware_Label_actionCount")
+        self._action_count_label.setProperty("class", "CardMeta")
+        header.add_trailing(self._action_count_label)
+        v.addWidget(header)
+
+        self._actions_container = QWidget()
+        self._actions_layout = QVBoxLayout(self._actions_container)
+        self._actions_layout.setContentsMargins(0, 0, 0, 0)
+        self._actions_layout.setSpacing(8)
+        v.addWidget(self._actions_container)
+
+        self._summary_bar = QWidget()
+        self._summary_bar.setObjectName("Hardware_Bar_summary")
+        self._summary_bar_layout = QHBoxLayout(self._summary_bar)
+        self._summary_bar_layout.setContentsMargins(0, 6, 0, 0)
+        self._summary_bar_layout.setSpacing(8)
+        v.addWidget(self._summary_bar)
+        v.addStretch(1)
+        return card
+
+    def _build_superio_card(self) -> QWidget:
+        card = Card(object_name="Hardware_Card_superio")
+        self._superio_card = card
+        v = QVBoxLayout(card)
+        v.addWidget(
+            SectionHeader("Super-I/O Architecture", object_name="Hardware_SectionHeader_superio")
+        )
+        self._superio_container = QWidget()
+        self._superio_layout = QVBoxLayout(self._superio_container)
+        self._superio_layout.setContentsMargins(0, 0, 0, 0)
+        self._superio_layout.setSpacing(8)
+        v.addWidget(self._superio_container)
+        return card
+
+    def _build_voltages_card(self) -> QWidget:
+        card = Card(object_name="Hardware_Card_voltages")
+        v = QVBoxLayout(card)
+        v.addWidget(SectionHeader("Voltages", object_name="Hardware_SectionHeader_voltages"))
+        self._voltages_container = QWidget()
+        self._voltages_layout = QVBoxLayout(self._voltages_container)
+        self._voltages_layout.setContentsMargins(0, 0, 0, 0)
+        self._voltages_layout.setSpacing(8)
+        v.addWidget(self._voltages_container)
+        return card
+
+    # ── Cooling Hardware + Diagnostics (AIO-MB Phase 6) ──────────────
+
+    def _build_cooling_card(self) -> QWidget:
+        card = Card(object_name="Hardware_Card_cooling")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(10)
+
+        header = SectionHeader("Cooling Hardware", card, object_name="Hardware_Header_cooling")
+        self._cooling_count = QLabel("", card)
+        self._cooling_count.setObjectName("Hardware_Label_coolingCount")
+        self._cooling_count.setProperty("class", "CardMeta")
+        header.add_trailing(self._cooling_count)
+        v.addWidget(header)
+
+        # Cooling devices (assemblies). Absent on a machine with no configured
+        # topology, which is normal and not an error (§20).
+        self._device_container = QWidget(card)
+        self._device_layout = QVBoxLayout(self._device_container)
+        self._device_layout.setContentsMargins(0, 0, 0, 0)
+        self._device_layout.setSpacing(10)
+        v.addWidget(self._device_container)
+
+        headers_label = QLabel("PWM Headers", card)
+        headers_label.setObjectName("Hardware_Label_headersHeading")
+        headers_label.setProperty("class", "CardMeta")
+        v.addWidget(headers_label)
+
+        # DEC-444 (`BRD-h`): ask for the real pump where nct6687d's MSI labels
+        # sit on another vendor's board. Hidden unless `nct6687_label_prompt`
+        # returns something.
+        self._label_prompt = QWidget(card)
+        self._label_prompt.setObjectName("Hardware_Box_labelPrompt")
+        prompt_layout = QVBoxLayout(self._label_prompt)
+        prompt_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_layout.setSpacing(6)
+        self._label_prompt_text = QLabel("", self._label_prompt)
+        self._label_prompt_text.setObjectName("Hardware_Label_labelPrompt")
+        self._label_prompt_text.setProperty("class", "WarningChip")
+        self._label_prompt_text.setWordWrap(True)
+        prompt_layout.addWidget(self._label_prompt_text)
+        prompt_actions = QHBoxLayout()
+        self._label_prompt_btn = make_button(
+            "Labels are correct",
+            "secondary",
+            object_name="Hardware_Btn_labelsCorrect",
+            accessible_name="The header labels are correct; do not ask again on this machine",
+            parent=self._label_prompt,
+        )
+        self._label_prompt_btn.clicked.connect(self._confirm_labels)
+        prompt_actions.addWidget(self._label_prompt_btn)
+        prompt_actions.addStretch(1)
+        prompt_layout.addLayout(prompt_actions)
+        self._label_prompt_key = ""
+        self._label_prompt.setVisible(False)
+        v.addWidget(self._label_prompt)
+
+        # A flow layout, not a splitter: cards wrap to the available width, so
+        # the section never forces the window wider. DEC-315 made the app's
+        # minimum track its widest page, and a fixed multi-column grid here
+        # would raise that minimum for every user.
+        self._header_container = QWidget(card)
+        self._header_flow = FlowLayout(self._header_container, margin=0, h_spacing=10, v_spacing=10)
+        v.addWidget(self._header_container)
+
+        # `ROLE-f` (DEC-475): roles on OpenFan channels. An OpenFan channel has
+        # no label, so the user's `pump` assignment is the daemon's only pump
+        # evidence for it. Hidden unless the daemon serves the route and there
+        # is a channel to list.
+        self._openfan_box = QWidget(card)
+        self._openfan_box.setObjectName("Hardware_Box_openfanRoles")
+        openfan_layout = QVBoxLayout(self._openfan_box)
+        openfan_layout.setContentsMargins(0, 6, 0, 0)
+        openfan_layout.setSpacing(6)
+        openfan_heading = QLabel("OpenFan Channels", self._openfan_box)
+        openfan_heading.setObjectName("Hardware_Label_openfanHeading")
+        openfan_heading.setProperty("class", "CardMeta")
+        openfan_layout.addWidget(openfan_heading)
+        openfan_note = QLabel(
+            "An OpenFan channel has no hardware label, so the daemon treats a pump "
+            "plugged into one as a pump only once you set its role to Pump.",
+            self._openfan_box,
+        )
+        openfan_note.setObjectName("Hardware_Label_openfanNote")
+        openfan_note.setProperty("class", "CardMeta")
+        openfan_note.setWordWrap(True)
+        openfan_layout.addWidget(openfan_note)
+        self._openfan_rows = QWidget(self._openfan_box)
+        self._openfan_rows_layout = QVBoxLayout(self._openfan_rows)
+        self._openfan_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._openfan_rows_layout.setSpacing(4)
+        openfan_layout.addWidget(self._openfan_rows)
+        self._openfan_outcome = QLabel("", self._openfan_box)
+        self._openfan_outcome.setObjectName("Hardware_Label_openfanOutcome")
+        self._openfan_outcome.setWordWrap(True)
+        self._openfan_outcome.setVisible(False)
+        openfan_layout.addWidget(self._openfan_outcome)
+        self._openfan_row_views: list[OpenFanRoleRow] | None = None
+        self._openfan_box.setVisible(False)
+        v.addWidget(self._openfan_box)
+
+        self._cooling_empty = QLabel("", card)
+        self._cooling_empty.setObjectName("Hardware_Label_coolingEmpty")
+        self._cooling_empty.setProperty("class", "CardMeta")
+        self._cooling_empty.setWordWrap(True)
+        self._cooling_empty.setVisible(False)
+        v.addWidget(self._cooling_empty)
+
+        self._cooling_card = card
+        self._refresh_cooling_section()
+        return card
+
+    def _build_diagnostics_card(self) -> QWidget:
+        card = Card(object_name="Hardware_Card_diagnostics")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(10)
+
+        v.addWidget(
+            SectionHeader("Hardware Diagnostics", card, object_name="Hardware_Header_diagnostics")
+        )
+
+        # DEC-453: this used to promise that no fan is driven below its floor,
+        # which OpenFan calibration makes untrue on purpose — it walks the
+        # channel you pick to 0 %. The one exception is named rather than hidden.
+        intro = QLabel(
+            "Active tests run through the daemon, which keeps the hwmon lease, "
+            "the pump safety floor and thermal protection in force throughout. "
+            "A pump header is never stopped and no fan is driven below its floor — "
+            "except by OpenFan calibration, which takes the channel you pick down "
+            "to 0 % after you confirm it powers no pump.",
+            card,
+        )
+        intro.setObjectName("Hardware_Label_diagnosticsIntro")
+        intro.setWordWrap(True)
+        v.addWidget(intro)
+
+        self._diag_result = QLabel("", card)
+        self._diag_result.setObjectName("Hardware_Label_diagResult")
+        self._diag_result.setWordWrap(True)
+        self._diag_result.setVisible(False)
+        v.addWidget(self._diag_result)
+        # WIRE-f: the before/after table behind a verify result's summary line.
+        # Every other diagnostic message here clears it (`_show_diag_message`).
+        self._diag_evidence = VerifyEvidencePanel("Hardware_Section_diagEvidence", card)
+        v.addWidget(self._diag_evidence)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        # DEC-404: the whole-machine assessment, first because it is the one to
+        # start with; the per-header tests below each card remain for a single
+        # header's deeper look.
+        self._report_btn = make_button(
+            "PWM Test Report…",
+            "primary",
+            object_name="Hardware_Btn_pwmReport",
+            accessible_name="Open the PWM Test Report",
+        )
+        self._report_btn.clicked.connect(self._open_pwm_report)
+        actions.addWidget(self._report_btn)
+        # DEC-453. Gated in `_sync_diagnostic_enablement`.
+        self._ofancal_btn = make_button(
+            "Calibrate OpenFan Channel…",
+            "secondary",
+            object_name="Hardware_Btn_openfanCalibration",
+            accessible_name="Calibrate an OpenFan channel's stop and restart duties",
+        )
+        self._ofancal_btn.clicked.connect(self._open_openfan_calibration)
+        actions.addWidget(self._ofancal_btn)
+        # DEC-481. Shown and gated in `_sync_firmware_button`.
+        self._ofw_btn = make_button(
+            "Update OpenFAN Firmware…",
+            "secondary",
+            object_name="Hardware_Btn_openfanFirmware",
+            accessible_name="Update the OpenFAN controller's firmware from a file",
+        )
+        self._ofw_btn.clicked.connect(self._open_openfan_firmware)
+        actions.addWidget(self._ofw_btn)
+        self._lifecycle_btn = make_button(
+            "Startup / Lifecycle Recording",
+            "secondary",
+            object_name="Hardware_Btn_lifecycle",
+            accessible_name="Record startup and lifecycle behaviour",
+        )
+        self._lifecycle_btn.clicked.connect(
+            lambda: self._open_validation(kind=VALIDATION_KIND_LIFECYCLE)
+        )
+        actions.addWidget(self._lifecycle_btn)
+
+        # DEC-335 §9.2. Capability-gated in `_sync_diagnostic_enablement`: an
+        # older daemon silently records an ORDINARY session for an unknown kind
+        # and returns 200, so an ungated button would mislabel the result rather
+        # than fail loudly.
+        self._thermal_btn = make_button(
+            "Thermal Observation",
+            "secondary",
+            object_name="Hardware_Btn_thermal",
+            accessible_name="Start a thermal observation session",
+        )
+        self._thermal_btn.clicked.connect(
+            lambda: self._open_validation(kind=VALIDATION_KIND_THERMAL)
+        )
+        actions.addWidget(self._thermal_btn)
+
+        self._validation_btn = make_button(
+            "AIO Validation",
+            "secondary",
+            object_name="Hardware_Btn_validation",
+            accessible_name="Start an AIO validation session",
+        )
+        self._validation_btn.clicked.connect(
+            lambda: self._open_validation(kind=VALIDATION_KIND_VALIDATION)
+        )
+        actions.addWidget(self._validation_btn)
+
+        self._advanced_btn = make_button(
+            "Advanced (System State)",
+            "ghost",
+            object_name="Hardware_Btn_advanced",
+            accessible_name="Open the advanced troubleshooting shortcut on System State",
+        )
+        self._advanced_btn.clicked.connect(self.open_system_state.emit)
+        actions.addWidget(self._advanced_btn)
+        actions.addStretch(1)
+        v.addLayout(actions)
+
+        self._diagnostics_card = card
+        self._sync_diagnostic_enablement()
+        return card
+
+    # ── Cooling-section rendering ────────────────────────────────────
+
+    def _capabilities(self):
+        return self._state.capabilities if self._state else None
+
+    def _supports_cooling_devices(self) -> bool:
+        """Whether this daemon serves the DEC-316 cooling-device routes.
+
+        Every other cooling-device call site in the GUI states this precondition
+        (`polling.py:142`, `controls_page.py::_supports_cooling_devices`); the
+        two on this page did not (`WIRE-z`). They were *transitively* safe — the
+        cards can only be populated from an inventory the poller refuses to
+        fetch without the capability — but a precondition held by someone else's
+        code is one an edit can remove without touching this file, and a
+        404 from `DELETE /config/cooling-device/{id}` would surface here as
+        "Could not forget the device: 404" rather than as "this daemon is too
+        old".
+        """
+        caps = self._capabilities()
+        return bool(caps and getattr(caps.control, "cooling_devices", False))
+
+    def _sensor_labels(self) -> dict[str, str]:
+        sensors = self._state.sensors if self._state else []
+        peers = [s.id for s in sensors]
+        return {s.id: sensor_display_name(s.id, s.label, peers=peers) for s in sensors}
+
+    def _sensor_values(self) -> dict[str, float]:
+        return {
+            s.id: s.value_c
+            for s in (self._state.sensors if self._state else [])
+            if s.value_c is not None
+        }
+
+    def _revert_counts(self) -> dict[str, int]:
+        # Already fetched by the poll worker as part of `/diagnostics/hardware`
+        # — read, never re-requested (§19).
+        diag = getattr(self._diag, "last_hw_diagnostics", None)
+        return dict(getattr(getattr(diag, "hwmon", None), "enable_revert_counts", {}) or {})
+
+    def _refresh_cooling_section(self, *_args) -> None:
+        """Re-render the cooling section from current AppState.
+
+        Cards are updated in place and only created/destroyed when the hardware
+        set actually changes, so an open "Details" disclosure survives a poll.
+        """
+        if not hasattr(self, "_header_flow"):
+            return  # called from __init__ before the section exists
+        state = self._state
+        headers = list(state.hwmon_headers) if state else []
+        readings = list(state.fans) if state else []
+        caps = self._capabilities()
+
+        inventory = getattr(state, "cooling_devices", None) if state else None
+        devices = list(inventory.cooling_devices) if inventory else []
+
+        device_views = build_cooling_device_views(
+            devices,
+            headers=headers,
+            capabilities=caps,
+            display_name=(state.member_display_name if state else None),
+            sensor_labels=self._sensor_labels(),
+            readings=readings,
+            sensor_values=self._sensor_values(),
+            profile=self._active_profile(),
+        )
+        self._sync_device_cards(device_views)
+
+        header_views = build_header_inspector_views(
+            headers,
+            readings=readings,
+            capabilities=caps,
+            display_names={
+                h.id: (state.member_display_name(h.id) if state else "") for h in headers
+            },
+            enable_revert_counts=self._revert_counts(),
+            # §6.3: the persisted relationship, so the card can carry a "Last
+            # validated" row that survives a GUI restart.
+            control_paths=self._control_paths,
+            board_vendor=self._board_vendor(),
+            stalled_ids=state.stalled_fan_ids if state else frozenset(),
+        )
+        self._sync_header_cards(header_views)
+        self._refresh_label_prompt(headers)
+        self._refresh_openfan_roles()
+
+        self._cooling_count.setText(
+            f"{len(device_views)} device(s) · {len(header_views)} PWM header(s)"
+        )
+        if not header_views and not device_views:
+            # §20: a concise explanatory empty state, and the rest of the page
+            # (readiness, Super-I/O) stays fully available.
+            self._cooling_empty.setText(
+                "No PWM cooling headers were discovered. The readiness checklist "
+                "above explains why, and Super-I/O detection below shows which "
+                "sensor chip your board needs."
+            )
+            self._cooling_empty.setVisible(True)
+        elif not device_views:
+            # §20: a pump with no topology is a normal, configurable state — not
+            # a broken one. Point at the workflow instead of raising a warning.
+            self._cooling_empty.setText(
+                "No cooling device is configured. Headers are shown individually "
+                "below; use “Configure AIO…” on the Controls page to group a "
+                "pump and its radiator fans into one device."
+            )
+            self._cooling_empty.setVisible(True)
+        else:
+            self._cooling_empty.setVisible(False)
+
+        self._sync_diagnostic_enablement()
+
+    def _refresh_openfan_roles(self, *_args) -> None:
+        """Re-render the OpenFan Channels list (`ROLE-f`).
+
+        Rebuilt only when what it shows changes — the 1 Hz poll calls this, and
+        recreating the buttons every second would take keyboard focus away.
+        """
+        if not hasattr(self, "_openfan_box"):
+            return
+        state = self._state
+        rows: list[OpenFanRoleRow] = []
+        if state is not None and openfan_roles_supported(self._capabilities()):
+            rows = build_openfan_role_rows(state.fans, state.openfan_roles, state.fan_display_name)
+        self._openfan_box.setVisible(bool(rows))
+        if rows == self._openfan_row_views:
+            return
+        self._openfan_row_views = rows
+        # DEC-481: an open update window lists the channels with their pump marks.
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.set_channels(self._firmware_channels())
+        layout = self._openfan_rows_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            if (widget := item.widget()) is not None:
+                # Detached first, so nothing finds the old row before the
+                # deferred delete runs.
+                widget.setParent(None)
+                widget.deleteLater()
+        for row in rows:
+            slug = row.fan_id.replace(":", "_")
+            line = QWidget(self._openfan_rows)
+            line.setObjectName(f"Hardware_Row_openfanRole_{slug}")
+            h = QHBoxLayout(line)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(8)
+            name = QLabel(row.name, line)
+            name.setObjectName(f"Hardware_Label_openfanName_{slug}")
+            h.addWidget(name, 1)
+            pill = StatusPill(
+                row.role_text, row.tone, line, object_name=f"Hardware_Pill_openfanRole_{slug}"
+            )
+            h.addWidget(pill)
+            button = make_button(
+                "Set role…",
+                "secondary",
+                object_name=f"Hardware_Btn_openfanRole_{slug}",
+                accessible_name=f"Choose what {row.name} drives",
+                parent=line,
+            )
+            button.clicked.connect(lambda _=False, fid=row.fan_id: self._on_openfan_set_role(fid))
+            h.addWidget(button)
+            layout.addWidget(line)
+
+    def _on_openfan_set_role(self, fan_id: str) -> None:
+        message = self.change_openfan_role(fan_id, self)
+        if message is None:
+            return
+        self._openfan_outcome.setText(message)
+        self._openfan_outcome.setVisible(bool(message))
+
+    def change_openfan_role(self, fan_id: str, parent: QWidget | None) -> str | None:
+        """Pick, confirm and write one OpenFan channel's role (`ROLE-f`).
+
+        The channel counterpart of :meth:`change_header_role`: the same picker
+        and the same pump-removal confirmation, with the outcome read back from
+        a fresh ``GET /fans/openfan/roles``. ``None`` means the user cancelled
+        or nothing would change.
+        """
+        state = self._state
+        role = state.openfan_role(fan_id) if state else None
+        if state is None or role is None:
+            return "That OpenFan channel is no longer reported by the daemon."
+        caps = self._capabilities()
+        if not openfan_roles_supported(caps):
+            return unsupported_feature_message("openfan_header_roles")
+        if self._client is None:
+            return "Cannot set a role: no daemon connection."
+        name = state.fan_display_name(fan_id)
+        dialog = HeaderRoleDialog(
+            role,
+            name,
+            choices=openfan_role_choices(caps),
+            intro_text=OPENFAN_ROLE_INTRO.format(name=name),
+            parent=parent,
+        )
+        if not dialog.exec():
+            return None
+        new_role = dialog.chosen_role()
+        plan = plan_role_change(role, new_role)
+        if plan.noop:
+            return None
+        if plan.removes_user_pump and not confirm_remove_pump_protection(parent, [name]):
+            return f"{name} kept its pump role."
+        result = None
+        error: Exception | None = None
+        try:
+            result = self._client.set_header_role(fan_id, new_role)
+        except WRITE_ERRORS as exc:
+            log.warning("Could not set role %s on %s: %s", new_role, fan_id, exc)
+            error = exc
+        refreshed = None
+        try:
+            roles = self._client.openfan_roles()
+        except WRITE_ERRORS as exc:
+            log.warning("OpenFan role re-fetch after a role change failed: %s", exc)
+        else:
+            # Emits `openfan_roles_updated`, which re-renders the list.
+            state.set_openfan_roles(roles)
+            refreshed = next((r for r in roles if r.fan_id == fan_id), None)
+        if error is not None or result is None:
+            return failure_message(name, new_role, error, reread=refreshed is not None)
+        return openfan_outcome_message(name, result, refreshed)
+
+    def _active_profile(self):
+        """The active profile object, for the DERIVED pump strategy (§2).
+
+        It comes from `ProfileService`, which is the only thing that holds a
+        `Profile`. **`AppState` does not** — it carries `active_profile_name` and
+        `active_profile_id`, both strings — so the first version of this method
+        read `getattr(self._state, "active_profile", None)` and returned `None`
+        on every call, pinning the strategy line to "Not controlled" for every
+        user while the unit tests on `pump_strategy_text` stayed green. That is
+        the project rulebook's most-repeated failure exactly: *extracting a rule into a
+        testable function does not test the call site.* Caught in review; the
+        call site is now covered by a test that renders the card.
+
+        Still degrades honestly: no service, or no active profile, means
+        "Not controlled" rather than a guess.
+        """
+        return self._profile_service.active_profile if self._profile_service else None
+
+    def _sync_device_cards(self, views) -> None:
+        seen = set()
+        for index, view in enumerate(views):
+            seen.add(view.device_id)
+            card = self._device_cards.get(view.device_id)
+            if card is None:
+                card = CoolingDeviceCard(view, self._device_container)
+                card.view_headers_requested.connect(self._scroll_to_headers)
+                card.characterize_pump_requested.connect(self._open_characterization)
+                card.start_validation_requested.connect(
+                    lambda device_id: self._open_validation(
+                        kind=VALIDATION_KIND_VALIDATION, device_id=device_id
+                    )
+                )
+                card.edit_requested.connect(lambda _id: self.open_controls.emit())
+                card.forget_requested.connect(self._forget_device)
+                # A device that appears mid-run stands down like the others (`PTA-b`).
+                card.set_diagnostics_blocked(RUN_ACTIVE_REASON if self._report_active else "")
+                self._device_cards[view.device_id] = card
+                self._device_layout.insertWidget(index, card)
+            else:
+                card.set_view(view)
+        for device_id in list(self._device_cards):
+            if device_id not in seen:
+                card = self._device_cards.pop(device_id)
+                card.setParent(None)
+                card.deleteLater()
+
+    def _sync_header_cards(self, views) -> None:
+        seen = set()
+        for index, view in enumerate(views):
+            seen.add(view.header_id)
+            card = self._header_cards.get(view.header_id)
+            if card is None:
+                card = PwmHeaderCard(view, self._header_container)
+                card.test_requested.connect(self._run_pwm_verify)
+                card.characterize_requested.connect(self._open_characterization)
+                card.discover_requested.connect(self._open_control_path_discovery)
+                card.role_change_requested.connect(self._on_role_change_requested)
+                # A header that appears mid-run stands down like the others.
+                card.set_diagnostics_blocked(self._header_block_reason())
+                self._header_cards[view.header_id] = card
+                self._header_flow.insertWidget(index, card)
+            else:
+                card.set_view(view)
+        for header_id in list(self._header_cards):
+            if header_id not in seen:
+                card = self._header_cards.pop(header_id)
+                self._header_flow.removeWidget(card)
+                card.setParent(None)
+                card.deleteLater()
+
+    def focus_readiness_item(self, code: str) -> bool:
+        """Scroll the readiness item with this stable `code` into view (`WIRE-r`).
+
+        Returns whether it was found. The daemon publishes `rollup.top_code` as
+        the deep-link target for the most-severe item, and the footer chip could
+        previously name the problem without being able to take the user to it.
+
+        A miss is normal, not an error: the rollup is **cached** daemon-side and
+        refreshed only on discovery-changing events, so it can name an item the
+        current report no longer contains. Landing on the Hardware page with
+        nothing scrolled is the right outcome there — better than scrolling to
+        something else and implying it is the one that was named.
+        """
+        card = self.findChild(QWidget, f"Hardware_Action_{code}")
+        if card is None:
+            return False
+        self._scroll.ensureWidgetVisible(card)
+        return True
+
+    def _scroll_to_headers(self, *_args) -> None:
+        self._scroll.ensureWidgetVisible(self._header_container)
+
+    def _sync_diagnostic_enablement(self) -> None:
+        """Enable each action only where the capability actually exists (§11)."""
+        if not hasattr(self, "_validation_btn"):
+            return
+        caps = self._capabilities()
+        # `P8-ag`: through `daemon_supports`, like every other gate on this
+        # page. A raw `getattr` chain here and the registry lookup elsewhere is
+        # the exact coexistence DEC-334 shipped on — one flag with two gating
+        # shapes, where the working one hides the broken one. `is True` because
+        # `daemon_supports` is tri-state and "did not say" must not enable.
+        supported = daemon_supports("validation_sessions", caps) is True
+        has_device = bool(self._device_cards)
+        enabled = supported and has_device and not self._report_active
+        for button in (self._validation_btn, self._lifecycle_btn):
+            button.setEnabled(enabled)
+            if self._report_active:
+                # S4-9 (4): a session shares the report's diagnostic slot.
+                button.setToolTip(RUN_ACTIVE_REASON)
+            elif not supported:
+                button.setToolTip(unsupported_feature_message("validation_sessions"))
+            elif not has_device:
+                button.setToolTip(
+                    "Configure a cooling device first — a session records one named assembly."
+                )
+            else:
+                button.setToolTip("")
+
+        # DEC-335: the thermal button carries a SECOND gate on top of the
+        # session capability, because the failure mode without it is silent.
+        # An unknown `diagnostics[]` token makes the daemon reject the session;
+        # an unknown `kind` does not — it records an ordinary validation session
+        # and returns 200, so the button would appear to work and mislabel every
+        # result. `daemon_supports` is tri-state and `None` ("did not say") must
+        # read as unsupported here, hence the explicit `is True`.
+        thermal_ok = daemon_supports("thermal_observation", caps) is True
+        self._thermal_btn.setEnabled(enabled and thermal_ok)
+        if self._report_active:
+            self._thermal_btn.setToolTip(RUN_ACTIVE_REASON)
+        elif not thermal_ok:
+            self._thermal_btn.setToolTip(unsupported_feature_message("thermal_observation"))
+        else:
+            self._thermal_btn.setToolTip(self._validation_btn.toolTip())
+
+        # DEC-453. Demo mode has OpenFan channels and no capabilities, so the
+        # button opens there and the dialog refuses Start. `is True` because
+        # `daemon_supports` is tri-state and "did not say" must not enable.
+        demo = self._is_demo()
+        ofancal_ok = demo or daemon_supports("openfan_calibration", caps) is True
+        has_channels = bool(self._openfan_channel_options())
+        self._ofancal_btn.setEnabled(ofancal_ok and has_channels and not self._report_active)
+        if self._report_active:
+            self._ofancal_btn.setToolTip(RUN_ACTIVE_REASON)
+        elif not ofancal_ok:
+            self._ofancal_btn.setToolTip(unsupported_feature_message("openfan_calibration"))
+        elif not has_channels:
+            self._ofancal_btn.setToolTip("No OpenFan channel is reporting.")
+        else:
+            self._ofancal_btn.setToolTip("")
+        self._sync_firmware_button()
+
+    def _sync_firmware_button(self) -> None:
+        """Show the firmware update only where it can exist, and say why not (DEC-481).
+
+        Shown when the daemon advertises it and an OpenFAN controller is
+        present, an update is reported, or the daemon reports an OpenFAN board
+        that does not answer (DEC-484) — never in demo mode. Enabled when the
+        link is connected or such a board is there, and no PWM Test Report runs
+        — or whenever an update is running or needs recovery, so the window can
+        always be reopened to follow it. A board left in its bootloader across a
+        daemon restart is not adopted, so presence alone would hide its recovery
+        steps.
+        """
+        if not hasattr(self, "_ofw_btn"):
+            return
+        caps = self._capabilities()
+        status = self._state.daemon_status if self._state else None
+        link = status.openfan_link if status else None
+        update = status.openfan_maintenance if status else None
+        silent = (
+            status.openfan_silent_board
+            if status and daemon_supports("openfan_firmware_silent_update", caps) is True
+            else None
+        )
+        present = (
+            link is not None
+            or update is not None
+            or silent is not None
+            or bool(caps and caps.openfan.present)
+        )
+        supported = daemon_supports("openfan_firmware_maintenance", caps) is True
+        visible = supported and present and not self._is_demo()
+        self._ofw_btn.setVisible(visible)
+        if update is not None:
+            enabled, tip = True, "Follow the OpenFAN firmware update."
+        elif self._report_active:
+            enabled, tip = False, RUN_ACTIVE_REASON
+        elif silent is not None:
+            enabled = True
+            tip = (
+                f"Update the OpenFAN board that does not answer (USB serial number "
+                f"{silent.usb_serial})."
+            )
+        elif link != "connected":
+            from ventulus.services.openfan_firmware_view import link_text
+
+            enabled = False
+            tip = f"The OpenFAN controller is not connected ({link_text(link).lower()})."
+        else:
+            enabled, tip = True, ""
+        self._ofw_btn.setEnabled(visible and enabled)
+        self._ofw_btn.setToolTip(tip)
+
+    # ── Fetch + render ───────────────────────────────────────────────
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # `WIRE-ag`: the diagnostics snapshot may land after this page was
+        # first built, so re-read it on every show rather than only at
+        # construction — otherwise the panel is stuck on its empty note for the
+        # whole session for anyone who opened Hardware before the first poll.
+        self._render_voltages()
+        if not self._readiness_unsupported and not self._readiness_auto_fetched:
+            self._readiness_auto_fetched = True  # latch BEFORE emit → no double-fetch
+            self._fetch_readiness()
+
+    def _fetch_readiness(self, *, force: bool = False) -> None:
+        # `WIRE-k`: stand down on the daemon's own answer, BEFORE the request.
+        # This latch used to be set only by a 404 coming back — probe-then-
+        # recover — which meant the first attempt always went out and the
+        # feature's absence was inferred from a status code the route fallback
+        # and a handler's unknown-id branch both return. `daemon_supports` is
+        # `None` on any daemon predating the flag, and that case deliberately
+        # falls through to the probe path below, unchanged.
+        if daemon_supports("hardware_readiness", self._capabilities()) is False:
+            self._readiness_unsupported = True
+        if self._readiness_unsupported:
+            self._set_status(unsupported_feature_message("hardware_readiness"))
+            return
+        if not self._client:
+            self._set_status("Cannot fetch readiness: no daemon connection")
+            return
+        if not self._ensure_readiness_worker():
+            self._set_status("Cannot fetch readiness: no daemon socket path")
+            return
+        if self._readiness_in_flight:
+            # Defence in depth: the button is disabled below for the duration,
+            # so a user cannot reach this — but a programmatic second call would
+            # otherwise put two replies on one slot.
+            return
+        self._readiness_in_flight = True
+        self._refresh_btn.setEnabled(False)
+        # Armed HERE, not in `_refresh_readiness`, so it is set only once the
+        # request is genuinely going out and only while it is the sole one.
+        self._awaiting_rescan = force
+        self._set_status(
+            "Refreshing hardware assessment…" if force else "Fetching hardware readiness…"
+        )
+        (self._readiness_refresh_request if force else self._readiness_request).emit()
+
+    def _end_readiness_request(self) -> None:
+        self._readiness_in_flight = False
+        self._refresh_btn.setEnabled(True)
+
+    def _refresh_readiness(self) -> None:
+        self._fetch_readiness(force=True)
+
+    def _rescan(self) -> None:
+        """The Re-scan button: a forced readiness assessment and a voltage re-read."""
+        self._fetch_voltages()
+        self._refresh_readiness()
+
+    def _fetch_voltages(self) -> None:
+        """Re-read `/diagnostics/hardware` for the Voltages panel (`VOLT-a`).
+
+        Silent when there is no daemon: the readiness half of the same press
+        already says so on the page's status line, and demo mode has no daemon
+        to ask. The result goes through `DiagnosticsService.set_hw_diagnostics`
+        — the cache's single writer — and the panel redraws from its signal.
+        """
+        if self._hw_diag_in_flight or not self._client:
+            return
+        if not self._ensure_hw_diag_worker():
+            return
+        self._hw_diag_in_flight = True
+        self._hw_diag_request.emit()
+
+    @Slot(object)
+    def _on_hw_diag_ok(self, result) -> None:
+        self._hw_diag_in_flight = False
+        # DEC-229: the one writer, which also emits `hw_diagnostics_changed`.
+        self._diag.set_hw_diagnostics(result)
+
+    @Slot(str, str)
+    def _on_hw_diag_error(self, _category: str, message: str) -> None:
+        # The previous readings stay: a failed re-read says nothing about the
+        # rails, and the read time already shows how old they are.
+        self._hw_diag_in_flight = False
+        self._voltage_refresh_error = message or "the daemon did not answer"
+        self._render_voltages()
+
+    @Slot()
+    def _on_hw_diagnostics_changed(self) -> None:
+        self._voltage_refresh_error = ""
+        self._render_voltages()
+
+    @Slot(list)
+    def _on_headers_for_readiness(self, headers: list) -> None:
+        """Re-fetch the checklist when a header's verdict changes (DEC-456).
+
+        The checklist is otherwise fetched once per session and on Refresh, so a
+        test run from its own "Test PWM control" action left it reading "not yet
+        verified" while System State already showed the pass. Only a change in
+        the verdict set triggers it — the headers also refresh on a profile
+        change and every capabilities interval — and only once the checklist has
+        been fetched at all; the first show fetches it fresh anyway.
+        """
+        seen = verification_signature(headers)
+        previous, self._verification_seen = self._verification_seen, seen
+        if previous is None or seen == previous or not self._readiness_auto_fetched:
+            return
+        if self._readiness_in_flight:
+            # Never emit over an outstanding request: the reply handler reads
+            # `_awaiting_rescan`, which a second request would overwrite.
+            self._readiness_refetch_pending = True
+            return
+        self._fetch_readiness()
+
+    def _run_pending_readiness_refetch(self) -> None:
+        if self._readiness_refetch_pending:
+            self._readiness_refetch_pending = False
+            self._fetch_readiness()
+
+    @Slot(object)
+    def _on_readiness_ok(self, result: HardwareReadiness) -> None:
+        # WIRE-af: `generation` is the daemon's monotonic scan id — the "a fresh
+        # assessment landed" signal — and only `scanned_age_ms` was read, so a
+        # forced refresh the daemon answered from cache was indistinguishable
+        # from one that re-scanned. Age cannot decide it: a cached report's age
+        # keeps climbing, and a genuine re-scan of unchanged hardware produces a
+        # report identical by every other field.
+        self._end_readiness_request()
+        previous = self._last_report
+        rescanned = previous is not None and result.generation > previous.generation
+        self._last_report = result
+        self._status_label.setVisible(False)
+        self._render(result)
+        if self._awaiting_rescan:
+            self._awaiting_rescan = False
+            # Only after a refresh the USER asked for. Saying "unchanged" after a
+            # background fetch nobody requested would be noise.
+            self._set_status(
+                "Hardware re-scanned."
+                if rescanned
+                else "No change — the daemon served its existing assessment."
+            )
+        self._run_pending_readiness_refetch()
+
+    @Slot(str, str)
+    def _on_readiness_error(self, category: str, message: str) -> None:
+        # A failed refresh ends the wait. Without this the flag survives and the
+        # NEXT background fetch — which the user did not ask for — reports on a
+        # rescan, which is the wrong event and possibly the wrong verdict.
+        self._awaiting_rescan = False
+        self._end_readiness_request()
+        if category == "unsupported":
+            self._readiness_unsupported = True
+            self._set_status(
+                "Hardware readiness is unavailable — the daemon predates this feature."
+            )
+        else:
+            self._set_status(f"Cannot fetch readiness: {message}")
+        self._run_pending_readiness_refetch()
+
+    @Slot(object)
+    def _on_readiness_probe_ok(self, result: SuperIoReport) -> None:
+        # The probe enriches only the Super-I/O half — re-render that section.
+        if self._last_report is not None:
+            self._last_report.superio = result
+        self._render_superio(build_superio_panel(result))
+
+    @Slot(str, str)
+    def _on_readiness_probe_error(self, _category: str, message: str) -> None:
+        self._set_status(message)
+
+    def _set_status(self, text: str) -> None:
+        self._status_label.setText(text)
+        self._status_label.setVisible(True)
+
+    def _render(self, hw: HardwareReadiness) -> None:
+        self._last_report = hw
+        summary = build_readiness_summary(hw)
+        items = build_readiness_items(hw)
+        self._verdict_pill.set_text(summary.verdict_word)
+        self._verdict_pill.set_state(summary.verdict_state)
+        self._top_label.setText(summary.top_summary_line)
+        self._top_label.setVisible(bool(summary.top_summary_line))
+        self._scanned_label.setText(summary.scanned_age_line)
+        self._render_checklist(build_checklist(items))
+        self._render_actions(build_recommended_actions(items), summary)
+        self._render_superio(build_superio_panel(hw.superio))
+        self._render_voltages()
+
+    def _render_checklist(self, groups) -> None:
+        _clear_layout(self._checklist_layout)
+        if not groups:
+            empty = QLabel("No hardware checks reported.")
+            empty.setObjectName("Hardware_Label_checksEmpty")
+            empty.setProperty("class", "CardMeta")
+            self._checklist_layout.addWidget(empty)
+            return
+        theme = active_theme()
+        for group in groups:
+            head = QLabel(group.name)
+            head.setProperty("class", "SmallLabel")
+            head.setStyleSheet(f"color: {theme.text_secondary}; font-weight: 600;")
+            self._checklist_layout.addWidget(head)
+            for row in group.rows:
+                self._checklist_layout.addWidget(self._make_check_row(row))
+
+    def _make_check_row(self, vm) -> QWidget:
+        holder = QWidget()
+        holder.setObjectName(f"Hardware_Check_{vm.code}")
+        col = QVBoxLayout(holder)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(2)
+        line = QHBoxLayout()
+        line.setSpacing(8)
+        glyph = QLabel(vm.glyph)
+        glyph.setStyleSheet(f"color: {_state_color(vm.severity_state, active_theme())};")
+        line.addWidget(glyph)
+        title = QLabel(vm.title)
+        title.setWordWrap(True)
+        line.addWidget(title, 1)
+        pill = StatusPill(vm.badge_word, vm.severity_state)
+        pill.setObjectName(f"Hardware_CheckBadge_{vm.code}")
+        line.addWidget(pill)
+        col.addLayout(line)
+        if vm.expandable:
+            section = CollapsibleSection(
+                "Details", f"Hardware_CheckDetail_{vm.code}", expanded=False
+            )
+            detail = QLabel(vm.detail)
+            detail.setProperty("class", "CardMeta")
+            detail.setWordWrap(True)
+            detail.setTextFormat(Qt.TextFormat.PlainText)
+            section.add_widget(detail)
+            col.addWidget(section)
+        return holder
+
+    def _render_actions(self, actions, summary) -> None:
+        self._action_count_label.setText(f"{len(actions)} items · {summary.crit_count} critical")
+        _clear_layout(self._actions_layout)
+        if not actions:
+            ok = QLabel("No recommended actions — hardware looks ready.")
+            ok.setObjectName("Hardware_Label_actionsEmpty")
+            ok.setProperty("class", "CardMeta")
+            self._actions_layout.addWidget(ok)
+        else:
+            for vm in actions:
+                self._actions_layout.addWidget(self._make_action_card(vm))
+        _clear_layout(self._summary_bar_layout)
+        for seg in summary.segments:
+            self._summary_bar_layout.addWidget(
+                StatusPill(
+                    f"{seg.count} {seg.label}",
+                    seg.state,
+                    object_name=f"Hardware_Pill_summary_{seg.label}",
+                )
+            )
+        self._summary_bar_layout.addStretch(1)
+
+    def _make_action_card(self, vm) -> QWidget:
+        card = QFrame()
+        card.setObjectName(f"Hardware_Action_{vm.code}")
+        card.setProperty("class", "Card")
+        col = QVBoxLayout(card)
+        col.setSpacing(4)
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        badge = StatusPill(vm.badge_word, vm.severity_state)
+        badge.setObjectName(f"Hardware_Badge_{vm.code}")
+        top.addWidget(badge)
+        headline = QLabel(vm.headline)
+        headline.setObjectName(f"Hardware_Headline_{vm.code}")
+        headline.setWordWrap(True)
+        headline.setTextFormat(Qt.TextFormat.PlainText)
+        headline.setStyleSheet("font-weight: 600;")
+        top.addWidget(headline, 1)
+        if vm.component:
+            comp = QLabel(vm.component)
+            comp.setProperty("class", "SmallLabel")
+            top.addWidget(comp)
+        col.addLayout(top)
+
+        if vm.impact_chips:
+            chip_row = QHBoxLayout()
+            chip_row.setSpacing(6)
+            for chip in vm.impact_chips:
+                chip_row.addWidget(
+                    StatusPill(
+                        chip.label,
+                        chip.state,
+                        object_name=f"Hardware_Pill_chip_{vm.code}_{chip.label}",
+                    )
+                )
+            chip_row.addStretch(1)
+            col.addLayout(chip_row)
+
+        if vm.plain_detail:
+            detail = QLabel(vm.plain_detail)
+            detail.setProperty("class", "CardMeta")
+            detail.setWordWrap(True)
+            detail.setTextFormat(Qt.TextFormat.PlainText)
+            col.addWidget(detail)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        if vm.action_kind != ACTION_NONE and vm.action_label:
+            act = make_button(vm.action_label, "secondary", object_name=f"Hardware_Do_{vm.code}")
+            act.clicked.connect(lambda _=False, t=vm.action_target: self._route_action(t))
+            btn_row.addWidget(act)
+        if vm.doc_url:
+            doc = make_button(
+                f"{vm.doc_title or 'Learn how'} ↗", "ghost", object_name=f"Hardware_Doc_{vm.code}"
+            )
+            doc.clicked.connect(lambda _=False, url=vm.doc_url: QDesktopServices.openUrl(QUrl(url)))
+            btn_row.addWidget(doc)
+        btn_row.addStretch(1)
+        col.addLayout(btn_row)
+        return card
+
+    def _render_superio(self, panel) -> None:
+        _clear_layout(self._superio_layout)
+        if not panel.arch_supported:
+            self._superio_layout.addWidget(
+                _note_label(panel.arch_note, "Hardware_Label_superioNote")
+            )
+            return
+        if not panel.has_chips:
+            self._superio_layout.addWidget(
+                _note_label(panel.empty_note, "Hardware_Label_superioNote")
+            )
+            if panel.notes_text:
+                self._superio_layout.addWidget(
+                    _note_label(panel.notes_text, "Hardware_Label_superioNotes")
+                )
+            self._superio_layout.addWidget(self._build_advanced(panel))
+            return
+
+        summary_pill = StatusPill(panel.summary_text, panel.summary_state)
+        summary_pill.setObjectName("Hardware_Pill_superioSummary")
+        holder = QWidget()
+        holder_l = QHBoxLayout(holder)
+        holder_l.setContentsMargins(0, 0, 0, 0)
+        holder_l.addWidget(summary_pill)
+        holder_l.addStretch(1)
+        self._superio_layout.addWidget(holder)
+
+        table = QTableWidget(len(panel.rows), len(_SUPERIO_COLS))
+        table.setObjectName("Hardware_Table_superio")
+        table.setHorizontalHeaderLabels(_SUPERIO_COLS)
+        apply_dense_table(table)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # Health holds a pill cell-widget: ResizeToContents measures the (empty)
+        # item, not the widget, so pin a fixed width wide enough for the pill.
+        header.setSectionResizeMode(_SIO_HEALTH, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(_SIO_HEALTH, 112)
+        header.setStretchLastSection(True)
+        for i, row in enumerate(panel.rows):
+            _ensure_items(table, i, len(_SUPERIO_COLS))
+            table.item(i, 0).setText(row.chip)
+            table.item(i, 1).setText(row.vendor)
+            table.item(i, 2).setText(row.driver_text)
+            table.item(i, 3).setText(row.module_text)
+            table.item(i, 4).setText(row.confidence)
+            table.item(i, _SIO_EVIDENCE).setText(row.evidence_text or "—")
+            table.item(i, _SIO_NOTES).setText(row.notes)
+            _set_pill(table, i, _SIO_HEALTH, row.health_word, row.health_state)
+        self._superio_layout.addWidget(table)
+
+        for row in panel.rows:
+            if row.has_recommendation:
+                self._superio_layout.addWidget(self._make_chip_detail(row))
+
+        if panel.show_liability:
+            self._superio_layout.addWidget(
+                _note_label(panel.liability_text, "Hardware_Label_superioLiability")
+            )
+        if panel.notes_text:
+            self._superio_layout.addWidget(
+                _note_label(panel.notes_text, "Hardware_Label_superioNotes")
+            )
+        self._superio_layout.addWidget(self._build_advanced(panel))
+
+    def _make_chip_detail(self, row) -> QWidget:
+        section = CollapsibleSection(
+            f"How to enable — {row.chip}", f"Hardware_ChipHow_{row.chip}", expanded=False
+        )
+        if row.reason:
+            reason = QLabel(row.reason)
+            reason.setProperty("class", "CardMeta")
+            reason.setWordWrap(True)
+            reason.setTextFormat(Qt.TextFormat.PlainText)
+            section.add_widget(reason)
+        if row.copy_command:
+            cmd_holder = QWidget()
+            cl = QHBoxLayout(cmd_holder)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setSpacing(8)
+            mono = QLabel(row.copy_command)
+            mono.setProperty("class", "MonoCommand")
+            mono.setTextFormat(Qt.TextFormat.PlainText)
+            mono.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            cl.addWidget(mono, 1)
+            copy = make_button("Copy command", "ghost", object_name=f"Hardware_CmdCopy_{row.chip}")
+            copy.clicked.connect(lambda _=False, c=row.copy_command: _copy_to_clipboard(c))
+            cl.addWidget(copy)
+            section.add_widget(cmd_holder)
+        if row.mainline_text:
+            ml = StatusPill(
+                row.mainline_text,
+                row.mainline_state,
+                object_name=f"Hardware_Pill_mainline_{row.chip}",
+            )
+            section.add_widget(ml)
+        for note in row.risk_notes:
+            rn = QLabel(f"⚠ {note}")
+            rn.setProperty("class", "WarningChip")
+            rn.setWordWrap(True)
+            rn.setTextFormat(Qt.TextFormat.PlainText)
+            section.add_widget(rn)
+        for cav in row.caveats:
+            cv = QLabel(cav)
+            cv.setProperty("class", "CardMeta")
+            cv.setWordWrap(True)
+            cv.setTextFormat(Qt.TextFormat.PlainText)
+            section.add_widget(cv)
+        return section
+
+    def _render_voltages(self) -> None:
+        """Render the Voltages panel from the cached hardware diagnostics.
+
+        `WIRE-ag`. The source is `DiagnosticsService.last_hw_diagnostics` — the
+        same object this page already reads for the PWM test. It is a snapshot,
+        not a live reading: the poll worker fetches it on connect, and System
+        State's refresh/rescan and this page's Re-scan replace it (`VOLT-a`).
+        This redraws on every page show and on `hw_diagnostics_changed`.
+        `VoltagePanelVM.provenance_text` says when the readings were taken, and
+        the panel must keep rendering it — without it a user reads hours-old
+        millivolts as current ones.
+        """
+        _clear_layout(self._voltages_layout)
+        diag = getattr(self._diag, "last_hw_diagnostics", None)
+        panel = build_voltage_panel(
+            getattr(diag, "voltages", []) or [],
+            read_at=getattr(self._diag, "last_hw_diagnostics_at", None),
+            now=time.time(),
+            refresh_error=self._voltage_refresh_error,
+        )
+
+        if not panel.has_rails:
+            self._voltages_layout.addWidget(
+                _note_label(panel.empty_note, "Hardware_Label_voltagesEmpty")
+            )
+            self._add_voltage_error_note(panel)
+            return
+
+        self._voltages_layout.addWidget(
+            _note_label(panel.summary_text, "Hardware_Label_voltagesSummary")
+        )
+        self._voltages_layout.addWidget(
+            _note_label(panel.provenance_text, "Hardware_Label_voltagesProvenance")
+        )
+
+        table = QTableWidget(len(panel.rows), len(_VOLTAGE_COLS))
+        table.setObjectName("Hardware_Table_voltages")
+        table.setHorizontalHeaderLabels(_VOLTAGE_COLS)
+        apply_dense_table(table)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)
+        for i, row in enumerate(panel.rows):
+            _ensure_items(table, i, len(_VOLTAGE_COLS))
+            table.item(i, _VOLT_NAME).setText(row.name)
+            table.item(i, _VOLT_CHIP).setText(row.chip)
+            table.item(i, _VOLT_VALUE).setText(row.value_text)
+            # The one cell that carries the honesty distinction: it says who
+            # named the rail (the driver, the board catalogue, or nobody) or
+            # that the board does not use the input, and the caveat — a
+            # catalogue row's pin reading and divider included — rides as the
+            # row tooltip.
+            table.item(i, _VOLT_IDENT).setText(row.identification_text)
+            if row.caveat:
+                for col in range(len(_VOLTAGE_COLS)):
+                    table.item(i, col).setToolTip(row.caveat)
+        self._voltages_layout.addWidget(table)
+
+        if panel.footnote:
+            self._voltages_layout.addWidget(
+                _note_label(panel.footnote, "Hardware_Label_voltagesFootnote")
+            )
+        self._add_voltage_error_note(panel)
+
+    def _add_voltage_error_note(self, panel) -> None:
+        if panel.refresh_error_text:
+            self._voltages_layout.addWidget(
+                _note_label(panel.refresh_error_text, "Hardware_Label_voltagesRefreshError")
+            )
+
+    def _build_advanced(self, panel) -> QWidget:
+        section = CollapsibleSection(
+            "Advanced detection", "Hardware_Section_advanced", expanded=False
+        )
+        blurb = QLabel(
+            "Active Super-I/O port probing reads hardware I/O ports directly. It is never "
+            "run automatically — only when you request it below."
+        )
+        blurb.setProperty("class", "CardMeta")
+        blurb.setWordWrap(True)
+        section.add_widget(blurb)
+        self._probe_btn = make_button(
+            "Probe ports (advanced)", "secondary", object_name="Hardware_Btn_probe"
+        )
+        # `WIRE-k`: two independent reasons the button stays down, and they say
+        # different things. `panel.probe_available` is the DAEMON's own answer
+        # about whether probing is enabled and privileged on this machine; the
+        # capability flag is about whether the ROUTE exists at all. Checked in
+        # that order because the daemon's reason is the more specific and more
+        # actionable of the two — "probing is disabled in daemon config" beats
+        # "upgrade the daemon" on a daemon that has the route and has turned it
+        # off. `None` (any daemon before 2.36.0) leaves the existing behaviour
+        # untouched.
+        route_absent = daemon_supports("superio_port_probe", self._capabilities()) is False
+        self._probe_btn.setEnabled(panel.probe_available and not route_absent)
+        if not panel.probe_available and panel.probe_reason:
+            self._probe_btn.setToolTip(panel.probe_reason)
+        elif route_absent:
+            self._probe_btn.setToolTip(unsupported_feature_message("superio_port_probe"))
+        self._probe_btn.clicked.connect(self._confirm_probe)
+        section.add_widget(self._probe_btn)
+        return section
+
+    # ── Actions / routing ────────────────────────────────────────────
+
+    def _route_action(self, target: str) -> None:
+        if target == "preferred_cpu":
+            self.open_preferred_sensors.emit("cpu")
+        elif target == "preferred_mb":
+            self.open_preferred_sensors.emit("mb")
+        elif target == "superio":
+            self._scroll.ensureWidgetVisible(self._superio_card)
+        elif target == "pwm_verify":
+            # AIO-MB Phase 6 §7: Hardware is now the primary entry point for PWM
+            # testing, so the recommended action lands in this page's own
+            # Diagnostics section rather than deep-linking away. System State
+            # keeps its controls as an advanced shortcut (§8), reachable from
+            # the "Advanced (System State)" button in that same section.
+            self._scroll.ensureWidgetVisible(self._diagnostics_card)
+        elif target == "sensors":
+            self.open_overview.emit()
+        elif target == "system_state":
+            self.open_system_state.emit()
+
+    # ── Diagnostics glue (AIO-MB Phase 6) ────────────────────────────
+    #
+    # This is signal wiring ONLY. The workers (`_VerifyWorker`,
+    # `_CharacterizationWorker`), the dialog (`PwmCharacterizationDialog`) and
+    # the result wording (`services/verify_view`) are the existing
+    # implementations, reused verbatim — §21 forbids duplicating "its daemon
+    # calls or state-management logic", and connect-glue duplicates neither.
+
+    def _run_pwm_verify(self, header_id: str) -> None:
+        if not self._ensure_verify_worker():
+            self._show_diag_message("Cannot test: no daemon connection.")
+            return
+        if self._verifies_in_flight:
+            # `PTA-n`: the cards are stood down, but this is the one entry point
+            # every *Test* reaches — so the rule lives here too.
+            self._show_diag_message(VERIFY_ACTIVE_REASON)
+            return
+        self._show_diag_message("Testing PWM control… (about 10 seconds)")
+        self._verifies_in_flight += 1
+        self._apply_header_block()
+        self._verify_request.emit(header_id)
+
+    def _header_block_reason(self) -> str:
+        """Why the header cards' three tests are stood down, or ``""`` (`PTA-n`).
+
+        The cards have ONE block reason, so the two things that hold the
+        daemon's diagnostic slot for this page — a report run and this page's
+        own verify — are combined here rather than each setting it and the
+        other's release clearing it. The report outranks the verify: it is the
+        longer wait, and its end is what the user is waiting for.
+        """
+        if self._report_active:
+            return RUN_ACTIVE_REASON
+        if self._verifies_in_flight:
+            return VERIFY_ACTIVE_REASON
+        return ""
+
+    def _apply_header_block(self) -> None:
+        reason = self._header_block_reason()
+        for card in self._header_cards.values():
+            card.set_diagnostics_blocked(reason)
+
+    # `requested_header_id` is the header the worker was asked about (row
+    # `ACK-n`). This page has no sweep to attribute a result to (each result
+    # only counts down `_verifies_in_flight`), so it does not read it — the argument is here
+    # because the signal carries it, and the System State page's sweep does.
+    @Slot(object, str)
+    def _on_verify_ok(self, result: HwmonVerifyResult, requested_header_id: str) -> None:
+        self._verifies_in_flight = max(0, self._verifies_in_flight - 1)
+        self._apply_header_block()
+        header = None
+        if self._state:
+            header = next((h for h in self._state.hwmon_headers if h.id == result.header_id), None)
+        view = build_verify_result_view(
+            result, header=header, diagnostics=getattr(self._diag, "last_hw_diagnostics", None)
+        )
+        # The same colour System State gives the same result (`TS-bk`).
+        self._show_diag_message(view.text, chip_class=view.chip_class, evidence=view.evidence)
+
+    @Slot(str, str, str)
+    def _on_verify_error(self, category: str, message: str, requested_header_id: str) -> None:
+        self._verifies_in_flight = max(0, self._verifies_in_flight - 1)
+        self._apply_header_block()
+        # A soft safety refusal is protection working, not a failure — show the
+        # daemon's own message rather than prefixing it as an error.
+        self._show_diag_message(message if category == "unavailable" else f"Test failed: {message}")
+
+    def _open_characterization(self, header_id: str) -> None:
+        if not header_id or not self._state:
+            return
+        if self._report_active:
+            # `PTA-b`: the buttons are stood down, but this is the one entry
+            # point every one of them reaches — so the rule lives here too.
+            self._show_diag_message(RUN_ACTIVE_REASON)
+            return
+        header = next((h for h in self._state.hwmon_headers if h.id == header_id), None)
+        if header is None:
+            return
+        if not self._ensure_char_worker():
+            self._show_diag_message("Cannot characterise: no daemon connection.")
+            return
+        label = self._state.member_display_name(header_id) or header.label or header_id
+        dialog = PwmCharacterizationDialog(
+            header_id,
+            label,
+            # The UNION predicate, never the wire `role` (DEC-312): a header the
+            # user downgraded to `chassis_fan` that the hardware labels PUMP is
+            # still pump-protected daemon-side, and the dialog's warnings must
+            # say so.
+            is_pump=header_is_pump_protected(header, self._capabilities()),
+            header=header,
+            capabilities=self._capabilities(),
+            parent=self,
+        )
+        dialog.start_requested.connect(self._char_start_request.emit)
+        dialog.poll_requested.connect(self._char_poll_request.emit)
+        dialog.cancel_requested.connect(self._char_cancel_request.emit)
+        dialog.preflight_requested.connect(self._char_preflight_request.emit)
+        self._char_dialog = dialog
+        # BEFORE `exec()`, so the daemon's safety statement is the dialog's first
+        # rendered state rather than something that appears after the user has
+        # already reached for Start (Batch 1 §6.1). Same ordering as the
+        # control-path dialog.
+        dialog.request_preflight()
+        try:
+            dialog.exec()
+        finally:
+            dialog.stop_polling()
+            self._char_dialog = None
+
+    @Slot(object)
+    def _on_char_update(self, run) -> None:
+        if self._char_dialog is not None:
+            self._char_dialog.apply_run(run)
+
+    @Slot(str, str)
+    def _on_char_error(self, category: str, message: str) -> None:
+        if self._char_dialog is not None:
+            self._char_dialog.apply_error(category, message)
+
+    @Slot(object)
+    def _on_char_preflight_ready(self, report) -> None:
+        if self._char_dialog is not None:
+            self._char_dialog.apply_preflight(report)
+
+    @Slot(str, str)
+    def _on_char_preflight_error(self, category: str, message: str) -> None:
+        # Advisory only — routed to the dialog's preflight handler, never to
+        # `apply_error`, so a missing safety advisory cannot disable Start for a
+        # run the daemon would accept.
+        if self._char_dialog is not None:
+            self._char_dialog.apply_preflight_error(category, message)
+
+    # ── OpenFan calibration (DEC-452 / DEC-453) ──────────────────────
+
+    def _is_demo(self) -> bool:
+        return self._state is not None and self._state.mode == OperationMode.DEMO
+
+    def _openfan_channel_options(self):
+        if self._state is None:
+            return []
+        state = self._state
+        return build_channel_options(
+            state.fans,
+            state.fan_display_name,
+            # `ROLE-f`: the daemon refuses a pump channel; the dialog says so first.
+            lambda fan_id: openfan_channel_is_pump_protected(state.openfan_role(fan_id)),
+        )
+
+    def _open_openfan_calibration(self) -> None:
+        if self._state is None:
+            return
+        if self._report_active:
+            self._show_diag_message(RUN_ACTIVE_REASON)
+            return
+        demo = self._is_demo()
+        # Demo mode has no client, so no worker: the dialog opens with Start
+        # refused, which is what tells the user why.
+        if not demo and not self._ensure_ofancal_worker():
+            self._show_diag_message("Cannot calibrate: no daemon connection.")
+            return
+        dialog = OpenFanCalibrationDialog(
+            self._openfan_channel_options(),
+            demo=demo,
+            pump_roles=openfan_roles_supported(self._capabilities()),
+            parent=self,
+        )
+        dialog.start_requested.connect(self._ofancal_start_request.emit)
+        dialog.poll_requested.connect(self._ofancal_poll_request.emit)
+        dialog.cancel_requested.connect(self._ofancal_cancel_request.emit)
+        self._ofancal_dialog = dialog
+        # The picker shows each channel's live RPM, so it follows the 1 Hz poll.
+        self._state.fans_updated.connect(self._on_ofancal_fans)
+        try:
+            dialog.exec()
+        finally:
+            self._state.fans_updated.disconnect(self._on_ofancal_fans)
+            dialog.stop_polling()
+            self._ofancal_dialog = None
+
+    @Slot(list)
+    def _on_ofancal_fans(self, _fans) -> None:
+        if self._ofancal_dialog is not None:
+            self._ofancal_dialog.set_channels(self._openfan_channel_options())
+
+    @Slot(object)
+    def _on_ofancal_update(self, run) -> None:
+        if self._ofancal_dialog is not None:
+            self._ofancal_dialog.apply_run(run)
+
+    @Slot(str, str)
+    def _on_ofancal_error(self, category: str, message: str) -> None:
+        if self._ofancal_dialog is not None:
+            self._ofancal_dialog.apply_error(category, message)
+
+    # ── OpenFAN firmware update (DEC-481) ────────────────────────────
+
+    def _firmware_channels(self):
+        if self._state is None:
+            return []
+        state = self._state
+        return channel_lines(
+            (f.id for f in state.fans),
+            state.fan_display_name,
+            # The daemon's union rule for an OpenFan channel, never the role name.
+            lambda fan_id: openfan_channel_is_pump_protected(state.openfan_role(fan_id)),
+        )
+
+    def _open_openfan_firmware(self) -> None:
+        """Open the update window, or raise the one already open.
+
+        One at a time, for the reason `_open_validation` gives: the daemon has
+        one update slot, and replies route only to `self._ofw_dialog`.
+        """
+        existing = self._ofw_dialog
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        if self._state is None:
+            return
+        if not self._ensure_ofw_worker():
+            self._show_diag_message("Cannot update the firmware: no daemon connection.")
+            return
+        from ventulus.paths import cache_dir
+
+        dialog = OpenFanFirmwareDialog(
+            channels=self._firmware_channels(),
+            prepared_dir=cache_dir() / "firmware",
+            daemon_write_supported=daemon_supports("openfan_firmware_write", self._capabilities())
+            is True,
+            parent=self,
+        )
+        dialog.device_requested.connect(self._ofw_device_request.emit)
+        dialog.stage_requested.connect(self._ofw_stage_request.emit)
+        dialog.start_requested.connect(self._ofw_start_request.emit)
+        dialog.poll_requested.connect(self._ofw_poll_request.emit)
+        dialog.cancel_requested.connect(self._ofw_cancel_request.emit)
+        self._ofw_dialog = dialog
+        status = self._state.daemon_status
+        dialog.set_live_status(
+            status.openfan_link if status else None,
+            status.openfan_maintenance if status else None,
+            status.openfan_silent_board if status else None,
+        )
+        dialog.set_external_block(RUN_ACTIVE_REASON if self._report_active else "")
+        dialog.request_initial()
+        # Modeless (`P8-bd`): the user works in a file manager meanwhile.
+        dialog.finished.connect(lambda _result, d=dialog: self._on_ofw_closed(d))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_ofw_closed(self, dialog: OpenFanFirmwareDialog) -> None:
+        """Tear down a closed window — fenced on identity, `deleteLater`, as
+        `_on_validation_closed` explains."""
+        dialog.stop_polling()
+        if self._ofw_dialog is dialog:
+            self._ofw_dialog = None
+        dialog.deleteLater()
+
+    @Slot(object)
+    def _on_status_for_firmware(self, status) -> None:
+        key = (status.openfan_link, status.openfan_maintenance, status.openfan_silent_board)
+        if key != self._ofw_status_key:
+            self._ofw_status_key = key
+            self._sync_firmware_button()
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.set_live_status(
+                status.openfan_link, status.openfan_maintenance, status.openfan_silent_board
+            )
+
+    @Slot(object)
+    def _on_ofw_device(self, device) -> None:
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.apply_device(device)
+
+    @Slot(str, str)
+    def _on_ofw_device_error(self, category: str, message: str) -> None:
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.apply_device_error(category, message)
+
+    @Slot(object)
+    def _on_ofw_staged(self, staged) -> None:
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.apply_staged(staged)
+
+    @Slot(str, str, str)
+    def _on_ofw_stage_failed(self, category: str, message: str, sha256: str) -> None:
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.apply_stage_error(category, message, sha256)
+
+    @Slot(object)
+    def _on_ofw_run(self, record) -> None:
+        # The support bundle carries the last run this GUI saw.
+        if record is not None:
+            self._diag.set_openfan_update_record(record.raw)
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.apply_run(record)
+
+    @Slot(str, str)
+    def _on_ofw_run_error(self, category: str, message: str) -> None:
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.apply_run_error(category, message)
+
+    @Slot(str, str)
+    def _on_ofw_cancel_failed(self, category: str, message: str) -> None:
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.apply_cancel_error(category, message)
+
+    @Slot(str)
+    def _on_ofw_started(self, run_id: str) -> None:
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.apply_started(run_id)
+
+    @Slot(str, str)
+    def _on_ofw_start_failed(self, category: str, message: str) -> None:
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.apply_start_error(category, message)
+
+    @Slot(str, str)
+    def _on_ofw_start_unconfirmed(self, category: str, message: str) -> None:
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.apply_start_unconfirmed(category, message)
+
+    # ── Control-path discovery (AIO Phase 8 Batch 1) ─────────────────
+
+    def _open_control_path_discovery(self, header_id: str) -> None:
+        if not header_id or not self._state:
+            return
+        header = next((h for h in self._state.hwmon_headers if h.id == header_id), None)
+        if header is None:
+            return
+        if not self._ensure_discover_worker():
+            self._show_diag_message("Cannot discover the control path: no daemon connection.")
+            return
+        label = self._state.member_display_name(header_id) or header.label or header_id
+        dialog = ControlPathDiscoveryDialog(
+            header_id,
+            label,
+            # The UNION predicate, never the wire `role` (DEC-312): a header the
+            # user downgraded to `chassis_fan` that the hardware labels PUMP is
+            # still pump-protected daemon-side, and the dialog's warnings must
+            # say so or they promise something the daemon will not do.
+            is_pump=header_is_pump_protected(header, self._capabilities()),
+            parent=self,
+        )
+        dialog.preflight_requested.connect(self._discover_preflight_request.emit)
+        dialog.start_requested.connect(self._discover_start_request.emit)
+        dialog.poll_requested.connect(self._discover_poll_request.emit)
+        dialog.cancel_requested.connect(self._discover_cancel_request.emit)
+        self._discover_dialog = dialog
+        # §6.1: the preflight is the dialog's FIRST state, so ask for it before
+        # the modal blocks rather than after the user has already read "Ready".
+        dialog.request_preflight()
+        try:
+            dialog.exec()
+        finally:
+            dialog.stop_polling()
+            self._discover_dialog = None
+        # A completed run may have changed the persisted relationship, so
+        # re-render the cards from the daemon's own store rather than leaving a
+        # stale "Last validated" behind.
+        self._refresh_control_paths()
+
+    @Slot(object)
+    def _on_discover_update(self, status) -> None:
+        if self._discover_dialog is not None:
+            self._discover_dialog.apply_run(status)
+        # `records` only arrives on the GET; a POST/DELETE reply carries none.
+        # `from_status_endpoint` is what tells the two apart — an empty GET is a
+        # real answer ("the daemon holds no relationships"), an empty wrapper is
+        # no answer at all, and treating them alike leaves a card asserting a
+        # relationship the daemon has already dropped.
+        if status is None or not getattr(status, "from_status_endpoint", False):
+            return
+        latest = {r.header_id: r for r in (status.records or [])}
+        # Re-render only when the map actually MOVED. While the dialog polls at
+        # 1 Hz these records are identical every tick, and the cooling section is
+        # already re-rendered by the 1 Hz `fans_updated` signal — so an
+        # unconditional call here would double the card work every second to draw
+        # bytes that had not changed. Same discipline as the card's own
+        # detail-unchanged early return (DEC-286/287).
+        if latest == self._control_paths:
+            return
+        self._control_paths = latest
+        self._refresh_cooling_section()
+
+    @Slot(str, str)
+    def _on_discover_error(self, category: str, message: str) -> None:
+        if self._discover_dialog is not None:
+            self._discover_dialog.apply_error(category, message)
+
+    @Slot(object)
+    def _on_preflight_ready(self, report) -> None:
+        if self._discover_dialog is not None:
+            self._discover_dialog.apply_preflight(report)
+
+    @Slot(str, str)
+    def _on_preflight_error(self, category: str, message: str) -> None:
+        if self._discover_dialog is not None:
+            self._discover_dialog.apply_preflight_error(category, message)
+
+    def _supported_session_diagnostics(self) -> set[str]:
+        """Which orchestratable diagnostics this daemon accepts.
+
+        The two Phase 5 ones are implied by `validation_sessions`, which the
+        caller has already checked before the button is enabled. Control-path
+        discovery has its own flag and is offered only when the daemon has it —
+        an unknown token in `diagnostics[]` makes the daemon reject the whole
+        session, so offering it against an older daemon would break validation
+        entirely rather than degrade it.
+        """
+        from ventulus.api.models import (
+            VALIDATION_DIAG_BEHAVIOUR,
+            VALIDATION_DIAG_CHARACTERIZATION,
+            VALIDATION_DIAG_CONTROL_PATH,
+            VALIDATION_DIAG_VERIFY,
+        )
+
+        supported = {VALIDATION_DIAG_VERIFY, VALIDATION_DIAG_CHARACTERIZATION}
+        if daemon_supports("control_path_discovery", self._capabilities()):
+            supported.add(VALIDATION_DIAG_CONTROL_PATH)
+        # DEC-334, gated on its OWN flag rather than on `pwm_characterization`:
+        # an older daemon has the latter and would reject the new token.
+        if daemon_supports("pwm_behaviour_characterization", self._capabilities()):
+            supported.add(VALIDATION_DIAG_BEHAVIOUR)
+        return supported
+
+    def _refresh_control_paths(self) -> None:
+        """Ask the daemon for the persisted relationships (§6.3).
+
+        Gated on the capability rather than probed: an older daemon 404s the
+        route from the route fallback, which is indistinguishable from "no run
+        yet" without reading `error.code`.
+        """
+        if not daemon_supports("control_path_discovery", self._capabilities()):
+            return
+        # Never while the dialog owns the worker.
+        #
+        # The dialog and this background refresh share one worker and therefore
+        # one `run_error` signal, so a failure belonging to THIS request would be
+        # delivered to the dialog as though its own poll had failed: the dialog
+        # would stop its timer mid-run, re-enable Start over a preflight verdict
+        # that had blocked it, and never render `restore_failed` — the one field
+        # the spec says must be surfaced prominently. The dialog polls the same
+        # endpoint every second anyway, so suppressing this costs nothing, and
+        # the `finally` in `_open_control_path_discovery` refreshes once the
+        # dialog closes.
+        if self._discover_dialog is not None:
+            return
+        if self._ensure_discover_worker():
+            self._discover_poll_request.emit()
+
+    # ── Validation / lifecycle sessions ──────────────────────────────
+
+    def _open_validation(self, *, kind: str, device_id: str = "") -> None:
+        """Open a session dialog of one kind.
+
+        REWRITE (DEC-335): this took `lifecycle: bool`. A third kind turns a
+        boolean discriminator into a lie by construction, so it takes the wire
+        token now and the callers name what they want.
+        """
+        if self._report_active:
+            # `PTA-b`: every session kind, a passive recording included — the
+            # same rule the three toolbar buttons follow.
+            self._show_diag_message(RUN_ACTIVE_REASON)
+            return
+        # REENTRANCY (`P8-bi`). `exec()` used to make this structurally
+        # impossible: one blocking call, one dialog. `show()` does not, and all
+        # four entry points (`_lifecycle_btn`, `_thermal_btn`, `_validation_btn`
+        # and a device card) stay enabled while a dialog is open — nothing in
+        # `_sync_diagnostic_enablement` consults `_validation_dialog`.
+        #
+        # A second dialog is not merely untidy. The daemon has ONE session slot,
+        # and poll replies route only to `self._validation_dialog`, so the
+        # orphaned window would sit there un-updated but fully interactive: its
+        # Stop, Cancel and Start are wired straight to the page's worker signals
+        # and are forwarded regardless of which dialog is current. Clicking Stop
+        # on the stale window really would stop the live session, while the
+        # window that issued it never showed the result. Measured before the
+        # guard: two dialogs, both 1 Hz timers live, two polls per tick.
+        #
+        # Raise the existing one rather than silently returning (the shape
+        # `_open_control_path_discovery` uses): a dead-feeling button is how the
+        # user ends up clicking again.
+        existing = self._validation_dialog
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            if existing.kind() != kind:
+                self._show_diag_message(
+                    "A session window is already open, and the daemon records one "
+                    "session at a time. Close it first to start a different kind."
+                )
+            return
+        if not self._ensure_validation_worker():
+            self._show_diag_message("Cannot start a session: no daemon connection.")
+            return
+        device_id, device_name, members = self._resolve_device(device_id)
+        if not device_id:
+            self._show_diag_message(
+                "Configure a cooling device first — a session records one named assembly."
+            )
+            return
+        dialog = ValidationSessionDialog(
+            device_id,
+            device_name,
+            kind=kind,
+            members=members,
+            supported_diagnostics=self._supported_session_diagnostics(),
+            # `P8-az`. Gated through the registry rather than a raw `getattr`
+            # chain: DEC-334's defect was two gating shapes for one flag, where
+            # the working one hid the broken one for a whole release. One flag,
+            # one gating shape.
+            auto_stop_supported=bool(daemon_supports("validation_auto_stop", self._capabilities())),
+            parent=self,
+        )
+        dialog.start_requested.connect(self._on_validation_start)
+        dialog.poll_requested.connect(self._validation_poll_request.emit)
+        dialog.stop_requested.connect(self._validation_stop_request.emit)
+        dialog.cancel_requested.connect(self._validation_cancel_request.emit)
+        dialog.marker_requested.connect(self._validation_marker_request.emit)
+        dialog.measurement_requested.connect(self._validation_measurement_request.emit)
+        dialog.export_requested.connect(self._export_session)
+        self._validation_dialog = dialog
+        # Show whatever the daemon already has: a session may still be recording
+        # from an earlier visit, and opening the dialog must not look like a
+        # fresh start.
+        self._validation_poll_request.emit()
+        dialog.start_polling()
+        # MODELESS (`P8-bd`). This was `dialog.exec()`, which Qt documents as
+        # blocking every other window in the application — while all ten of the
+        # dialog's own isolation-template stages instruct the user to set a duty,
+        # and the only place to do that is the Controls page's floor-clamped
+        # override. The dialog was telling the user to do something it prevented.
+        #
+        # `finished` replaces the old `try/finally`: with a non-blocking `show()`
+        # this method returns immediately, so there is no scope left to hang the
+        # teardown on.
+        dialog.finished.connect(lambda _result, d=dialog: self._on_validation_closed(d))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_validation_closed(self, dialog: ValidationSessionDialog) -> None:
+        """Tear down a closed session dialog (`P8-bd`).
+
+        Fenced on identity, not on truthiness: the dialog is modeless, so the
+        user can close one and open another before the first `finished` is
+        delivered, and an unfenced ``= None`` would then clear the *live*
+        dialog's reference and silently stop routing polls to it.
+
+        `deleteLater`, not `WA_DeleteOnClose`: the reference is cleared above
+        first, so nothing can dispatch into a half-destroyed wrapper, and the
+        deletion still goes through Qt's event loop rather than Python's cyclic
+        GC — which is the shiboken `releaseWrapper` use-after-free DEC-230 exists
+        to avoid. Without it every open/close would strand a dialog tree on the
+        page for the life of the window.
+        """
+        dialog.stop_polling()
+        if self._validation_dialog is dialog:
+            self._validation_dialog = None
+        dialog.deleteLater()
+
+    def _resolve_device(self, device_id: str = "") -> tuple[str, str, list[tuple[str, str]]]:
+        """The device a session targets, plus its members for the pickers.
+
+        Honours the id a cooling-device card emitted; falls back to the first
+        device only for the section-level buttons, which name no device. The
+        GUI writes a single fixed device id today, so the two coincide — but the
+        inventory is a list and the daemon supports several, so picking
+        ``devices[0]`` regardless of what the user clicked would be wrong by
+        construction rather than merely unlucky.
+        """
+        inventory = getattr(self._state, "cooling_devices", None) if self._state else None
+        devices = list(inventory.cooling_devices) if inventory else []
+        if not devices:
+            return "", "", []
+        device = next((d for d in devices if d.id == device_id), devices[0])
+        members: list[tuple[str, str]] = []
+        for member_id in (
+            ([device.pump_member] if device.pump_member else [])
+            + list(device.radiator_members)
+            + list(device.auxiliary_members)
+        ):
+            label = (self._state.member_display_name(member_id) if self._state else "") or member_id
+            members.append((member_id, label))
+        return device.id, device.name or device.id, members
+
+    def _on_validation_start(
+        self,
+        device_id: str,
+        kind: str,
+        diagnostics: list,
+        sweep: list,
+        metadata: dict,
+        auto_stop: bool,
+    ) -> None:
+        if self._report_active:
+            # `PTA-b`: a session window opened before the run stays open (it is
+            # modeless) and its Start stays live. Refused here, in the dialog's
+            # own status line — `apply_error` also re-arms its Start.
+            if self._validation_dialog is not None:
+                self._validation_dialog.apply_error("unavailable", RUN_ACTIVE_REASON)
+            return
+        self._validation_start_request.emit(
+            device_id, kind, diagnostics, sweep, metadata, auto_stop
+        )
+        if self._validation_dialog is not None:
+            self._validation_dialog.start_polling()
+
+    @Slot(object)
+    def _on_validation_update(self, session) -> None:
+        if self._validation_dialog is not None:
+            self._validation_dialog.apply_session(session)
+
+    @Slot(str, str)
+    def _on_validation_error(self, category: str, message: str) -> None:
+        if self._validation_dialog is not None:
+            self._validation_dialog.apply_error(category, message)
+
+    @Slot(str)
+    def _on_validation_action_ok(self, message: str) -> None:
+        if self._validation_dialog is not None:
+            self._validation_dialog.apply_action_ok(message)
+
+    def _export_session(self, fmt: str) -> None:
+        """Write the session out through the Qt-free Phase 5 serializers (§16)."""
+        from PySide6.QtWidgets import QFileDialog
+
+        from ventulus.services.validation_export import (
+            session_json,
+            session_samples_csv,
+        )
+
+        dialog = self._validation_dialog
+        session = dialog.session() if dialog is not None else None
+        if session is None:
+            return
+        if fmt == "csv":
+            suggested, filt, body = (
+                f"validation_{session.session_id}.csv",
+                "CSV files (*.csv)",
+                session_samples_csv(session),
+            )
+        else:
+            suggested, filt, body = (
+                f"validation_{session.session_id}.json",
+                "JSON files (*.json)",
+                session_json(session),
+            )
+        path, _ = QFileDialog.getSaveFileName(self, "Export validation session", suggested, filt)
+        if not path:
+            return
+        try:
+            from pathlib import Path
+
+            from ventulus.paths import atomic_write
+
+            atomic_write(Path(path), body)
+        except OSError as exc:
+            log.warning("Validation export failed: %s", exc)
+            if dialog is not None:
+                dialog.apply_error("error", f"Could not write {path}: {exc}")
+            return
+        if dialog is not None:
+            dialog.apply_action_ok(f"Exported to {path}")
+
+    def _forget_device(self, device_id: str) -> None:
+        """Delete a cooling device's topology (closes register row AIO4-d).
+
+        Metadata only. The headers, their roles and every safety floor are
+        untouched — the daemon derives pump protection from the ROLE union, not
+        from device membership (DEC-316) — and no fan changes speed.
+        """
+        if not self._client:
+            self._show_diag_message("Cannot forget device: no daemon connection.")
+            return
+        if not self._supports_cooling_devices():
+            self._show_diag_message(
+                "This daemon does not support cooling-device topology, so there is "
+                "nothing to forget."
+            )
+            return
+        try:
+            self._client.delete_cooling_device(device_id)
+        except Exception as exc:
+            log.warning("Failed to delete cooling device %s: %s", device_id, exc)
+            self._show_diag_message(f"Could not forget the device: {exc}")
+            return
+        card = self._device_cards.pop(device_id, None)
+        if card is not None:
+            card.setParent(None)
+            card.deleteLater()
+        self._show_diag_message("Cooling device topology removed. No fan settings changed.")
+        # DEC-319: push the inventory back into AppState, not just this page.
+        # The Controls picker reserves a device's members, and the poller only
+        # re-reads the inventory on the ~300 s capability interval — so without
+        # this the fans of a device the user just forgot stay reserved, and
+        # nothing on screen explains why.
+        #
+        # `set_cooling_devices` emits `cooling_devices_updated`, which is already
+        # connected to `_refresh_cooling_section` (see __init__) — so it refreshes
+        # this page too, and calling it again here would tear down and rebuild
+        # every device card twice for one click. The explicit refresh is the
+        # fallback for the paths that did NOT push to state.
+        pushed = False
+        if self._state is not None and self._supports_cooling_devices():
+            try:
+                self._state.set_cooling_devices(self._client.get_cooling_devices())
+                pushed = True
+            except Exception as exc:
+                log.warning("Cooling-device re-fetch after a delete failed: %s", exc)
+        if not pushed:
+            self._refresh_cooling_section()
+
+    # ── DEC-444: header roles and the `BRD-h` label prompt ────────────
+
+    def _board_vendor(self) -> str:
+        info = getattr(self._state, "board_info", None) if self._state else None
+        return getattr(info, "vendor", "") or ""
+
+    def _on_role_change_requested(self, header_id: str) -> None:
+        message = self.change_header_role(header_id, self)
+        if message:
+            self._show_role_outcome(header_id, message)
+
+    def _show_role_outcome(self, header_id: str, text: str) -> None:
+        """Show a role change's outcome on the card that asked (`ROLE-d`).
+
+        Not the Diagnostics result line: reaching that scrolls the page away
+        from the card, and with eight or more headers the card leaves the
+        screen. One message at a time — the previous card's is cleared. A card
+        that has gone since (the header vanished) falls back to that line.
+        """
+        previous = self._header_cards.get(self._role_outcome_header)
+        if previous is not None and self._role_outcome_header != header_id:
+            previous.set_role_outcome("")
+        card = self._header_cards.get(header_id)
+        if card is None:
+            self._role_outcome_header = ""
+            self._show_diag_message(text)
+            return
+        self._role_outcome_header = header_id
+        self._role_outcome_role = self._header_role(header_id)
+        card.set_role_outcome(text)
+
+    def _header_role(self, header_id: str) -> tuple[str, str] | None:
+        header = next(
+            (h for h in (self._state.hwmon_headers if self._state else []) if h.id == header_id),
+            None,
+        )
+        return (header.role, header.role_source) if header is not None else None
+
+    def _expire_role_outcome(self, *_args) -> None:
+        """Clear the card's outcome once its header's role moves on (`ROLE-d`).
+
+        A role set from the report, Configure AIO, the Fan Wizard or another
+        client reaches here only as new headers; the card's past-tense message
+        would then contradict its own pill.
+        """
+        header_id = self._role_outcome_header
+        if not header_id or self._header_role(header_id) == self._role_outcome_role:
+            return
+        card = self._header_cards.get(header_id)
+        if card is not None:
+            card.set_role_outcome("")
+        self._role_outcome_header = ""
+        self._role_outcome_role = None
+
+    def change_header_role(self, header_id: str, parent: QWidget | None) -> str | None:
+        """Pick, confirm and write one header's role; return what happened.
+
+        The ONE write path for the Hardware card and the PWM Test Report's scope
+        page. ``None`` means the user cancelled or nothing would change, so the
+        caller shows nothing. Synchronous on the UI thread, like the Controls
+        page's role writes (the user's Q9): one small POST and one GET, through
+        the shared ``apply_role_writes`` (`ROLE-c`).
+        """
+        state = self._state
+        header = next(
+            (h for h in (state.hwmon_headers if state else []) if h.id == header_id), None
+        )
+        if header is None:
+            return "That header is no longer reported by the daemon."
+        caps = self._capabilities()
+        editable, reason = role_editable(header, caps)
+        if not editable:
+            return reason
+        if self._client is None:
+            return "Cannot set a role: no daemon connection."
+        name = state.member_display_name(header_id) if state else header_id
+        dialog = HeaderRoleDialog(
+            header,
+            name,
+            label_caveat=nct6687_label_note(header, self._board_vendor()),
+            choices=role_choices(caps),
+            parent=parent,
+        )
+        if not dialog.exec():
+            return None
+        role = dialog.chosen_role()
+        outcome = apply_role_writes(
+            self._client,
+            [header],
+            [(header_id, role)],
+            confirm=lambda _ids: confirm_remove_pump_protection(parent, [name]),
+            # Emits `headers_updated`, which re-renders this page's cards.
+            publish_headers=state.set_hwmon_headers,
+        )
+        if outcome.declined:
+            return f"{name} kept its pump role."
+        failure = outcome.failed_assign or next(iter(outcome.failed), None)
+        if failure is not None:
+            return failure_message(name, role, failure.error, reread=outcome.headers is not None)
+        result = outcome.result_for(header_id)
+        if result is None:
+            return None  # a no-op: nothing was sent
+        header_after = next((h for h in outcome.headers or [] if h.id == header_id), None)
+        return outcome_message(name, result, header_after, caps)
+
+    def _confirmed_label_prompts(self) -> frozenset[str]:
+        svc = self._settings_service
+        return frozenset(svc.settings.confirmed_label_prompts) if svc is not None else frozenset()
+
+    def _refresh_label_prompt(self, headers) -> None:
+        prompt = nct6687_label_prompt(
+            list(headers), self._board_vendor(), self._confirmed_label_prompts()
+        )
+        self._label_prompt_key = prompt.key if prompt else ""
+        if prompt is not None:
+            self._label_prompt_text.setText(prompt.text)
+        self._label_prompt.setVisible(prompt is not None)
+        # Nowhere to remember the answer, so do not offer to.
+        self._label_prompt_btn.setVisible(self._settings_service is not None)
+
+    def _confirm_labels(self) -> None:
+        """Remember "labels are correct" for these chips on this machine only
+        (`confirmed_label_prompts` is in MACHINE_SPECIFIC_KEYS)."""
+        svc = self._settings_service
+        key = self._label_prompt_key
+        if svc is None or not key:
+            return
+        stored = list(svc.settings.confirmed_label_prompts)
+        if key not in stored:
+            svc.update(confirmed_label_prompts=[*stored, key])
+        self._refresh_label_prompt(self._state.hwmon_headers if self._state else [])
+
+    def _show_diag_message(
+        self, text: str, *, chip_class: str = "", evidence: VerifyEvidence | None = None
+    ) -> None:
+        """Show *text* in the diagnostics result line.
+
+        The line is shared by every diagnostic here, so the chip class is set on
+        every message — a message with none resets it, rather than inheriting
+        the colour of the verify result before it. The evidence panel follows
+        the same rule: only a verify result passes any, so every other message
+        hides the previous result's table rather than leaving it under a line it
+        does not describe.
+        """
+        set_chip_class(self._diag_result, chip_class, skip_if_unchanged=True)
+        self._diag_result.setText(text)
+        self._diag_result.setVisible(bool(text))
+        self._diag_evidence.set_evidence(evidence if text else None)
+        self._scroll.ensureWidgetVisible(self._diagnostics_card)
+
+    def _confirm_probe(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Probe Super-I/O ports?",
+            # DC-w (DEC-433): this dialog is a consent point, so it names the
+            # writes the daemon's probe makes and when the daemon refuses it.
+            "Active port probing accesses the motherboard's Super-I/O configuration "
+            "ports directly (needs elevated privileges). It is not read-only: where "
+            "no chip answers, the daemon writes a vendor unlock and exit sequence, "
+            "which on some boards can hide a chip until the machine is unplugged "
+            "from mains power. The daemon refuses to probe while any Super-I/O "
+            "driver it recognises is bound. Proceed?",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._run_readiness_probe()
+
+    def _run_readiness_probe(self) -> None:
+        if not self._client or not self._ensure_readiness_worker():
+            return
+        self._set_status("Probing Super-I/O ports…")
+        self._readiness_probe_request.emit()
+
+    # ── Worker lifecycle (ported) ────────────────────────────────────
+
+    def _ensure_worker(self, worker, thread, worker_cls, connect: Callable) -> tuple:
+        if worker is not None:
+            return worker, thread, True
+        socket_path = self._client.socket_path if self._client else None
+        if not socket_path:
+            return None, None, False
+        thread = QThread(self)
+        worker = worker_cls(socket_path)
+        worker.moveToThread(thread)
+        connect(worker)
+        thread.start()
+        return worker, thread, True
+
+    def _ensure_readiness_worker(self) -> bool:
+        def connect(w: _HardwareReadinessWorker) -> None:
+            self._readiness_request.connect(w.do_fetch, Qt.ConnectionType.QueuedConnection)
+            self._readiness_refresh_request.connect(
+                w.do_refresh, Qt.ConnectionType.QueuedConnection
+            )
+            self._readiness_probe_request.connect(w.do_probe, Qt.ConnectionType.QueuedConnection)
+            w.fetch_ok.connect(self._on_readiness_ok, Qt.ConnectionType.QueuedConnection)
+            w.fetch_error.connect(self._on_readiness_error, Qt.ConnectionType.QueuedConnection)
+            w.probe_ok.connect(self._on_readiness_probe_ok, Qt.ConnectionType.QueuedConnection)
+            w.probe_error.connect(
+                self._on_readiness_probe_error, Qt.ConnectionType.QueuedConnection
+            )
+
+        self._readiness_worker, self._readiness_thread, ok = self._ensure_worker(
+            self._readiness_worker, self._readiness_thread, _HardwareReadinessWorker, connect
+        )
+        return ok
+
+    def _ensure_hw_diag_worker(self) -> bool:
+        def connect(w: _HwDiagWorker) -> None:
+            self._hw_diag_request.connect(w.do_fetch, Qt.ConnectionType.QueuedConnection)
+            w.fetch_ok.connect(self._on_hw_diag_ok, Qt.ConnectionType.QueuedConnection)
+            w.fetch_error.connect(self._on_hw_diag_error, Qt.ConnectionType.QueuedConnection)
+
+        self._hw_diag_worker, self._hw_diag_thread, ok = self._ensure_worker(
+            self._hw_diag_worker, self._hw_diag_thread, _HwDiagWorker, connect
+        )
+        return ok
+
+    def _ensure_verify_worker(self) -> bool:
+        def connect(w: _VerifyWorker) -> None:
+            self._verify_request.connect(w.do_verify, Qt.ConnectionType.QueuedConnection)
+            w.verify_ok.connect(self._on_verify_ok, Qt.ConnectionType.QueuedConnection)
+            w.verify_error.connect(self._on_verify_error, Qt.ConnectionType.QueuedConnection)
+
+        self._verify_worker, self._verify_thread, ok = self._ensure_worker(
+            self._verify_worker, self._verify_thread, _VerifyWorker, connect
+        )
+        return ok
+
+    def _ensure_char_worker(self) -> bool:
+        def connect(w: _CharacterizationWorker) -> None:
+            self._char_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
+            self._char_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
+            self._char_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
+            self._char_preflight_request.connect(w.do_preflight, Qt.ConnectionType.QueuedConnection)
+            w.run_updated.connect(self._on_char_update, Qt.ConnectionType.QueuedConnection)
+            w.run_error.connect(self._on_char_error, Qt.ConnectionType.QueuedConnection)
+            w.preflight_ready.connect(
+                self._on_char_preflight_ready, Qt.ConnectionType.QueuedConnection
+            )
+            w.preflight_error.connect(
+                self._on_char_preflight_error, Qt.ConnectionType.QueuedConnection
+            )
+
+        self._char_worker, self._char_thread, ok = self._ensure_worker(
+            self._char_worker, self._char_thread, _CharacterizationWorker, connect
+        )
+        return ok
+
+    def _ensure_ofancal_worker(self) -> bool:
+        def connect(w: _OpenFanCalibrationWorker) -> None:
+            self._ofancal_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
+            self._ofancal_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
+            self._ofancal_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
+            w.run_updated.connect(self._on_ofancal_update, Qt.ConnectionType.QueuedConnection)
+            w.run_error.connect(self._on_ofancal_error, Qt.ConnectionType.QueuedConnection)
+
+        self._ofancal_worker, self._ofancal_thread, ok = self._ensure_worker(
+            self._ofancal_worker, self._ofancal_thread, _OpenFanCalibrationWorker, connect
+        )
+        return ok
+
+    def _ensure_ofw_worker(self) -> bool:
+        def connect(w: _OpenFanFirmwareWorker) -> None:
+            self._ofw_device_request.connect(w.do_device, Qt.ConnectionType.QueuedConnection)
+            self._ofw_stage_request.connect(w.do_stage, Qt.ConnectionType.QueuedConnection)
+            self._ofw_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
+            self._ofw_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
+            self._ofw_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
+            w.device_ready.connect(self._on_ofw_device, Qt.ConnectionType.QueuedConnection)
+            w.device_error.connect(self._on_ofw_device_error, Qt.ConnectionType.QueuedConnection)
+            w.staged.connect(self._on_ofw_staged, Qt.ConnectionType.QueuedConnection)
+            w.stage_failed.connect(self._on_ofw_stage_failed, Qt.ConnectionType.QueuedConnection)
+            w.run_updated.connect(self._on_ofw_run, Qt.ConnectionType.QueuedConnection)
+            w.run_error.connect(self._on_ofw_run_error, Qt.ConnectionType.QueuedConnection)
+            w.cancel_failed.connect(self._on_ofw_cancel_failed, Qt.ConnectionType.QueuedConnection)
+            w.started.connect(self._on_ofw_started, Qt.ConnectionType.QueuedConnection)
+            w.start_failed.connect(self._on_ofw_start_failed, Qt.ConnectionType.QueuedConnection)
+            w.start_unconfirmed.connect(
+                self._on_ofw_start_unconfirmed, Qt.ConnectionType.QueuedConnection
+            )
+
+        self._ofw_worker, self._ofw_thread, ok = self._ensure_worker(
+            self._ofw_worker, self._ofw_thread, _OpenFanFirmwareWorker, connect
+        )
+        return ok
+
+    def _ensure_discover_worker(self) -> bool:
+        def connect(w: _ControlPathWorker) -> None:
+            self._discover_preflight_request.connect(
+                w.do_preflight, Qt.ConnectionType.QueuedConnection
+            )
+            self._discover_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
+            self._discover_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
+            self._discover_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
+            w.run_updated.connect(self._on_discover_update, Qt.ConnectionType.QueuedConnection)
+            w.run_error.connect(self._on_discover_error, Qt.ConnectionType.QueuedConnection)
+            w.preflight_ready.connect(self._on_preflight_ready, Qt.ConnectionType.QueuedConnection)
+            w.preflight_error.connect(self._on_preflight_error, Qt.ConnectionType.QueuedConnection)
+
+        self._discover_worker, self._discover_thread, ok = self._ensure_worker(
+            self._discover_worker, self._discover_thread, _ControlPathWorker, connect
+        )
+        return ok
+
+    def _ensure_validation_worker(self) -> bool:
+        def connect(w: _ValidationWorker) -> None:
+            self._validation_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
+            self._validation_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
+            self._validation_stop_request.connect(w.do_stop, Qt.ConnectionType.QueuedConnection)
+            self._validation_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
+            self._validation_marker_request.connect(w.do_marker, Qt.ConnectionType.QueuedConnection)
+            self._validation_measurement_request.connect(
+                w.do_measurement, Qt.ConnectionType.QueuedConnection
+            )
+            w.session_updated.connect(
+                self._on_validation_update, Qt.ConnectionType.QueuedConnection
+            )
+            w.session_error.connect(self._on_validation_error, Qt.ConnectionType.QueuedConnection)
+            w.action_ok.connect(self._on_validation_action_ok, Qt.ConnectionType.QueuedConnection)
+
+        self._validation_worker, self._validation_thread, ok = self._ensure_worker(
+            self._validation_worker, self._validation_thread, _ValidationWorker, connect
+        )
+        return ok
+
+    def _teardown_worker(self, worker: QObject | None, thread: QThread | None, label: str) -> None:
+        # Close the client (worker.shutdown) BEFORE joining the thread — the verify
+        # worker blocks synchronously and closing the client is the only way to
+        # interrupt it so quit()/wait() can join (the slot absorbs the resulting
+        # connection error). Audit F-1's close-after-join reorder hangs a blocking
+        # join; kept close-first deliberately (mirrors system_state_page).
+        #
+        # `ROLE-g`: this page's requests to the worker go first, so no new call
+        # is queued against a client about to close. A call already in flight
+        # is the worker's backstop to absorb.
+        if worker is not None:
+            QObject.disconnect(self, None, worker, None)
+            QObject.disconnect(worker, None, None, None)
+            worker.shutdown()
+        if thread is not None:
+            thread.quit()
+            if not thread.wait(2000):
+                log.warning("%s thread did not stop within 2s, terminating", label)
+                thread.terminate()
+                thread.wait(1000)
+
+    # ── DEC-404: the PWM Test Report ─────────────────────────────────
+
+    def _profile_member_ids(self) -> frozenset[str]:
+        profile = self._profile_service.active_profile if self._profile_service else None
+        if profile is None:
+            return frozenset()
+        return frozenset(m.member_id for c in profile.controls for m in c.members)
+
+    def _open_pwm_report(self) -> None:
+        """Open the report window, or raise the one already open (decision 10).
+
+        The `_open_validation` shape: a second window over one controller would
+        give the user two Cancel buttons for one run.
+        """
+        window = self._report_window
+        if window is not None:
+            window.show()
+            window.raise_()
+            window.activateWindow()
+            return
+        socket_path = self._client.socket_path if self._client else ""
+        # `PTA-e`: demo mode has no client (main.py), but saved reports, import,
+        # compare and export need no daemon. So the window opens without a
+        # socket. The controller then cannot reach a worker, and the window's own
+        # demo refusal is what blocks Start.
+        demo = self._state is not None and self._state.mode == OperationMode.DEMO
+        if not socket_path and not demo:
+            self._show_diag_message("Cannot open the PWM Test Report: no daemon connection.")
+            return
+        if self._report_controller is None:
+            self._report_controller = PwmReportController(self._state, socket_path, self)
+            self._report_controller.run_active_changed.connect(self._on_report_active)
+        window = PwmReportWindow(
+            self._report_controller,
+            self._state,
+            self._settings_service,
+            profile_member_ids=self._profile_member_ids,
+            local_verify_pages=self._local_verify_pages,
+            set_header_role=self.change_header_role,
+            parent=self,
+        )
+        self._report_window = window
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def set_local_verify_query(self, query: Callable[[], bool]) -> None:
+        """Tell the report whether System State has a verify running (`PTA-d`)."""
+        self._local_verify_query = query
+
+    def _local_verify_pages(self) -> tuple[str, ...]:
+        """The pages with a verify this GUI started still running (`PTA-l`).
+
+        System State's comes from MainWindow's query, and this page's from its
+        own count. The poll's `verify_active` sees neither in the gap between a
+        click and the next poll. The report asks this at every refusal check,
+        so the Start click reads the live answer.
+        """
+        pages: list[str] = []
+        if self._local_verify_query():
+            pages.append(VERIFY_PAGE_SYSTEM_STATE)
+        if self._verifies_in_flight:
+            pages.append(VERIFY_PAGE_HARDWARE)
+        return tuple(pages)
+
+    def _on_report_active(self, active: bool) -> None:
+        """Stand this page's diagnostics down while a run holds the slot."""
+        self._report_active = active
+        reason = RUN_ACTIVE_REASON if active else ""
+        self._apply_header_block()
+        for device_card in self._device_cards.values():
+            device_card.set_diagnostics_blocked(reason)
+        self._sync_diagnostic_enablement()
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.set_external_block(reason)
+        self.pwm_report_active_changed.emit(active)
+
+    def cleanup(self) -> None:
+        # DEC-404: a report run first — it cancels its diagnostic and saves the
+        # report `interrupted` while its worker can still be joined cleanly.
+        if self._report_controller is not None:
+            self._report_controller.shutdown()
+        if self._report_window is not None:
+            self._report_window.hide()
+        # Every worker tears down the same way, and in the same order: close the
+        # client BEFORE joining (see `_teardown_worker`). The Phase 6 workers
+        # block on hardware exactly as the readiness one does — a validation
+        # start can be minutes long — so none of them may be joined first.
+        for worker, thread, label in (
+            (self._readiness_worker, self._readiness_thread, "Readiness"),
+            (self._hw_diag_worker, self._hw_diag_thread, "HwDiag"),
+            (self._verify_worker, self._verify_thread, "Verify"),
+            (self._char_worker, self._char_thread, "Characterization"),
+            (self._discover_worker, self._discover_thread, "ControlPath"),
+            (self._ofancal_worker, self._ofancal_thread, "OpenFanCalibration"),
+            (self._ofw_worker, self._ofw_thread, "OpenFanFirmware"),
+            (self._validation_worker, self._validation_thread, "Validation"),
+        ):
+            self._teardown_worker(worker, thread, label)
+        self._readiness_worker = self._readiness_thread = None
+        self._hw_diag_worker = self._hw_diag_thread = None
+        self._hw_diag_in_flight = False  # the torn-down worker answers nothing more
+        self._verify_worker = self._verify_thread = None
+        self._verifies_in_flight = 0  # the torn-down worker answers nothing more
+        self._char_worker = self._char_thread = None
+        self._discover_worker = self._discover_thread = None
+        self._ofancal_worker = self._ofancal_thread = None
+        self._ofw_worker = self._ofw_thread = None
+        self._validation_worker = self._validation_thread = None
+        # The update itself runs daemon-side; only this window's poll stops.
+        if self._ofw_dialog is not None:
+            self._ofw_dialog.stop_polling()
+
+    def set_theme(self, tokens) -> None:
+        if self._last_report is not None:
+            self._render(self._last_report)
+        # `P8-bx`: the Phase-8 charts live inside dialogs this page owns, so the
+        # MainWindow fan-out stops here unless this method carries it the last
+        # hop — the same shape `dashboard_page`/`controls_page` use for their own
+        # charts and cards. Guarded on the live reference rather than
+        # `findChildren`: a dialog that has been closed is `deleteLater`d with its
+        # reference already cleared (`_on_validation_closed`), and re-theming a
+        # half-destroyed wrapper is the shiboken use-after-free DEC-230 exists to
+        # avoid.
+        if self._char_dialog is not None:
+            self._char_dialog.set_theme(tokens)
+        if self._ofancal_dialog is not None:
+            self._ofancal_dialog.set_theme(tokens)
+        if self._validation_dialog is not None:
+            self._validation_dialog.set_theme(tokens)
+        if self._report_window is not None:
+            self._report_window.set_theme(tokens)
+
+
+# ── Module helpers ───────────────────────────────────────────────────
+
+
+def _state_color(state: str, theme) -> str:
+    return {
+        "ok": theme.status_ok,
+        "warn": theme.status_warn,
+        "crit": theme.status_crit,
+        "info": theme.status_info,
+    }.get(state, theme.text_secondary)
+
+
+def _note_label(text: str, object_name: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName(object_name)
+    label.setProperty("class", "CardMeta")
+    label.setWordWrap(True)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    return label
+
+
+def _copy_to_clipboard(text: str) -> None:
+    clip = QApplication.clipboard()
+    if clip is not None:
+        clip.setText(text)
+
+
+def _clear_layout(layout: QLayout) -> None:
+    while layout.count():
+        item = layout.takeAt(0)
+        w = item.widget()
+        if w is not None:
+            w.deleteLater()
+        else:
+            child = item.layout()
+            if child is not None:
+                _clear_layout(child)
+
+
+def _set_pill(table: QTableWidget, row: int, col: int, text: str, state: str) -> None:
+    pill = StatusPill(text, state)
+    pill.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+    holder = QWidget()
+    holder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+    lay = QHBoxLayout(holder)
+    lay.setContentsMargins(6, 2, 6, 2)
+    lay.setSpacing(0)
+    lay.addWidget(pill)
+    lay.addStretch(1)
+    table.setCellWidget(row, col, holder)
+
+
+def _ensure_items(table: QTableWidget, row: int, ncols: int) -> None:
+    for col in range(ncols):
+        if table.item(row, col) is None:
+            table.setItem(row, col, QTableWidgetItem())

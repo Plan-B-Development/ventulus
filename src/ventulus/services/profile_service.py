@@ -1,0 +1,3029 @@
+"""Profile management — CRUD, persistence, and logical controls.
+
+Profiles are GUI-owned. The daemon knows nothing about them.
+
+Data model (v7):
+- Profile contains LogicalControls (fan groups with mode) and a CurveConfig library.
+- LogicalControl maps to physical outputs via ControlMember.
+- CurveConfig supports Graph, Stepped, Linear, Flat, Trigger, Mix, and Sync types.
+- v4 introduces role-aware ``minimum_pct`` defaults (20% chassis / 30% CPU+pump)
+  enforced GUI-side, and the per-member ``fan_zero_rpm`` flag for GPU fans.
+- v5 adds the Stepped (staircase) curve type (DEC-148).
+- v6 adds the Trigger (two-state latch) curve type (DEC-149).
+- v7 adds the composite Mix (combine other curves) and Sync (mirror a control's
+  output) curve types, retiring the single-sensor rule DEC-014 (DEC-150/151/152).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from types import MappingProxyType
+from typing import TYPE_CHECKING
+
+from PySide6.QtCore import QObject, Signal
+
+from ventulus.api.errors import DaemonError, DaemonTimeout, DaemonUnavailable
+from ventulus.api.models import field_violation_lines
+from ventulus.constants import DEFAULT_CURVE_POINTS
+from ventulus.knowledge.chip_name import canonical_hwmon_id
+from ventulus.knowledge.hwmon_label_resolver import is_placeholder_hwmon_label
+from ventulus.knowledge.sensor_knowledge import (
+    is_liquid_cooler_chip,
+    sensor_is_coolant,
+)
+from ventulus.paths import atomic_write, load_json_capped, profiles_dir
+from ventulus.services.daemon_features import daemon_supports
+from ventulus.services.shared_fan_switch import (
+    SharedSwitchRuleError,
+    describe_shared_switch_violations,
+    shared_switch_violations,
+)
+
+if TYPE_CHECKING:
+    from ventulus.api.client import DaemonClient
+    from ventulus.api.models import HwmonHeader
+    from ventulus.services.app_state import AppState
+
+log = logging.getLogger(__name__)
+
+
+# Upper bound on points in a single curve. Real curves have a handful of points;
+# this guards against a crafted profile exhausting memory / per-tick CPU during
+# validation and evaluation (audit P2-C). Generous — far above any real curve.
+MAX_CURVE_POINTS = 256
+
+# Upper bounds on a profile's collection sizes. Mirrors the daemon's
+# ``MAX_PROFILE_CURVES`` / ``MAX_PROFILE_CONTROLS`` (profile.rs) so a profile one
+# side accepts the other does too. These are recursion bounds, not taste limits:
+# Mix/Sync dependency walks recurse once per link, so a deep — but perfectly
+# ACYCLIC, hence cycle-check-passing — chain used to overflow the daemon's stack
+# and abort it. The GUI's own walks are iterative (see ``_mix_reaches``), so this
+# cap is about staying in lockstep with the daemon and refusing an absurd profile
+# at the parse boundary rather than surfacing it in the editor.
+MAX_PROFILE_CURVES = 256
+MAX_PROFILE_CONTROLS = 256
+
+
+def _is_finite(value: object) -> bool:
+    """True only for a real, finite number (rejects NaN/inf, bool, non-numbers)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _check_profile_size(data: dict) -> None:
+    """Reject a profile whose collections exceed the daemon-mirrored caps.
+
+    Reads the *raw* payload so a non-list (or absent) entry is simply ignored
+    here — shape errors belong to the per-item parsers.
+
+    ``assignments`` is checked too, and that is not cosmetic: a v1 document
+    carries neither ``curves`` nor ``controls``, so checking only those two made
+    this a no-op for the v1 branch — and ``_migrate_v1_profile`` then builds one
+    curve *and* one control per assignment directly, bypassing both these caps
+    and ``MAX_CURVE_POINTS``. Bounded only by the 4 MB import cap, a crafted
+    legacy bundle could inflate to millions of dataclasses and hang the GUI.
+    """
+    if isinstance(data.get("curves"), list) and len(data["curves"]) > MAX_PROFILE_CURVES:
+        raise ValueError(
+            f"profile has too many curves: {len(data['curves'])} > {MAX_PROFILE_CURVES}"
+        )
+    if isinstance(data.get("controls"), list) and len(data["controls"]) > MAX_PROFILE_CONTROLS:
+        raise ValueError(
+            f"profile has too many controls: {len(data['controls'])} > {MAX_PROFILE_CONTROLS}"
+        )
+    # One assignment migrates to one control AND one curve, so the tighter of the
+    # two caps applies.
+    max_assignments = min(MAX_PROFILE_CURVES, MAX_PROFILE_CONTROLS)
+    if isinstance(data.get("assignments"), list) and len(data["assignments"]) > max_assignments:
+        raise ValueError(
+            f"profile has too many assignments: {len(data['assignments'])} > {max_assignments}"
+        )
+
+
+def _require_finite(value: object, name: str) -> float:
+    """Return *value* if it is a real finite number; else raise ``ValueError``.
+
+    Extends the curve-point ``_is_finite`` guard to the scalar profile fields so a
+    crafted/corrupt import carrying ``NaN``/``Infinity``/``1e400`` (or a non-number)
+    is rejected at load rather than poisoning evaluation/serialisation (P3 / DEC-172)."""
+    if not _is_finite(value):
+        raise ValueError(f"{name!r} is non-finite or non-numeric: {value!r}")
+    return value
+
+
+def _clamp_hysteresis(value: float) -> float:
+    """A loaded ``hysteresis_c`` into the daemon's range (DEC-489)."""
+    from ventulus.services.curve_hysteresis import clamp_hysteresis_c
+
+    clamped = clamp_hysteresis_c(value)
+    if clamped != value:
+        log.warning("hysteresis_c %s is outside the daemon's range; using %s", value, clamped)
+    return clamped
+
+
+def _opt(data: dict, key: str, default: float) -> object:
+    """Optional-field read that treats an explicit JSON ``null`` as absent.
+
+    The daemon models the optional curve scalars as ``Option<f64>`` and accepts —
+    then stores verbatim — a document carrying ``"start_temp_c": null`` (its
+    guards are ``if let Some(v)``), so external tooling can legitimately hand the
+    GUI one. ``null`` therefore means "use the default", not "fail the whole
+    profile load". A present non-null value flows through unchanged, so the
+    caller's ``_require_finite`` still rejects NaN/inf/non-numeric garbage."""
+    value = data.get(key, default)
+    return default if value is None else value
+
+
+def _unknown_keys(data: dict, known: frozenset[str]) -> dict:
+    """The keys of a profile document this build does not model, kept verbatim.
+
+    A profile written by a newer GUI or daemon can carry fields this one has
+    never heard of. Dropping them on load meant the next save — and every
+    activation, which saves first — sent the daemon a reduced profile. Each
+    level that parses a document keeps what it did not consume and writes it
+    back under its own known keys (`to_dict`), so a round trip loses nothing.
+    """
+    return {k: v for k, v in data.items() if k not in known}
+
+
+# ---------------------------------------------------------------------------
+# Curve types
+# ---------------------------------------------------------------------------
+
+
+class CurveType(Enum):
+    GRAPH = "graph"
+    STEPPED = "stepped"
+    LINEAR = "linear"
+    FLAT = "flat"
+    TRIGGER = "trigger"
+    MIX = "mix"
+    SYNC = "sync"
+
+
+# Mix combine functions (FanControl parity). Ordered for the UI dropdown.
+MIX_FUNCTIONS: tuple[str, ...] = ("max", "min", "average", "sum", "subtract")
+
+
+@dataclass
+class CurvePoint:
+    temp_c: float
+    output_pct: float
+    #: Keys a newer format added to a point, written back unchanged.
+    extra_fields: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {**self.extra_fields, "temp_c": self.temp_c, "output_pct": self.output_pct}
+
+    @staticmethod
+    def from_dict(data: object) -> CurvePoint:
+        """One point. Extra keys are kept (they used to raise ``TypeError`` from
+        ``CurvePoint(**p)`` and fail the whole profile); the two values must be
+        finite numbers, which ``CurveConfig.from_dict`` checks."""
+        if not isinstance(data, dict):
+            raise ValueError("curve point must be an object")
+        return CurvePoint(
+            temp_c=data.get("temp_c"),  # type: ignore[arg-type]  # checked by the caller
+            output_pct=data.get("output_pct"),  # type: ignore[arg-type]
+            extra_fields=_unknown_keys(data, _CURVE_POINT_KEYS),
+        )
+
+
+_CURVE_POINT_KEYS = frozenset({"temp_c", "output_pct"})
+
+
+@dataclass
+class CurveConfig:
+    """A named, typed curve in the profile's curve library."""
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = ""
+    type: CurveType = CurveType.GRAPH
+    sensor_id: str = ""
+
+    # Graph type
+    points: list[CurvePoint] = field(default_factory=list)
+
+    # Linear type (2-point interpolation)
+    start_temp_c: float = 30.0
+    start_output_pct: float = 20.0
+    end_temp_c: float = 80.0
+    end_output_pct: float = 100.0
+
+    # Flat type (constant output)
+    flat_output_pct: float = 50.0
+
+    # Trigger type (two-state latch with its own idle..load hysteresis band)
+    trigger_idle_temp_c: float = 40.0
+    trigger_load_temp_c: float = 60.0
+    trigger_idle_pct: float = 30.0
+    trigger_load_pct: float = 80.0
+
+    # Mix type (combine other curves' outputs — DEC-150). Each child is
+    # evaluated at its own sensor; the results are combined by ``mix_function``
+    # and clamped 0-100. ``mix_curve_ids`` references CurveConfig.id values in
+    # the same profile.
+    mix_function: str = "max"  # one of MIX_FUNCTIONS
+    mix_curve_ids: list[str] = field(default_factory=list)
+
+    # Sync type (mirror another control's tuned output — DEC-151).
+    # ``sync_control_id`` references LogicalControl.id in the same profile;
+    # ``sync_offset_pct`` is added to that control's current-tick output.
+    sync_control_id: str = ""
+    sync_offset_pct: float = 0.0
+
+    # Falling-temperature deadband width in °C (DEC-489), graph/stepped/linear
+    # only. ``None`` means the daemon default and is never written, so a
+    # profile the user did not touch saves exactly as before; 0 turns the
+    # deadband off. The daemon evaluates it — the GUI only edits and shows it
+    # (``services/curve_hysteresis.py``).
+    hysteresis_c: float | None = None
+
+    #: Keys of this curve's document this build does not model (`_unknown_keys`).
+    extra_fields: dict = field(default_factory=dict)
+    #: The ``type`` string when this build does not know it (a newer format).
+    #: Such a curve is shown and evaluated as a Flat fallback but is never
+    #: edited, and it saves as the document it was loaded from (``raw_document``)
+    #: — never as the fallback, which would hand the daemon a Flat 50 % in its
+    #: place.
+    unknown_type: str | None = None
+    raw_document: dict = field(default_factory=dict)
+
+    @property
+    def is_unsupported(self) -> bool:
+        """True for a curve of a type this build cannot edit (``unknown_type``)."""
+        return self.unknown_type is not None
+
+    @property
+    def reads_sensor(self) -> bool:
+        """Whether the daemon evaluates this curve at its own ``sensor_id``.
+
+        Flat is a constant and Mix/Sync combine or mirror other curves, so none
+        of them reads one. They keep whatever ``sensor_id`` they last had (a type
+        change, an older GUI that offered a sensor for Flat), which must be
+        neither offered for editing nor shown as if it drove the curve.
+
+        A curve of a type this build does not know does read one: the daemon
+        evaluates it at its ``sensor_id`` and skips the control while that sensor
+        does not read."""
+        if self.unknown_type is not None:
+            return True
+        return self.type in (
+            CurveType.GRAPH,
+            CurveType.STEPPED,
+            CurveType.LINEAR,
+            CurveType.TRIGGER,
+        )
+
+    def interpolate(self, temp_c: float) -> float:
+        """Return output percentage for the given temperature.
+
+        Pure function of one temperature — serves graph/stepped/linear/flat and
+        the Trigger cold-start value (the stateless ``curve_eval`` parity tier).
+        Mix and Sync are NOT pure functions of a single temperature (they need a
+        multi-curve / cross-control evaluation context, supplied by the control
+        loop's resolver), so they fall through to the constant ``flat_output_pct``
+        fallback here — never the path used to drive fans for those types."""
+        if self.type == CurveType.GRAPH:
+            return self._interpolate_graph(temp_c)
+        elif self.type == CurveType.STEPPED:
+            return self._interpolate_stepped(temp_c)
+        elif self.type == CurveType.LINEAR:
+            return self._interpolate_linear(temp_c)
+        elif self.type == CurveType.TRIGGER:
+            return self._interpolate_trigger(temp_c)
+        return self.flat_output_pct
+
+    def _interpolate_graph(self, temp_c: float) -> float:
+        if not self.points:
+            return 50.0
+        if temp_c <= self.points[0].temp_c:
+            return self.points[0].output_pct
+        if temp_c >= self.points[-1].temp_c:
+            return self.points[-1].output_pct
+        for i in range(len(self.points) - 1):
+            p0, p1 = self.points[i], self.points[i + 1]
+            if p0.temp_c <= temp_c <= p1.temp_c:
+                t = (temp_c - p0.temp_c) / (p1.temp_c - p0.temp_c) if p1.temp_c != p0.temp_c else 0
+                return p0.output_pct + t * (p1.output_pct - p0.output_pct)
+        return self.points[-1].output_pct
+
+    def _interpolate_stepped(self, temp_c: float) -> float:
+        """Staircase interpolation: hold each point's output until the next
+        point's temperature is reached (lower-point-wins). Shares the Graph
+        point model; only the fill rule differs. Must stay byte-for-byte
+        identical to the daemon's ``evaluate_stepped`` (DEC-126 / DEC-148)."""
+        if not self.points:
+            return 50.0
+        if temp_c <= self.points[0].temp_c:
+            return self.points[0].output_pct
+        if temp_c >= self.points[-1].temp_c:
+            return self.points[-1].output_pct
+        for i in range(len(self.points) - 1):
+            if self.points[i].temp_c <= temp_c < self.points[i + 1].temp_c:
+                return self.points[i].output_pct
+        return self.points[-1].output_pct
+
+    def _interpolate_linear(self, temp_c: float) -> float:
+        if temp_c <= self.start_temp_c:
+            return self.start_output_pct
+        if temp_c >= self.end_temp_c:
+            return self.end_output_pct
+        span = self.end_temp_c - self.start_temp_c
+        if span == 0:
+            return self.start_output_pct
+        t = (temp_c - self.start_temp_c) / span
+        return self.start_output_pct + t * (self.end_output_pct - self.start_output_pct)
+
+    def _interpolate_trigger(self, temp_c: float) -> float:
+        """Stateless (cold-start) trigger output: the load speed at/above the
+        load temperature, else the idle speed. The latching hysteresis — holding
+        the load state down through the idle..load band — is applied per-control
+        by the control loop (which owns cross-cycle state), NOT here, so
+        ``interpolate`` stays a pure function for previews and the ``curve_eval``
+        parity tier. Must match the daemon's ``evaluate_trigger_stateless``
+        (DEC-126 / DEC-149)."""
+        if temp_c >= self.trigger_load_temp_c:
+            return self.trigger_load_pct
+        return self.trigger_idle_pct
+
+    def to_dict(self) -> dict:
+        if self.unknown_type is not None:
+            # Verbatim, but under the id and name this profile now gives it
+            # (a duplicate's new id, a rename).
+            return {**self.raw_document, "id": self.id, "name": self.name}
+        d: dict = {
+            **self.extra_fields,
+            "id": self.id,
+            "name": self.name,
+            "type": self.type.value,
+            "sensor_id": self.sensor_id,
+        }
+        if self.type in (CurveType.GRAPH, CurveType.STEPPED):
+            d["points"] = [p.to_dict() for p in self.points]
+        elif self.type == CurveType.LINEAR:
+            d["start_temp_c"] = self.start_temp_c
+            d["start_output_pct"] = self.start_output_pct
+            d["end_temp_c"] = self.end_temp_c
+            d["end_output_pct"] = self.end_output_pct
+        elif self.type == CurveType.FLAT:
+            d["flat_output_pct"] = self.flat_output_pct
+        elif self.type == CurveType.TRIGGER:
+            d["trigger_idle_temp_c"] = self.trigger_idle_temp_c
+            d["trigger_load_temp_c"] = self.trigger_load_temp_c
+            d["trigger_idle_pct"] = self.trigger_idle_pct
+            d["trigger_load_pct"] = self.trigger_load_pct
+        elif self.type == CurveType.MIX:
+            d["mix_function"] = self.mix_function
+            d["mix_curve_ids"] = list(self.mix_curve_ids)
+        elif self.type == CurveType.SYNC:
+            d["sync_control_id"] = self.sync_control_id
+            d["sync_offset_pct"] = self.sync_offset_pct
+        if self.hysteresis_c is not None and self.type in (
+            CurveType.GRAPH,
+            CurveType.STEPPED,
+            CurveType.LINEAR,
+        ):
+            d["hysteresis_c"] = self.hysteresis_c
+        return d
+
+    @staticmethod
+    def from_dict(data: dict) -> CurveConfig:
+        original = data
+        type_str = data.get("type", "graph")
+        if not isinstance(type_str, str):
+            raise ValueError(f"curve type must be a string, got {type_str!r}")
+        unknown_type: str | None = None
+        try:
+            curve_type = CurveType(type_str)
+        except ValueError:
+            # Shown and previewed as Flat — the daemon evaluates an unknown type
+            # at 50 % — but kept verbatim for saving (``to_dict``).
+            log.warning("Unknown curve type '%s' — kept as is, shown as flat", type_str)
+            curve_type = CurveType.FLAT
+            unknown_type = type_str
+            data = {**data, "flat_output_pct": UNKNOWN_CURVE_TYPE_OUTPUT_PCT}
+        raw_points = data.get("points") or []
+        if not isinstance(raw_points, list):
+            raise ValueError("curve points must be a list")
+        if len(raw_points) > MAX_CURVE_POINTS:
+            raise ValueError(f"curve has too many points: {len(raw_points)} > {MAX_CURVE_POINTS}")
+        points = [CurvePoint.from_dict(p) for p in raw_points]
+        for p in points:
+            if not _is_finite(p.temp_c) or not _is_finite(p.output_pct):
+                raise ValueError("curve point has non-finite or non-numeric values")
+        return CurveConfig(
+            id=data.get("id", str(uuid.uuid4())[:8]),
+            name=data.get("name", ""),
+            type=curve_type,
+            sensor_id=data.get("sensor_id", ""),
+            points=points,
+            # The ten optional scalars are daemon-side ``Option<f64>``: ``_opt``
+            # maps an explicit JSON ``null`` to the default (matching the daemon,
+            # which stores such a document verbatim) while ``_require_finite``
+            # still rejects any present non-null garbage.
+            start_temp_c=_require_finite(_opt(data, "start_temp_c", 30.0), "start_temp_c"),
+            start_output_pct=_require_finite(
+                _opt(data, "start_output_pct", 20.0), "start_output_pct"
+            ),
+            end_temp_c=_require_finite(_opt(data, "end_temp_c", 80.0), "end_temp_c"),
+            end_output_pct=_require_finite(_opt(data, "end_output_pct", 100.0), "end_output_pct"),
+            flat_output_pct=_require_finite(_opt(data, "flat_output_pct", 50.0), "flat_output_pct"),
+            trigger_idle_temp_c=_require_finite(
+                _opt(data, "trigger_idle_temp_c", 40.0), "trigger_idle_temp_c"
+            ),
+            trigger_load_temp_c=_require_finite(
+                _opt(data, "trigger_load_temp_c", 60.0), "trigger_load_temp_c"
+            ),
+            trigger_idle_pct=_require_finite(
+                _opt(data, "trigger_idle_pct", 30.0), "trigger_idle_pct"
+            ),
+            trigger_load_pct=_require_finite(
+                _opt(data, "trigger_load_pct", 80.0), "trigger_load_pct"
+            ),
+            # ``null`` reads as "not set" here (`max`, no inputs, no target).
+            # The daemon accepts ``null`` only for ``mix_function``; the other two
+            # are plain fields there, so a save writes them back as values. An
+            # explicit null used to reach the curve card as ``None`` and crash it.
+            mix_function=_opt_str(data, "mix_function", "max"),
+            mix_curve_ids=_opt_str_list(data, "mix_curve_ids"),
+            sync_control_id=_opt_str(data, "sync_control_id", ""),
+            sync_offset_pct=_require_finite(_opt(data, "sync_offset_pct", 0.0), "sync_offset_pct"),
+            # Optional, and absent stays absent (``None`` = the daemon default):
+            # defaulting it to a number here would write that number into every
+            # curve on the next save. A value outside the daemon's range is
+            # clamped into it — what the daemon's engine applies anyway — so the
+            # editor, the card and the next save all agree instead of the spin box
+            # silently showing one number while the model keeps another.
+            hysteresis_c=(
+                None
+                if data.get("hysteresis_c") is None
+                else _clamp_hysteresis(_require_finite(data["hysteresis_c"], "hysteresis_c"))
+            ),
+            extra_fields=_unknown_keys(original, _CURVE_KEYS),
+            unknown_type=unknown_type,
+            raw_document=dict(original) if unknown_type is not None else {},
+        )
+
+
+#: What the daemon evaluates a curve of a type it does not know at
+#: (`profile.rs::evaluate_curve`, "defaulting to 50%"), while the curve's
+#: sensor reads — without one the control is skipped. An unknown type is shown
+#: and previewed at this figure, never at the document's own
+#: ``flat_output_pct``, which the daemon would not use.
+UNKNOWN_CURVE_TYPE_OUTPUT_PCT = 50.0
+
+_CURVE_KEYS = frozenset(
+    {
+        "id",
+        "name",
+        "type",
+        "sensor_id",
+        "points",
+        "start_temp_c",
+        "start_output_pct",
+        "end_temp_c",
+        "end_output_pct",
+        "flat_output_pct",
+        "trigger_idle_temp_c",
+        "trigger_load_temp_c",
+        "trigger_idle_pct",
+        "trigger_load_pct",
+        "mix_function",
+        "mix_curve_ids",
+        "sync_control_id",
+        "sync_offset_pct",
+        "hysteresis_c",
+    }
+)
+
+
+def _opt_str(data: dict, key: str, default: str) -> str:
+    """A string field where ``null`` or a non-string means the default."""
+    value = data.get(key)
+    return value if isinstance(value, str) else default
+
+
+def _opt_str_list(data: dict, key: str) -> list[str]:
+    """A list-of-ids field where ``null`` means empty; non-string items are dropped."""
+    value = data.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a list")
+    return [v for v in value if isinstance(v, str)]
+
+
+# ---------------------------------------------------------------------------
+# Logical controls
+# ---------------------------------------------------------------------------
+
+
+class ControlMode(Enum):
+    CURVE = "curve"
+    MANUAL = "manual"
+
+
+@dataclass
+class ControlMember:
+    """A physical fan output assigned to a logical control."""
+
+    source: str = ""  # "openfan" | "hwmon" | "amd_gpu" | "intel_gpu" | "nvidia_gpu"
+    member_id: str = ""  # stable daemon ID (e.g. "openfan:ch00", "hwmon:nct6775:pwm1")
+    member_label: str = ""  # cached display name
+    # Per-GPU-member zero-RPM toggle (v4). When True, the daemon preserves the
+    # PMFW ``fan_zero_rpm_enable`` setting when programming the curve, so GPU
+    # fans stop below the firmware's idle threshold. False keeps the safe
+    # default (zero-RPM disabled, fans always spin). Ignored for non-GPU
+    # members. See DEC-095.
+    fan_zero_rpm: bool = False
+    #: Keys of this member's document this build does not model (`_unknown_keys`).
+    extra_fields: dict = field(default_factory=dict)
+
+    @property
+    def target_id(self) -> str:
+        """Return the daemon-addressable target ID."""
+        return self.member_id
+
+    def to_dict(self) -> dict:
+        return {
+            **self.extra_fields,
+            "source": self.source,
+            "member_id": self.member_id,
+            "member_label": self.member_label,
+            "fan_zero_rpm": self.fan_zero_rpm,
+        }
+
+    @staticmethod
+    def from_dict(data: dict) -> ControlMember:
+        return ControlMember(
+            source=data.get("source", ""),
+            member_id=data.get("member_id", ""),
+            member_label=data.get("member_label", ""),
+            fan_zero_rpm=bool(data.get("fan_zero_rpm", False)),
+            extra_fields=_unknown_keys(data, _MEMBER_KEYS),
+        )
+
+
+_MEMBER_KEYS = frozenset({"source", "member_id", "member_label", "fan_zero_rpm"})
+
+
+# ---------------------------------------------------------------------------
+# Role inference and minimum-PWM policy (v4)
+# ---------------------------------------------------------------------------
+#
+# Pumps and CPU headers stall below ~30% PWM; chassis/case fans are unsafe
+# below ~20%. These per-role floors are GUI policy via
+# ``LogicalControl.minimum_pct`` (see DEC-095); the daemon independently
+# enforces the pump/CPU 30% floor as a hard backstop at both validate time and
+# every eval tick (DEC-162), plus the thermal-emergency rule. The 20%
+# chassis / 0% GPU floors stay GUI-only. Roles are inferred from member labels
+# because the *resolved* display name is the best classifier we have — DEC-229
+# retired the older claim that the daemon's header label was the authoritative
+# one: on a chip that publishes no label file the daemon synthesises `pwmN`,
+# which carries no role at all, and the GUI's own board table is what knows the
+# header is CPU_FAN.
+
+CONTROL_ROLE_GPU = "gpu"
+CONTROL_ROLE_CPU_PUMP = "cpu_or_pump"
+CONTROL_ROLE_CHASSIS = "chassis"
+
+ROLE_MINIMUM_PCT: dict[str, float] = {
+    CONTROL_ROLE_GPU: 0.0,  # GPU PMFW enforces its own OD_RANGE minimum
+    CONTROL_ROLE_CPU_PUMP: 30.0,
+    CONTROL_ROLE_CHASSIS: 20.0,
+}
+
+_CPU_PUMP_LABEL_HINTS = ("cpu", "pump", "aio")
+
+
+def _label_indicates_cpu_or_pump(label: str) -> bool:
+    """Return True when a hwmon header label looks like a CPU or pump header."""
+    if not label:
+        return False
+    lower = label.lower()
+    return any(hint in lower for hint in _CPU_PUMP_LABEL_HINTS)
+
+
+# The role-bearing suffix for a liquid-cooler pump header. "pump" is one of
+# _CPU_PUMP_LABEL_HINTS, so appending this is what makes a persisted
+# member_label classify as CONTROL_ROLE_CPU_PUMP on both sides of the API.
+AIO_PUMP_TAG = " (AIO pump)"
+
+
+def role_tagged_member_label(label: str, header_role: str) -> str:
+    """Ensure a persisted member_label carries the pump role when the DAEMON
+    says this header drives a pump (DEC-312).
+
+    header_role is HwmonHeader.role — the daemon's resolved per-channel
+    role, which already includes the user's POST /config/header-role
+    assignment. On a board whose Super-I/O publishes no pwmN_label files that
+    assignment is the *only* evidence a pump exists, and without this the GUI
+    stamped minimum_pct = 20 on a header the daemon independently floors at
+    30% (assigned_role_earns_hard_floor -> member_effective_floor). The floor was
+    never actually at risk; the displayed number was a lie, which is the DEC-257
+    failure repeated one evidence-source later.
+
+    Union only, and it can never lower a floor: a label that already carries a
+    cpu/pump/aio hint is returned untouched, and only "pump" is acted on —
+    radiator_fan is behaviourally inert daemon-side (nothing branches on it;
+    only is_pump() matters), so tagging it would imply a guarantee that does
+    not exist.
+
+    Deliberate asymmetry, and it is the safe direction: once this tag is baked
+    into a saved profile, later *clearing* the role does not remove the 30% floor
+    from that profile. Clearing an assignment is not a request to lower a floor,
+    and a profile that keeps a pump floor it no longer strictly needs costs
+    nothing but a little airflow.
+    """
+    if header_role != "pump" or _label_indicates_cpu_or_pump(label):
+        return label
+    return f"{label}{AIO_PUMP_TAG}"
+
+
+#: The header roles the daemon's assignment floor term counts
+#: (``assigned_role_earns_hard_floor``): ``pump`` (DEC-311), and ``cpu_fan`` from
+#: the daemon that advertises ``control.cpu_fan_role_floor`` (`ROLE-a`).
+_FLOOR_ROLE_PUMP = "pump"
+_FLOOR_ROLE_CPU_FAN = "cpu_fan"
+
+
+def _openfan_role_key(member_id: str) -> str | None:
+    """An OpenFan channel id in the daemon's padded spelling (``openfan:ch04``),
+    or ``None`` when ``member_id`` is not one.
+
+    The daemon looks a channel's assignment up through ``roles::role_key``, so a
+    profile naming ``openfan:ch4`` drives — and is floored as — channel 4; the
+    GUI matches the same way. ``None`` keeps an OpenFan member whose id is not a
+    channel from borrowing a header's role by an id collision.
+    """
+    prefix, sep, channel = member_id.partition("openfan:ch")
+    if prefix or not sep or not channel.isascii() or not channel.isdigit():
+        return None
+    return f"openfan:ch{int(channel):02d}"
+
+
+def floor_role_header_roles(headers, capabilities, openfan_roles) -> Mapping[str, str]:
+    """Id → role for the hwmon headers and OpenFan channels whose role the daemon
+    floors at 30% on the role alone (DEC-417, `ROLE-a`).
+
+    The display-time mirror of the daemon's assignment term
+    (``assigned_role_earns_hard_floor``). A header's role is baked into a
+    member's label only for ``pump`` and only by Configure AIO
+    (:func:`role_tagged_member_label`), so a member authored before the
+    assignment, or through a picker that never tags it (`TS-w`), is chassis by
+    its label while the daemon holds it at 30% — a floor derived from the label
+    alone shows 20% for it. An OpenFan channel (``openfan_roles``, `ROLE-f`) has no
+    label at all, so its role is the only evidence either side has.
+
+    ``cpu_fan`` counts only where ``capabilities`` advertise
+    ``cpu_fan_role_floor``: an older daemon gives an assigned CPU fan no floor,
+    and showing one there would be a floor nothing enforces. ``openfan_roles`` is
+    required, with no default, so a caller cannot silently drop the channels
+    (the DEC-379 shape); it is empty where the daemon has no OpenFan roles.
+
+    Display only, and live: it follows the role both ways, as the daemon's
+    assignment term does. It is deliberately NOT ``header_is_pump_protected`` —
+    that union also carries terms the label classifier already mirrors, and on
+    daemons 2.31.0 to 2.35.3 a published floor that no enforcement site applies
+    (`WIRE-b`); nor does it carry a CPU fan, which the daemon floors but never
+    protects from a stop.
+    """
+    roles = {_FLOOR_ROLE_PUMP}
+    if daemon_supports("cpu_fan_role_floor", capabilities) is True:
+        roles.add(_FLOOR_ROLE_CPU_FAN)
+    floor_roles = {h.id: h.role for h in headers or () if getattr(h, "role", "") in roles}
+    for r in openfan_roles or ():
+        key = _openfan_role_key(getattr(r, "fan_id", ""))
+        if key is not None and getattr(r, "role", "") in roles:
+            floor_roles[key] = r.role
+    return MappingProxyType(floor_roles)
+
+
+def member_floor_role(member: ControlMember, floor_roles: Mapping[str, str]) -> str | None:
+    """The role in ``floor_roles`` that floors ``member``, or ``None``.
+
+    hwmon members match the header id; OpenFan members the channel in the
+    daemon's padded spelling. Any other source takes no role (a GPU is never a
+    pump or a CPU fan), so an id collision cannot borrow one.
+    """
+    if member.source == "hwmon":
+        return floor_roles.get(member.member_id)
+    if member.source == "openfan":
+        key = _openfan_role_key(member.member_id)
+        return floor_roles.get(key) if key is not None else None
+    return None
+
+
+def role_floor_pct(members: list[ControlMember], floor_roles: Mapping[str, str]) -> float:
+    """The floor a role gives these members: 30% when any member is floored by
+    ``floor_roles`` (from :func:`floor_role_header_roles`), else 0.
+
+    Union only — callers take the ``max`` with the label-derived floor, so this can
+    raise a displayed floor and never lower one.
+    """
+    if any(member_floor_role(m, floor_roles) for m in members):
+        return role_minimum_pct(CONTROL_ROLE_CPU_PUMP)
+    return 0.0
+
+
+def _daemon_label_from_member_id(member_id: str) -> str:
+    """The label the DAEMON discovered, parsed out of the member's stable id.
+
+    `pwm_discovery` mints hwmon ids as ``hwmon:{chip}:{device}:pwmN:{label}``, so
+    the daemon's own view of the header's name travels with every member.
+
+    Split on the ``:pwm`` marker rather than by field index: ``device`` is a PCI
+    BDF (``0000:00:18.3``) and carries its own colons, and a label may too.
+    Returns "" for a malformed or non-hwmon id, which classifies as "no hint" —
+    the safe direction, since this only ever *adds* a floor.
+    """
+    _, marker, rest = member_id.partition(":pwm")
+    if not marker:
+        return ""
+    _index, sep, label = rest.partition(":")
+    return label if sep else ""
+
+
+def _member_is_aio_header(member: ControlMember) -> bool:
+    """True when a hwmon member is a liquid-cooler header (NZXT Kraken /
+    Aquacomputer), so a pump labelled only ``pwm1`` still gets the 30% pump
+    floor (DEC-156).
+
+    Derived from the chip-name segment of the stable id
+    (``hwmon:<chip>:<device>:pwmN:<label>``) using the shared cooler set — the
+    daemon's ``is_aio`` flag is not carried on a persisted member, so the chip
+    embedded in the id is the schema-free signal that also works offline.
+    """
+    if member.source != "hwmon":
+        return False
+    parts = member.member_id.split(":")
+    chip = parts[1] if len(parts) > 1 else ""
+    return is_liquid_cooler_chip(chip)
+
+
+def infer_member_role(member: ControlMember) -> str:
+    """Classify a single member into one of the three role buckets."""
+    # Intel (DEC-121) and NVIDIA (DEC-204) discrete GPU fans are read-only and
+    # never offered as controllable members; the branch is defensive against a
+    # hand-edited/legacy profile so such a member still classifies as GPU (0%
+    # floor, harmless — the control loop no-ops the write).
+    if member.source in ("amd_gpu", "intel_gpu", "nvidia_gpu"):
+        return CONTROL_ROLE_GPU
+    if member.source == "hwmon" and (
+        _label_indicates_cpu_or_pump(member.member_label)
+        # DEC-257: match the daemon's eval-time union (DEC-252). The daemon raises
+        # the hard floor when the label IT discovered says cpu/pump — carried in
+        # the member id — even if the author's `member_label` does not, which
+        # happens whenever a user renames a PUMP header. Without this the GUI
+        # stamped and displayed 20% while the daemon enforced 30%: fail-safe, but
+        # a UI lie. Union only, never replacement, exactly as the daemon does it.
+        #
+        # Safe in either skew direction: a GUI stamping a HIGHER floor is accepted
+        # by any daemon, which is why the daemon's `validate()` rejection was
+        # deliberately left on the narrower author-declared classifier.
+        or _label_indicates_cpu_or_pump(_daemon_label_from_member_id(member.member_id))
+        or _member_is_aio_header(member)
+    ):
+        return CONTROL_ROLE_CPU_PUMP
+    return CONTROL_ROLE_CHASSIS
+
+
+def infer_control_role(members: list[ControlMember]) -> str:
+    """Classify a control by its members.
+
+    A control with any CPU/pump member gets the strictest floor; a control
+    with only GPU members is GPU; otherwise chassis. Empty controls are
+    treated as chassis (the safer default for a brand-new control with no
+    members assigned yet).
+    """
+    if not members:
+        return CONTROL_ROLE_CHASSIS
+    if any(infer_member_role(m) == CONTROL_ROLE_CPU_PUMP for m in members):
+        return CONTROL_ROLE_CPU_PUMP
+    if all(infer_member_role(m) == CONTROL_ROLE_GPU for m in members):
+        return CONTROL_ROLE_GPU
+    return CONTROL_ROLE_CHASSIS
+
+
+def role_minimum_pct(role: str) -> float:
+    """Return the role's default ``minimum_pct``."""
+    return ROLE_MINIMUM_PCT.get(role, 0.0)
+
+
+def control_minimum_pct(members: list[ControlMember]) -> float:
+    """Convenience: role-derived minimum_pct for a member list."""
+    return role_minimum_pct(infer_control_role(members))
+
+
+def member_minimum_pct(
+    control: LogicalControl, member: ControlMember, floor_roles: Mapping[str, str]
+) -> float:
+    """Effective minimum-PWM floor for a single member of ``control`` (DEC-119).
+
+    GPU members are never floored above 0 by the GUI: the GPU's PMFW firmware
+    enforces its own OD_RANGE minimum (~15% on RDNA3+), so a hard GUI floor is
+    redundant and, in a *mixed* control (a GPU fan grouped with chassis/CPU
+    fans), it would needlessly stop the GPU fan from idling. The user's intent
+    — "GPU does not need any hard floor" — is honoured here regardless of how
+    the control is composed.
+
+    Non-GPU members honour the control-wide ``minimum_pct`` (already the
+    strictest role floor across the control's members, set by
+    :func:`apply_role_floor`). Because that value is always ``>=`` a non-GPU
+    member's own role floor, this function only ever *lowers* the floor for
+    GPU members and is byte-for-byte identical to the pre-DEC-119 control-wide
+    behaviour for every non-GPU member and every homogeneous control.
+
+    ``floor_roles`` (from :func:`floor_role_header_roles`) adds the daemon's
+    third floor term, the header's pump or CPU-fan role (DEC-417, `ROLE-a`). It is
+    required, with no default: a caller that could silently omit it would show 20%
+    for a member the daemon floors at 30% — the DEC-379 shape.
+    """
+    role = infer_member_role(member)
+    if role == CONTROL_ROLE_GPU:
+        return role_minimum_pct(CONTROL_ROLE_GPU)  # 0.0 — no GUI floor for GPU
+    return max(
+        control.minimum_pct,
+        role_minimum_pct(role),
+        role_floor_pct([member], floor_roles),
+    )
+
+
+@dataclass
+class LogicalControl:
+    """A user-defined control group with mode and member list."""
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = ""
+    mode: ControlMode = ControlMode.CURVE
+    curve_id: str = ""  # references CurveConfig.id in the same profile
+    manual_output_pct: float = 50.0
+    members: list[ControlMember] = field(default_factory=list)
+
+    # Tuning parameters (applied post-evaluation in the control loop)
+    step_up_pct: float = 100.0  # max increase per cycle (% per second)
+    step_down_pct: float = 100.0  # max decrease per cycle
+    start_pct: float = 0.0  # kickstart value when resuming from 0%
+    stop_pct: float = 0.0  # below this, snap to 0%
+    offset_pct: float = 0.0  # fixed offset added to curve output
+    minimum_pct: float = 0.0  # hard floor
+
+    #: Keys of this control's document this build does not model (`_unknown_keys`).
+    extra_fields: dict = field(default_factory=dict)
+    #: A ``mode`` string this build does not know (a newer format). The daemon
+    #: runs anything but ``"manual"`` as a curve, so it is shown as Curve — and
+    #: written back as it came while the control stays in Curve mode.
+    unknown_mode: str | None = None
+
+    def to_dict(self) -> dict:
+        mode = (
+            self.unknown_mode
+            if self.unknown_mode is not None and self.mode == ControlMode.CURVE
+            else self.mode.value
+        )
+        return {
+            **self.extra_fields,
+            "id": self.id,
+            "name": self.name,
+            "mode": mode,
+            "curve_id": self.curve_id,
+            "manual_output_pct": self.manual_output_pct,
+            "members": [m.to_dict() for m in self.members],
+            "step_up_pct": self.step_up_pct,
+            "step_down_pct": self.step_down_pct,
+            "start_pct": self.start_pct,
+            "stop_pct": self.stop_pct,
+            "offset_pct": self.offset_pct,
+            "minimum_pct": self.minimum_pct,
+        }
+
+    @staticmethod
+    def from_dict(data: dict) -> LogicalControl:
+        raw_mode = data.get("mode", "curve")
+        if not isinstance(raw_mode, str):
+            raise ValueError(f"control mode must be a string, got {raw_mode!r}")
+        unknown_mode: str | None = None
+        try:
+            mode = ControlMode(raw_mode)
+        except ValueError:
+            # It used to fail the whole profile. The daemon evaluates every mode
+            # but "manual" as a curve (`profile_engine`), so that is what shows.
+            log.warning("Unknown control mode %r — shown as curve, kept as is", raw_mode)
+            mode = ControlMode.CURVE
+            unknown_mode = raw_mode
+        members = [ControlMember.from_dict(m) for m in data.get("members") or []]
+        return LogicalControl(
+            id=data.get("id", str(uuid.uuid4())[:8]),
+            name=data.get("name", ""),
+            mode=mode,
+            curve_id=data.get("curve_id", ""),
+            manual_output_pct=_require_finite(
+                data.get("manual_output_pct", 50.0), "manual_output_pct"
+            ),
+            members=members,
+            step_up_pct=_require_finite(data.get("step_up_pct", 100.0), "step_up_pct"),
+            step_down_pct=_require_finite(data.get("step_down_pct", 100.0), "step_down_pct"),
+            start_pct=_require_finite(data.get("start_pct", 0.0), "start_pct"),
+            stop_pct=_require_finite(data.get("stop_pct", 0.0), "stop_pct"),
+            offset_pct=_require_finite(data.get("offset_pct", 0.0), "offset_pct"),
+            minimum_pct=_require_finite(data.get("minimum_pct", 0.0), "minimum_pct"),
+            extra_fields=_unknown_keys(data, _CONTROL_KEYS),
+            unknown_mode=unknown_mode,
+        )
+
+
+_CONTROL_KEYS = frozenset(
+    {
+        "id",
+        "name",
+        "mode",
+        "curve_id",
+        "manual_output_pct",
+        "members",
+        "step_up_pct",
+        "step_down_pct",
+        "start_pct",
+        "stop_pct",
+        "offset_pct",
+        "minimum_pct",
+    }
+)
+
+
+# ---------------------------------------------------------------------------
+# Profile
+# ---------------------------------------------------------------------------
+
+
+PROFILE_SCHEMA_VERSION = 7
+
+
+@dataclass
+class Profile:
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = ""
+    description: str = ""
+    controls: list[LogicalControl] = field(default_factory=list)
+    curves: list[CurveConfig] = field(default_factory=list)
+    version: int = PROFILE_SCHEMA_VERSION
+    #: Keys of the profile document this build does not model (`_unknown_keys`).
+    extra_fields: dict = field(default_factory=dict)
+
+    @property
+    def has_unsupported_content(self) -> bool:
+        """True when part of this profile is a newer format than this build edits:
+        a curve of an unknown type. It still loads, shows and saves faithfully."""
+        return any(c.is_unsupported for c in self.curves)
+
+    def get_curve(self, curve_id: str) -> CurveConfig | None:
+        for c in self.curves:
+            if c.id == curve_id:
+                return c
+        return None
+
+    def sanitize_hwmon_members(
+        self,
+        writable_header_ids: set[str],
+        all_header_ids: set[str],
+    ) -> int:
+        """Drop ``hwmon:`` members whose header is present and read-only (DEC-102, DEC-461).
+
+        Args:
+            writable_header_ids: Header ids the daemon reports as
+                ``is_writable=True``. Members targeting these are kept.
+            all_header_ids: Every header id the daemon reports, read-only
+                ones included. A member whose header is not in it is KEPT.
+
+        Returns:
+            Number of members dropped across all controls. Callers
+            should re-save affected profiles when this is non-zero so
+            the cleanup persists across restarts.
+
+        A header that is only absent this session — a secondary chip that
+        latched absent at boot, a driver loaded late, a USB cooler not yet
+        enumerated — is not DEC-102's read-only case. Deleting its member
+        deleted it for good, a pump's 30 % floor with it, once the result was
+        saved (`BRD-v`). The daemon skips a member it cannot resolve and lists
+        a control with none left as ``backend_unavailable``; the Controls page
+        badges the member "header missing".
+
+        Ids are compared canonical on both sides (DEC-442): a daemon older
+        than DEC-442 on an it87 v2.0 driver publishes the suffixed chip
+        spelling while this GUI holds the canonical one, and the same header
+        must not read as read-only or missing.
+        """
+        writable = {canonical_hwmon_id(i) for i in writable_header_ids}
+        present = {canonical_hwmon_id(i) for i in all_header_ids}
+        dropped = 0
+        for control in self.controls:
+            kept: list[ControlMember] = []
+            for m in control.members:
+                canonical = canonical_hwmon_id(m.member_id)
+                if m.source != "hwmon" or canonical in writable or canonical not in present:
+                    kept.append(m)
+                    continue
+                # The header is present and read-only: the daemon can never
+                # write it (DEC-102), so the member is dead weight.
+                log.warning(
+                    "DEC-102: removing member '%s' (label=%r) from control '%s' — "
+                    "header is not writable",
+                    m.member_id,
+                    m.member_label,
+                    control.name or control.id,
+                )
+                dropped += 1
+            control.members = kept
+        return dropped
+
+    def to_dict(self) -> dict:
+        return {
+            **self.extra_fields,
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "controls": [c.to_dict() for c in self.controls],
+            "curves": [c.to_dict() for c in self.curves],
+            "version": self.version,
+        }
+
+    @staticmethod
+    def from_dict(data: dict) -> Profile:
+        version = profile_schema_version(data)
+
+        # DEC-223: reject an unsafe id at the parse boundary, before either
+        # construction path below — the id becomes an on-disk filename under
+        # profiles_dir() (see profile_file_path). A missing id stays legal
+        # (each path generates one). Callers already surface exceptions from
+        # this method as per-profile load errors.
+        raw_id = data.get("id")
+        if raw_id is not None and (not isinstance(raw_id, str) or not _is_safe_profile_id(raw_id)):
+            raise ValueError(f"unsafe profile id: {raw_id!r}")
+
+        # Collection-size caps, in lockstep with the daemon (see
+        # MAX_PROFILE_CURVES). Checked on the raw payload so it costs nothing to
+        # reject before building objects, and so both construction paths below
+        # are covered — including the v1 branch, which carries `assignments`
+        # rather than curves/controls. Callers surface this as a load error.
+        _check_profile_size(data)
+
+        if version < 2 and "assignments" in data:
+            profile = _migrate_v1_profile(data)
+            # Apply the v4 floor pass to v1-migrated profiles too so the
+            # one-shot upgrade path always lands at the current schema.
+            profile.controls = [_migrate_control_to_v4(c) for c in profile.controls]
+            # DEC-442: ids before anything below reads them.
+            _canonicalize_hwmon_ids(profile.controls, profile.curves)
+            # DEC-102 sanitization runs on every load, regardless of schema.
+            _drop_dead_hwmon_members(profile.controls)
+            # DEC-423: and so does the pump/CPU floor (see the main path below).
+            for control in profile.controls:
+                heal_pump_floor(control)
+            return profile
+        # v2→v3 was non-structural (new fields with defaults).
+        # v3→v4 lifts ``minimum_pct`` to the role-derived floor where the
+        # current value is lower, ensuring CPU/pump members never run below
+        # 30% on legacy profiles authored before the safety policy existed.
+
+        controls = [LogicalControl.from_dict(c) for c in data.get("controls") or []]
+        curves = _unique_curve_ids([CurveConfig.from_dict(c) for c in data.get("curves") or []])
+
+        # DEC-442: an id carrying the it87 v2.0 chip suffix is brought to the id
+        # the daemon publishes now, before the floor passes below classify the
+        # members and before the runtime sanitizer would see it as dead.
+        _canonicalize_hwmon_ids(controls, curves)
+
+        if version < 4:
+            controls = [_migrate_control_to_v4(c) for c in controls]
+
+        # DEC-102: strip members bound to the read-only RDNA3+ amdgpu hwmon
+        # header (e.g. ``hwmon:amdgpu:0000:03:00.0:pwm1:pwm1``). The daemon
+        # no longer advertises it (Option A), and writes against it returned
+        # 503/EACCES every cycle — so any control that bound it produced a
+        # 1 Hz error storm. The corresponding GPU fan is still controllable
+        # via its ``amd_gpu:`` member; only the dead hwmon shadow is dropped.
+        _drop_dead_hwmon_members(controls)
+
+        # DEC-167: a pump must never be configured to stop. The GUI exposes no
+        # stop_pct editor, but a hand-edited / imported / legacy profile (any
+        # schema version) can carry a non-zero stop on a pump/CPU control — which
+        # the engine would clamp and the daemon would reject (PUMP_STOP_FORBIDDEN).
+        # Normalise to 0 on every load so the profile is consistent and accepted.
+        #
+        # [SAFETY] DEC-423: the same reasoning applies to the pump/CPU MINIMUM,
+        # which until then was raised only when a member was edited. A control can
+        # become pump/CPU after its profile is stored — a chip joins the cooler
+        # list (the Kraken 2024 Elite did), or a header's label comes to name a
+        # pump — and the daemon's validate() then refuses the stored minimum
+        # (FLOOR_TOO_LOW). Activation saves first, so without this it would send
+        # that profile only to have it refused. See `heal_pump_floor` for why it
+        # is the enforced 30% alone and not the whole role floor.
+        for control in controls:
+            heal_pump_floor(control)
+
+        return Profile(
+            id=data.get("id", str(uuid.uuid4())[:8]),
+            name=data.get("name", ""),
+            description=data.get("description", ""),
+            controls=controls,
+            curves=curves,
+            # A newer document keeps its own number: re-labelling it as this
+            # build's schema would claim a format it may not be.
+            version=max(version, PROFILE_SCHEMA_VERSION),
+            extra_fields=_unknown_keys(data, _PROFILE_KEYS),
+        )
+
+
+_PROFILE_KEYS = frozenset({"id", "name", "description", "controls", "curves", "version"})
+
+
+def profile_schema_version(data: dict) -> int:
+    """A profile document's schema version.
+
+    An absent ``version`` is the current schema, as the daemon reads it
+    (`profile.rs::default_version`) — except for the v1 shape, which is
+    recognised by its ``assignments`` and never carried a number. It used to
+    read as v1 whatever the document held, so a versionless profile from other
+    tooling went through the v4 floor pass here and nowhere else: a chassis
+    role set to 0 % came back at 20 %. The pump/CPU floor does not depend on
+    this; ``heal_pump_floor`` raises it on every load whatever the version.
+    """
+    raw = data.get("version")
+    if raw is None:
+        return 1 if "assignments" in data else PROFILE_SCHEMA_VERSION
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(f"profile version must be an integer, got {raw!r}")
+    return raw
+
+
+def _unique_curve_ids(curves: list[CurveConfig]) -> list[CurveConfig]:
+    """Give a curve whose id repeats an earlier one's a new id.
+
+    A hand-edited or imported profile can repeat a curve id, and nothing
+    upstream rejects it. Every GUI lookup takes the first match, and so does the
+    daemon's per-curve lookup, but its engine index takes the last — so the
+    same document could drive a control from one curve in the GUI and another
+    in the daemon. A repeat is re-identified here, which leaves every reference
+    on the first, and the next save hands the daemon a document with one answer.
+    Until then the daemon still runs its own copy, so a loader marks such a
+    profile unpublished (:func:`repeats_curve_ids`).
+
+    The new id is derived (``<id>-2``, ``-3``, …), never random, so the same
+    document gets the same ids on every load.
+    """
+    taken = {c.id for c in curves}
+    seen: set[str] = set()
+    for curve in curves:
+        if curve.id in seen:
+            n = 2
+            while f"{curve.id}-{n}" in taken:
+                n += 1
+            fresh = f"{curve.id}-{n}"
+            taken.add(fresh)
+            log.warning(
+                "Profile repeats curve id %r; the repeat (%r) is now %r",
+                curve.id,
+                curve.name,
+                fresh,
+            )
+            curve.id = fresh
+        seen.add(curve.id)
+    return curves
+
+
+def repeats_curve_ids(document: dict) -> bool:
+    """Whether a profile document repeats a curve id (see :func:`_unique_curve_ids`)."""
+    ids = [c.get("id") for c in document.get("curves") or [] if isinstance(c, dict)]
+    return len(set(ids)) != len(ids)
+
+
+# ---------------------------------------------------------------------------
+# Profile id / path safety (DEC-223)
+# ---------------------------------------------------------------------------
+
+_MAX_PROFILE_ID_BYTES = 128
+"""Byte cap mirroring the daemon's ``MAX_PROFILE_ID_BYTES`` (profile.rs)."""
+
+
+def _is_safe_profile_id(value: str) -> bool:
+    """Whether *value* is usable as a profile id (and thus an on-disk stem).
+
+    Mirrors the daemon's ``is_safe_profile_id`` (``profile.rs``, the store's
+    single id-safety rule): non-empty, ≤128 UTF-8 bytes, no ``/`` or ``\\``,
+    no ``..``, no Unicode control character (C0/C1/DEL). A profile id names a
+    file under :func:`~ventulus.paths.profiles_dir` (see
+    :func:`profile_file_path`), so a separator or dot-dot would address a file
+    outside it — DEC-223, the profile-side twin of the DEC-217 theme-name rule.
+    """
+    if not value or len(value.encode("utf-8")) > _MAX_PROFILE_ID_BYTES:
+        return False
+    if "/" in value or "\\" in value or ".." in value:
+        return False
+    return not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in value)
+
+
+def profile_file_path(profile_id: str) -> Path:
+    """Derive the on-disk cache path for *profile_id*.
+
+    The one sanctioned way to turn a profile id into a file path — call sites
+    must not hand-compose ``profiles_dir() / f"{id}.json"``. Unsafe ids are
+    already rejected at the parse boundary (:meth:`Profile.from_dict`); this
+    is the second line of defence for an id that arrives another way, and the
+    containment check on the *resolved* destination also catches a
+    profiles-dir entry that symlinks outside (DEC-223; same posture as
+    ``theme_file_path`` / DEC-217).
+
+    Raises ``ValueError`` when *profile_id* has no safe representation.
+    """
+    if not _is_safe_profile_id(profile_id):
+        raise ValueError(f"unsafe profile id: {profile_id!r}")
+    base = profiles_dir()
+    dest = base / f"{profile_id}.json"
+    if not dest.resolve().is_relative_to(base.resolve()):
+        raise ValueError(f"profile id escapes {base}: {profile_id!r}")
+    return dest
+
+
+# ---------------------------------------------------------------------------
+# Composite-curve cycle prevention (DEC-150 Mix / DEC-151 Sync)
+# ---------------------------------------------------------------------------
+#
+# Mix curves depend on other *curves*; Sync curves depend on other *controls*.
+# A dependency cycle is prohibited (DEC-152, retiring DEC-014). The evaluators
+# guard cycles at eval time (visited-set / tick-output map → the control is
+# skipped and its fans hold their last speed, never a lower value);
+# these pure helpers let the editor *prevent* a cycle being authored in the
+# first place by offering only safe choices. Both are O(V+E) DFS reachability
+# over the relevant dependency edges.
+
+
+def _mix_reaches(profile: Profile, start_curve_id: str, target_id: str) -> bool:
+    """True when the Mix curve ``start_curve_id`` transitively includes
+    ``target_id`` through its ``mix_curve_ids`` children.
+
+    Iterative by design: a long Mix chain is a legal acyclic graph, so the cycle
+    check never fires on it, and the recursive form raised ``RecursionError``
+    past ~1000 links — crashing the curve editor on open for a stored profile
+    that the daemon would happily hold (audit P3, companion to the daemon's
+    stack-overflow P1). An explicit stack has no depth limit.
+    """
+    seen: set[str] = set()
+    stack: list[str] = [start_curve_id]
+    while stack:
+        curve_id = stack.pop()
+        if curve_id in seen:
+            continue
+        seen.add(curve_id)
+        curve = profile.get_curve(curve_id)
+        if curve is None or curve.type != CurveType.MIX:
+            continue
+        for child_id in curve.mix_curve_ids:
+            if child_id == target_id:
+                return True
+            stack.append(child_id)
+    return False
+
+
+def mix_candidate_curves(profile: Profile, mix_curve_id: str) -> list[tuple[str, str]]:
+    """``(curve_id, name)`` pairs a Mix curve may include without forming a
+    cycle. Excludes itself, Sync curves (Mix does not nest Sync), and any curve
+    that transitively depends back on ``mix_curve_id``."""
+    out: list[tuple[str, str]] = []
+    for c in profile.curves:
+        if c.id == mix_curve_id:
+            continue
+        if c.type == CurveType.SYNC:
+            continue
+        if _mix_reaches(profile, c.id, mix_curve_id):
+            continue
+        out.append((c.id, c.name))
+    return out
+
+
+def _control_sync_target(profile: Profile, control: LogicalControl) -> str | None:
+    """The control id this control's Sync curve targets, or None when the
+    control is not driven by a Sync curve."""
+    if control.mode != ControlMode.CURVE:
+        return None
+    curve = profile.get_curve(control.curve_id)
+    if curve is None or curve.type != CurveType.SYNC:
+        return None
+    return curve.sync_control_id or None
+
+
+def _sync_reaches(profile: Profile, start_control_id: str, target_control_id: str) -> bool:
+    """True when control ``start_control_id`` transitively mirrors
+    ``target_control_id`` by following Sync control→control edges.
+
+    Iterative for the same reason as :func:`_mix_reaches` — a Sync chain is
+    linear, so depth grows with the number of chained controls.
+    """
+    by_id = {c.id: c for c in profile.controls}
+    seen: set[str] = set()
+    current = start_control_id
+    while current not in seen:
+        seen.add(current)
+        control = by_id.get(current)
+        if control is None:
+            return False
+        dep = _control_sync_target(profile, control)
+        if dep is None:
+            return False
+        if dep == target_control_id:
+            return True
+        current = dep
+    return False
+
+
+def sync_candidate_controls(profile: Profile, sync_curve_id: str) -> list[tuple[str, str]]:
+    """``(control_id, name)`` pairs a Sync curve may target without forming a
+    cycle. Excludes any control already driven by this Sync curve (its
+    *users*) and any control that transitively mirrors back to a user — both
+    would close a loop through the new edge."""
+    users = {c.id for c in profile.controls if c.curve_id == sync_curve_id}
+    out: list[tuple[str, str]] = []
+    for c in profile.controls:
+        if c.id in users:
+            continue
+        if any(_sync_reaches(profile, c.id, u) for u in users):
+            continue
+        out.append((c.id, c.name))
+    return out
+
+
+# GSA-a: the daemon rejects the whole profile when any reference inside it does not
+# resolve — a curve-mode control with no curve, a Mix input or a Sync target that is
+# gone (`profile.rs` validation). The edits below keep every reference resolving, so
+# an ordinary delete never leaves a profile that cannot be published.
+
+
+def unlink_curve(profile: Profile, curve_id: str) -> bool:
+    """Detach ``curve_id`` from every control using it: the curve is cleared and the
+    control switches to Manual, at its own manual output (DEC-214's Unlink).
+    Returns whether any control changed."""
+    changed = False
+    for control in profile.controls:
+        if control.curve_id == curve_id:
+            control.curve_id = ""
+            control.mode = ControlMode.MANUAL
+            control.unknown_mode = None  # the user chose a mode
+            changed = True
+    return changed
+
+
+def remove_curve(profile: Profile, curve_id: str) -> None:
+    """Delete ``curve_id`` and every reference to it: its controls are unlinked
+    (:func:`unlink_curve`) and each Mix curve drops it from its inputs, keeping the
+    rest. A Mix left with no inputs is still a valid profile."""
+    unlink_curve(profile, curve_id)
+    for curve in profile.curves:
+        if curve.type == CurveType.MIX and curve_id in curve.mix_curve_ids:
+            curve.mix_curve_ids = [i for i in curve.mix_curve_ids if i != curve_id]
+    profile.curves = [c for c in profile.curves if c.id != curve_id]
+
+
+def sync_curves_targeting(profile: Profile, control_id: str) -> list[CurveConfig]:
+    """The Sync curves that mirror ``control_id``. Deleting the control would leave
+    each one without a target, so the Controls page refuses it and names them."""
+    return [
+        c for c in profile.curves if c.type == CurveType.SYNC and c.sync_control_id == control_id
+    ]
+
+
+# DEC-102: known-dead member-id patterns. These ids were advertised by
+# pre-DEC-102 daemons that included AMD GPU `pwm1` in hwmon discovery.
+# RDNA4 exposes that file read-only without `pwm1_enable` (RDNA3 exposes both,
+# but a write can silently no-op — DEC-430), so a write could return
+# EACCES → 503/retryable, producing a 1 Hz error storm in the
+# control loop. Daemon discovery now drops `chip_name == "amdgpu"`, so the
+# corresponding member id can never round-trip; sanitizing on load
+# repairs profiles that were authored against an older daemon.
+_DEAD_HWMON_MEMBER_PREFIXES: tuple[str, ...] = ("hwmon:amdgpu:",)
+
+
+def _is_known_dead_hwmon_member(member: ControlMember) -> bool:
+    """Return True for member ids that are known to be unwritable.
+
+    The list is deliberately conservative — it only covers cases where the
+    full prefix proves the id targets a read-only sysfs path. Broader
+    sanitization (against the live header list) is handled separately at
+    runtime by ``Profile.sanitize_hwmon_members``.
+    """
+    if member.source != "hwmon":
+        return False
+    return any(member.member_id.startswith(p) for p in _DEAD_HWMON_MEMBER_PREFIXES)
+
+
+def _canonicalize_hwmon_ids(controls: list[LogicalControl], curves: list[CurveConfig]) -> None:
+    """Bring hwmon member and sensor ids to the spelling the daemon publishes (DEC-442).
+
+    A pre-DEC-442 daemon on an it87 v2.0 driver published ids with the board
+    suffix in the chip segment (``hwmon:it8696_a008090a:…``); a current daemon
+    publishes ``hwmon:it8696:…``. Left alone, such a member is not a live header
+    id, and the DEC-102 runtime sanitizer would delete it and publish the loss.
+
+    Two members of one control whose *different* spellings collapse to the same
+    id keep ONE: the one whose label names a pump or CPU (it carries the 30%
+    floor), otherwise the suffixed one, which can only have been written after
+    the rebuild. Members already spelled identically are left alone. The same
+    rule as the daemon's ``profile::canonicalize_profile_document``.
+    """
+    for control in controls:
+        kept: list[ControlMember] = []
+        # canonical id -> [index into kept, the raw spelling kept there]
+        first: dict[str, list] = {}
+        for m in control.members:
+            raw = m.member_id
+            canonical = canonical_hwmon_id(raw)
+            suffixed = canonical != raw
+            m.member_id = canonical
+            seen = first.get(canonical)
+            if seen is None or seen[1] == raw:
+                if seen is None:
+                    first[canonical] = [len(kept), raw]
+                kept.append(m)
+                continue
+            at = seen[0]
+            new_floored = _label_indicates_cpu_or_pump(m.member_label)
+            kept_floored = _label_indicates_cpu_or_pump(kept[at].member_label)
+            if (new_floored and not kept_floored) or (new_floored == kept_floored and suffixed):
+                kept[at] = m
+                seen[1] = raw
+            log.warning(
+                "DEC-442: control '%s' named header '%s' under two chip spellings; kept one",
+                control.name or control.id,
+                canonical,
+            )
+        control.members = kept
+    for curve in curves:
+        curve.sensor_id = canonical_hwmon_id(curve.sensor_id)
+
+
+def _drop_dead_hwmon_members(controls: list[LogicalControl]) -> int:
+    """Remove members whose ids match a known-dead hwmon pattern.
+
+    Mutates each control's ``members`` list in place and returns the
+    total number of members dropped. Logs a warning for every drop so a
+    repaired profile leaves a forensic trail in the journal.
+    """
+    dropped = 0
+    for control in controls:
+        kept: list[ControlMember] = []
+        for m in control.members:
+            if _is_known_dead_hwmon_member(m):
+                log.warning(
+                    "DEC-102: dropping dead hwmon member '%s' (label=%r) from control '%s' — "
+                    "this id refers to an AMD GPU pwm1 file that is read-only on RDNA3+ kernels; "
+                    "GPU fan control should be bound via the 'amd_gpu:' member instead",
+                    m.member_id,
+                    m.member_label,
+                    control.name or control.id,
+                )
+                dropped += 1
+                continue
+            kept.append(m)
+        control.members = kept
+    return dropped
+
+
+def _migrate_control_to_v4(control: LogicalControl) -> LogicalControl:
+    """Apply the role-aware ``minimum_pct`` floor to a v3-or-older control.
+
+    Never lowers an explicit user-set value — only raises ``minimum_pct`` to
+    meet the role policy. Controls with no members get no change; the floor
+    is reapplied automatically when members are added through the UI.
+    """
+    role_floor = control_minimum_pct(control.members)
+    if role_floor > control.minimum_pct:
+        log.info(
+            "Profile migration: control '%s' minimum_pct %.0f → %.0f (%s policy)",
+            control.name or control.id,
+            control.minimum_pct,
+            role_floor,
+            infer_control_role(control.members),
+        )
+        control.minimum_pct = role_floor
+    return control
+
+
+def sanitize_pump_stop(control: LogicalControl) -> bool:
+    """Force ``stop_pct`` to 0 on a control with any pump/CPU member (DEC-167).
+
+    A pump must never be configured to stop — coolant-flow loss leads to rapid
+    thermal runaway. The GUI exposes no ``stop_pct`` editor, so a non-zero value
+    only arrives via a hand-edited / imported / legacy profile. Mirrors the
+    daemon's ``PUMP_STOP_FORBIDDEN`` validate rule and its eval-time stop-snap
+    exemption, so a loaded profile is never sent to the daemon only to be
+    rejected, nor silently carried with a dangerous field. Returns True when the
+    value was changed.
+    """
+    if control.stop_pct != 0.0 and any(
+        infer_member_role(m) == CONTROL_ROLE_CPU_PUMP for m in control.members
+    ):
+        control.stop_pct = 0.0
+        return True
+    return False
+
+
+def heal_pump_floor(control: LogicalControl) -> bool:
+    """Raise a pump/CPU control's minimum to the floor the daemon ENFORCES (DEC-423).
+
+    Runs on every profile load, beside the ``stop_pct`` sanitisation it also
+    performs. Deliberately narrower than :func:`apply_role_floor`: only the pump/
+    CPU floor (30%) is enforced — the daemon's ``validate()`` rejects a pump/CPU
+    control below it (``FLOOR_TOO_LOW``) and its engine clamps to it — while the
+    chassis 20% is a DEFAULT the Controls page applies when members change, and a
+    user may keep a chassis control below it (docs/05: the GUI never silently
+    lowers — or overrides — an explicit user-set value). Healing the chassis
+    default on load would override exactly that choice on every open.
+
+    Only ever raises. Returns True when ``minimum_pct`` was raised.
+    """
+    sanitize_pump_stop(control)
+    if not any(infer_member_role(m) == CONTROL_ROLE_CPU_PUMP for m in control.members):
+        return False
+    floor = role_minimum_pct(CONTROL_ROLE_CPU_PUMP)
+    if control.minimum_pct < floor:
+        control.minimum_pct = floor
+        return True
+    return False
+
+
+def apply_role_floor(control: LogicalControl) -> bool:
+    """Raise ``control.minimum_pct`` to its role-derived floor when too low.
+
+    Call this from the UI after the user edits a control's member list so the
+    control's minimum tracks the new role. Never lowers an explicit value —
+    user-set floors above the role default are preserved. Also sanitises a
+    pump/CPU control's ``stop_pct`` to 0 (DEC-167) so adding a pump member to a
+    control that carried a stop never leaves a stop configured. Returns True
+    when ``minimum_pct`` was raised.
+    """
+    sanitize_pump_stop(control)
+    role_floor = control_minimum_pct(control.members)
+    if role_floor > control.minimum_pct:
+        control.minimum_pct = role_floor
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# AIO guided setup (DEC-157) — pure detection + control/curve creation. Kept
+# free of Qt so it is unit-testable; the dialog is a thin UI over this.
+# ---------------------------------------------------------------------------
+
+# Radiator-fan default curve (coolant-temperature range). Research: coolant
+# idles ~30-34 C and loads ~50-60 C; the chassis 20% floor still applies. The
+# curve editor auto-scales its axis to these points — no per-sensor axis code.
+_AIO_RADIATOR_CURVE_POINTS: tuple[tuple[float, float], ...] = (
+    (30.0, 20.0),
+    (40.0, 40.0),
+    (50.0, 75.0),
+    (55.0, 100.0),
+)
+
+# The same curves re-calibrated for CPU package temperature (DEC-312). A
+# motherboard-connected AIO publishes no coolant reading, so the curves bind to
+# the CPU instead — and CPU package runs 20-30 C hotter than coolant for the same
+# thermal state. Reusing the coolant points there put the radiator fans at 100%
+# by 55 C, which an ordinary desktop reaches while browsing: the seed would have
+# been effectively "always maximum" on exactly the hardware this feature exists
+# for. Anchored on real CPU behaviour instead — idle 35-45, light 45-60, gaming
+# 60-75, sustained load 75-90.
+_AIO_RADIATOR_CURVE_POINTS_CPU: tuple[tuple[float, float], ...] = (
+    (40.0, 20.0),
+    (55.0, 35.0),
+    (70.0, 70.0),
+    (85.0, 100.0),
+)
+
+# Fixed-speed pump presets. Originally the ONLY option (DEC-157, on the premise
+# that a pump must never follow temperature); since DEC-312 one of three
+# strategies the user picks between. The levels themselves are unchanged.
+AIO_PUMP_PRESETS: tuple[tuple[str, int], ...] = (
+    ("Low", 30),
+    ("Mid", 60),
+    ("High", 80),
+    ("Max", 100),
+)
+AIO_PUMP_DEFAULT_PCT = 80
+
+# Pump strategies offered by Configure AIO (DEC-312). Whether a pump should hold
+# a fixed speed or follow temperature is a property of the COOLER, not a hardware
+# truth: broad enthusiast/vendor consensus favours a fixed speed, while some
+# vendors state the opposite for their own pumps outright (Noctua NL-LC1: a fixed
+# constant speed is explicitly not recommended; PWM below 20% is ignored, and it
+# self-boosts above 45 C coolant). So the GUI offers all three and asserts
+# neither as fact — see the dialog copy.
+AIO_PUMP_STRATEGY_AUTOMATIC = "automatic"
+AIO_PUMP_STRATEGY_FIXED = "fixed"
+AIO_PUMP_STRATEGY_CUSTOM = "custom"
+AIO_PUMP_STRATEGIES = (
+    AIO_PUMP_STRATEGY_AUTOMATIC,
+    AIO_PUMP_STRATEGY_FIXED,
+    AIO_PUMP_STRATEGY_CUSTOM,
+)
+AIO_PUMP_DEFAULT_STRATEGY = AIO_PUMP_STRATEGY_AUTOMATIC
+
+# Seed curve for the Automatic / Custom pump strategies. Every point sits at or
+# above the 30% hard pump floor BY CONSTRUCTION, so the curve is already safe
+# before minimum_pct clamps it — a seed that relied on the clamp would look
+# unsafe in the editor and would author an unsafe profile if the floor ever moved.
+# The low end is 40% rather than 30% because a real pump ignores very low duty
+# (the validation cooler ignores anything under 20% PWM) and a floor-hugging seed
+# would read as "the pump is barely running".
+_AIO_PUMP_CURVE_POINTS: tuple[tuple[float, float], ...] = (
+    (30.0, 40.0),
+    (45.0, 55.0),
+    (60.0, 75.0),
+    (75.0, 100.0),
+)
+
+# The pump seed re-calibrated for CPU package temperature, for the same reason as
+# the radiator pair above. Every point is still at or above the 30% pump floor by
+# construction.
+_AIO_PUMP_CURVE_POINTS_CPU: tuple[tuple[float, float], ...] = (
+    (40.0, 40.0),
+    (60.0, 55.0),
+    (75.0, 75.0),
+    (90.0, 100.0),
+)
+
+
+@dataclass
+class AioDetection:
+    """What a one-click AIO setup found on this machine (DEC-157/312)."""
+
+    pump_member: ControlMember | None  # writable pump header, else None
+    radiator_members: list[ControlMember]  # other writable radiator fan headers
+    coolant_sensor_id: str | None  # coolant sensor, None when the loop has none
+    monitor_only: bool  # a liquid cooler is present but no writable pump exists
+    # The sensor the created curves actually bind to: the coolant sensor where one
+    # exists, else the CPU package temperature. A motherboard-connected AIO has no
+    # coolant sensor at all — that is normal, not an error (DEC-312).
+    control_sensor_id: str | None = None
+    has_coolant: bool = False
+
+
+def _real_header_label(header: HwmonHeader) -> str:
+    """A header's label, or ``""`` when the daemon only synthesised one.
+
+    DEC-229: ``HwmonHeader.label`` is never empty — a chip with no
+    ``pwmN_label``/``fanN_label`` file gets ``"pwmN"`` invented for it — so the
+    ``h.label or <default>`` idiom silently stops producing its default. Here
+    that meant an AIO pump on such a board was named ``"pwm1"`` instead of
+    ``"Pump"``, and ``member_label`` is the DEC-095/162 floor input, so the
+    pump lost its 30% floor and got the 20% chassis one.
+
+    This is deliberately the raw-label check only: ``detect_aio_setup`` is a
+    pure function with no board identity to consult, so it cannot reach the
+    ``/etc/sensors.d`` or board-table tiers.
+
+    Reads the fields directly rather than via ``getattr`` defaults: a duck-typed
+    stand-in that lacks ``pwm_index`` should fail loudly in a test, not silently
+    compare against ``"pwm-1"`` and never match.
+    """
+    label = header.label or ""
+    if is_placeholder_hwmon_label(label, header.pwm_index):
+        return ""
+    return label
+
+
+_CPU_PACKAGE_LABEL_HINTS = ("package", "tctl", "tdie")
+# Wire tokens (`docs/08` § GET /sensors). The PascalCase alternate was here
+# only because `DemoService` emitted a shape the daemon never sends; that was
+# fixed at the source in `WIRE-c`.
+_CPU_SENSOR_KINDS = ("cpu_temp",)
+
+
+def _pick_cpu_sensor_id(sensors: list) -> str | None:
+    """The best CPU temperature sensor to drive an AIO with, or None.
+
+    Prefers a package-level reading (``Package id 0`` / ``Tctl`` / ``Tdie``) over a
+    per-core one: a single core spikes on any brief load and would make the pump
+    and radiator fans chase noise. Falls back to the first CPU sensor of any kind.
+    """
+    cpu_sensors = [s for s in sensors if getattr(s, "kind", "") in _CPU_SENSOR_KINDS]
+    if not cpu_sensors:
+        return None
+    for s in cpu_sensors:
+        label = (getattr(s, "label", "") or "").lower()
+        if any(hint in label for hint in _CPU_PACKAGE_LABEL_HINTS):
+            return s.id
+    return cpu_sensors[0].id
+
+
+def aio_member_for_header(header, default_name: str) -> ControlMember:
+    """A ``ControlMember`` for one AIO header, with a role-truthful label.
+
+    ``member_label`` is a safety input (DEC-095/162), so the daemon-reported role
+    is unioned into it here — on a label-less board the user's header-role
+    assignment is the only thing that says "pump", and without it the GUI would
+    stamp and display 20% for a header the daemon floors at 30% (DEC-312).
+    """
+    return ControlMember(
+        source="hwmon",
+        member_id=header.id,
+        member_label=role_tagged_member_label(
+            _real_header_label(header) or default_name, header.role
+        ),
+    )
+
+
+def detect_aio_setup(
+    headers: list, sensors: list, sensor_overrides: dict | None = None
+) -> AioDetection:
+    """Pure detection for the Configure-AIO flow (DEC-157, rewritten by DEC-312).
+
+    ``headers`` are live ``HwmonHeader``s (with ``is_aio``/``is_writable``/``role``),
+    ``sensors`` are live ``SensorReading``s, ``sensor_overrides`` is the user
+    coolant-override map.
+
+    This used to open with ``[h for h in headers if h.is_aio]``, which made a
+    motherboard-connected AIO undetectable by construction: ``is_aio`` is a
+    CHIP-level fact (the header hangs off a Kraken/Aquacomputer USB cooler), and a
+    pump plugged into an ``AIO_PUMP`` header on the motherboard hangs off the
+    Super-I/O chip like every other fan. Two evidence routes now feed it, unioned
+    rather than substituted:
+
+    * the daemon's per-channel ``role`` (DEC-311), which carries the user's
+      explicit ``POST /config/header-role`` assignment — the only evidence
+      available on a board whose Super-I/O publishes no ``pwmN_label`` files;
+    * the original chip-level ``is_aio`` route, unchanged, so a Kraken keeps
+      being detected exactly as before.
+
+    Ambiguity is never resolved by guessing. A ``CPU_OPT`` header stays
+    ``unknown`` daemon-side precisely because it is equally likely to be a pump or
+    a second radiator fan, and nothing here promotes it — mirroring that refusal
+    is what keeps the GUI from confidently binding the wrong header to a pump
+    curve. The lowest-pwm-index fallback stays scoped to ``is_aio`` chips, where
+    channel 1 genuinely is the pump by the cooler's own convention.
+    """
+    overrides = sensor_overrides or {}
+    writable = [h for h in headers if h.is_writable]
+    aio_headers = [h for h in headers if h.is_aio]
+    aio_writable = [h for h in writable if h.is_aio]
+
+    # Route 1 — an explicit role assignment (or a daemon-inferred pump label).
+    role_pumps = [h for h in writable if h.role == "pump"]
+    # An explicit assignment outranks an inferred pump when a machine somehow has
+    # both, so the dialog preselects what the user actually chose. Selection only —
+    # both headers are floored at 30% either way, so nothing safety-relevant turns
+    # on the order.
+    user_pumps = [h for h in role_pumps if h.role_source == "user_assigned"]
+    pump_header = (user_pumps or role_pumps or [None])[0]
+
+    # Route 2 — the original chip-level route, unchanged.
+    if pump_header is None and aio_writable:
+        labelled = [h for h in aio_writable if "pump" in _real_header_label(h).lower()]
+        pump_header = labelled[0] if labelled else min(aio_writable, key=lambda h: h.pwm_index)
+
+    pump_member = aio_member_for_header(pump_header, "Pump") if pump_header is not None else None
+
+    # Radiator candidates: liquid-cooler headers as before, plus headers the user
+    # assigned a fan role to. `radiator_fan` is behaviourally inert daemon-side, so
+    # this is a picker hint only — it preselects a row, it grants no guarantee.
+    rad_headers = [
+        h
+        for h in writable
+        if (h.is_aio or h.role in ("radiator_fan", "cpu_fan"))
+        and (pump_header is None or h.id != pump_header.id)
+    ]
+    radiator_members = [aio_member_for_header(h, "Radiator") for h in rad_headers]
+
+    coolant_sensor_id = next((s.id for s in sensors if sensor_is_coolant(s, overrides)), None)
+
+    # A motherboard AIO exposes no coolant sensor — the cooler is not a USB device
+    # and publishes no telemetry — so the curves bind to CPU package temperature
+    # instead. That is the normal configuration for this hardware, not a
+    # degradation, and nothing downstream may present it as an error. It is also
+    # not a safety change here: the daemon's coolant emergency (DEC-443) keys on a
+    # coolant sensor the machine has, whatever sensor a curve binds to, and this
+    # machine has none — so the CPU emergency is its only thermal rung.
+    control_sensor_id = coolant_sensor_id or _pick_cpu_sensor_id(sensors)
+
+    # `monitor_only` keeps its exact original meaning: a real liquid cooler is
+    # present and none of its headers can be written. It deliberately does NOT
+    # cover "this looks like a motherboard board and nothing has been assigned
+    # yet" — that is not a monitor-only cooler, it is an unfinished setup, and the
+    # dialog answers it with the role step rather than a dead end.
+    aio_present = bool(aio_headers) or coolant_sensor_id is not None
+    monitor_only = aio_present and pump_member is None
+    return AioDetection(
+        pump_member,
+        radiator_members,
+        coolant_sensor_id,
+        monitor_only,
+        control_sensor_id=control_sensor_id,
+        has_coolant=coolant_sensor_id is not None,
+    )
+
+
+def build_aio_controls(
+    profile: Profile,
+    *,
+    pump_member: ControlMember | None,
+    pump_pct: int,
+    radiator_members: list[ControlMember],
+    radiator_sensor_id: str,
+    pump_strategy: str = AIO_PUMP_STRATEGY_FIXED,
+    sensor_is_coolant: bool = True,
+) -> list[LogicalControl]:
+    """Create the pump + radiator controls (and their curves) for a one-click
+    AIO setup, append them to ``profile``, and return the created controls
+    (DEC-157, extended by DEC-312).
+
+    ``pump_strategy`` picks how the pump is driven — ``fixed`` builds the original
+    Flat curve at ``pump_pct``, while ``automatic`` and ``custom`` build the same
+    gentle Graph curve bound to ``radiator_sensor_id`` (the caller opens the editor
+    afterwards for ``custom``). Either way role policy floors the control at 30%,
+    and the seeded curve sits above that floor by construction.
+
+    Whether a pump *should* hold a fixed speed is a property of the cooler, not a
+    fact about pumps — see ``AIO_PUMP_STRATEGY_*``. This function asserts nothing
+    either way; it builds what it is asked for.
+
+    The radiator fans get a graph curve bound to ``radiator_sensor_id``, which
+    *defaults* to the coolant sensor where the loop has one and CPU package
+    temperature where it does not (a motherboard-connected AIO) — but the user
+    may pick any sensor, so it is the caller's choice and not a property of the
+    hardware. ``sensor_is_coolant`` selects which calibration the seeded curves
+    use, and **must describe the sensor actually passed in
+    ``radiator_sensor_id``, not whether the machine has a coolant sensor at
+    all** (`AUD2-g`: the caller derived it from detection and the two could
+    disagree). The two ranges are not interchangeable: CPU package sits 20-30 C
+    above coolant for the same thermal state, so the coolant curve reaches 100%
+    at 55 C — a normal CPU package temperature under load.
+    """
+    created: list[LogicalControl] = []
+    pump_points = _AIO_PUMP_CURVE_POINTS if sensor_is_coolant else _AIO_PUMP_CURVE_POINTS_CPU
+    rad_points = _AIO_RADIATOR_CURVE_POINTS if sensor_is_coolant else _AIO_RADIATOR_CURVE_POINTS_CPU
+
+    if pump_member is not None:
+        if pump_strategy == AIO_PUMP_STRATEGY_FIXED:
+            pump_curve = CurveConfig(
+                name="AIO Pump", type=CurveType.FLAT, flat_output_pct=float(pump_pct)
+            )
+        else:
+            pump_curve = CurveConfig(
+                name="AIO Pump",
+                type=CurveType.GRAPH,
+                sensor_id=radiator_sensor_id,
+                points=[CurvePoint(t, o) for t, o in pump_points],
+            )
+        profile.curves.append(pump_curve)
+        pump_control = LogicalControl(
+            name="AIO Pump",
+            mode=ControlMode.CURVE,
+            curve_id=pump_curve.id,
+            members=[pump_member],
+        )
+        apply_role_floor(pump_control)  # 30% pump floor (DEC-095)
+        profile.controls.append(pump_control)
+        created.append(pump_control)
+
+    if radiator_members:
+        rad_curve = CurveConfig(
+            name="AIO Radiator",
+            type=CurveType.GRAPH,
+            sensor_id=radiator_sensor_id,
+            points=[CurvePoint(t, o) for t, o in rad_points],
+        )
+        profile.curves.append(rad_curve)
+        rad_control = LogicalControl(
+            name="AIO Radiator",
+            mode=ControlMode.CURVE,
+            curve_id=rad_curve.id,
+            members=list(radiator_members),
+        )
+        # The role floor: 20% for a radiator fan on a motherboard header, 30% for
+        # one on a liquid cooler's own fan channel (`_member_is_aio_header`). This
+        # comment said "20% chassis floor", which was never true for a Kraken.
+        apply_role_floor(rad_control)
+        profile.controls.append(rad_control)
+        created.append(rad_control)
+
+    return created
+
+
+# ---------------------------------------------------------------------------
+# GPU dedicate guided setup (DEC-221) — pure control/curve creation. Kept free
+# of Qt so it is unit-testable; the dialog is a thin UI over this.
+# ---------------------------------------------------------------------------
+
+# Default curve for a dedicated GPU fan. The first point sits at 0% up to 45 C
+# (graph interpolation clamps to the first point below its temperature), so the
+# fan *target* is 0% at idle; the PMFW firmware raises a bare 0% target to its
+# OD_RANGE minimum (~15%), so true 0 RPM comes from the member ``fan_zero_rpm``
+# stop feature, not the 0% point alone. The ramp then climbs to full by 95 C.
+# See DEC-221 (shape chosen by the user).
+_GPU_DEDICATE_CURVE_POINTS: tuple[tuple[float, float], ...] = (
+    (45.0, 0.0),
+    (47.0, 20.0),
+    (58.0, 40.0),
+    (75.0, 60.0),
+    (95.0, 100.0),
+)
+
+
+def build_gpu_control(
+    profile: Profile,
+    *,
+    gpu_member: ControlMember,
+    sensor_id: str,
+    zero_rpm: bool = True,
+) -> LogicalControl | None:
+    """Create a dedicated GPU-only control + curve for one writable GPU fan,
+    append them to ``profile``, and return the created control (DEC-221).
+
+    "Dedicating" a GPU fan gives it its own GPU-only control (role floor 0%, so
+    the curve is authorable all the way down to 0% — no chassis/CPU minimum is
+    ever applied) bound to a GPU temperature sensor, with the firmware zero-RPM
+    idle-stop enabled (``fan_zero_rpm=zero_rpm``). Enabling zero-RPM is the real
+    lever for true 0 RPM at idle: without it the daemon disables the firmware
+    stop on every write and the fan always spins.
+
+    The member is first removed from every other control so the fan is never
+    driven by two controls at once (a fan must have exactly one writer). A
+    control that this removal *empties* — e.g. a previous "Dedicate GPU Fan"
+    control that held only this GPU — is dropped, so a repeat dedicate cannot
+    accumulate dead empty controls; controls that still hold other members are
+    kept, and pre-existing empty controls (that never held this GPU) are left
+    untouched. A dropped control's curve stays in the library, unassigned, so a
+    hand-tuned curve is never silently lost.
+
+    Returns ``None`` (a no-op) if ``gpu_member`` carries no id — defensive; the
+    caller only offers this for a present, writable GPU fan.
+    """
+    if gpu_member is None or not gpu_member.member_id:
+        return None
+
+    kept_controls: list[LogicalControl] = []
+    for control in profile.controls:
+        had_member = any(m.member_id == gpu_member.member_id for m in control.members)
+        control.members = [m for m in control.members if m.member_id != gpu_member.member_id]
+        if had_member and not control.members:
+            continue  # drop a control this call just vacated (repeat-dedicate)
+        kept_controls.append(control)
+    profile.controls = kept_controls
+
+    member = ControlMember(
+        source=gpu_member.source,
+        member_id=gpu_member.member_id,
+        member_label=gpu_member.member_label,
+        fan_zero_rpm=bool(zero_rpm),
+    )
+    curve = CurveConfig(
+        name="GPU Fan",
+        type=CurveType.GRAPH,
+        sensor_id=sensor_id,
+        points=[CurvePoint(t, o) for t, o in _GPU_DEDICATE_CURVE_POINTS],
+    )
+    profile.curves.append(curve)
+    control = LogicalControl(
+        name="GPU Fan",
+        mode=ControlMode.CURVE,
+        curve_id=curve.id,
+        members=[member],
+    )
+    apply_role_floor(control)  # GPU-only role → minimum_pct stays 0 (DEC-095/DEC-119)
+    profile.controls.append(control)
+    return control
+
+
+def _migrate_v1_profile(data: dict) -> Profile:
+    """Migrate a v1 profile (TargetAssignment + CurveDefinition) to v2."""
+    curves: list[CurveConfig] = []
+    controls: list[LogicalControl] = []
+    seen_members: set[str] = set()
+
+    for i, a in enumerate(data.get("assignments", [])):
+        curve_data = a.get("curve", {})
+        points = [CurvePoint.from_dict(p) for p in curve_data.get("points", [])]
+        curve_id = f"migrated_{i}"
+        curve = CurveConfig(
+            id=curve_id,
+            name=f"Curve {i + 1}",
+            type=CurveType.GRAPH,
+            sensor_id=curve_data.get("sensor_id", a.get("sensor_id", "")),
+            points=points,
+        )
+        curves.append(curve)
+
+        target_id = a.get("target_id", "")
+        target_type = a.get("target_type", "fan")
+        name = target_id if target_type == "fan" else f"Group: {target_id}"
+
+        # For specific fan targets, create a member — skip duplicates to
+        # prevent conflicting PWM writes from multiple controls.
+        members: list[ControlMember] = []
+        if target_type == "fan" and target_id:
+            if target_id in seen_members:
+                log.info("V1 migration: skipping duplicate fan %s", target_id)
+            else:
+                seen_members.add(target_id)
+                if target_id.startswith("openfan"):
+                    source = "openfan"
+                elif target_id.startswith("amd_gpu:"):
+                    source = "amd_gpu"
+                else:
+                    source = "hwmon"
+                members.append(ControlMember(source=source, member_id=target_id))
+
+        control = LogicalControl(
+            id=str(uuid.uuid4())[:8],
+            name=name,
+            mode=ControlMode.CURVE if a.get("enabled", True) else ControlMode.MANUAL,
+            curve_id=curve_id,
+            members=members,
+        )
+        controls.append(control)
+
+    return Profile(
+        id=data.get("id", str(uuid.uuid4())[:8]),
+        name=data.get("name", ""),
+        description=data.get("description", ""),
+        controls=controls,
+        curves=curves,
+        version=PROFILE_SCHEMA_VERSION,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Default profiles
+# ---------------------------------------------------------------------------
+
+
+def _default_graph_points(
+    low: float, high: float, low_pct: float, high_pct: float
+) -> list[CurvePoint]:
+    n = DEFAULT_CURVE_POINTS
+    points = []
+    for i in range(n):
+        t = i / (n - 1) if n > 1 else 0
+        temp = low + t * (high - low)
+        pct = low_pct + t * (high_pct - low_pct)
+        points.append(CurvePoint(temp_c=round(temp, 1), output_pct=round(pct, 1)))
+    return points
+
+
+def default_profiles() -> list[Profile]:
+    """Create the three built-in starter profiles."""
+    quiet_curve = CurveConfig(
+        id="quiet_curve",
+        name="Quiet Ramp",
+        type=CurveType.GRAPH,
+        points=_default_graph_points(30, 80, 25, 60),
+    )
+    balanced_curve = CurveConfig(
+        id="balanced_curve",
+        name="Balanced Ramp",
+        type=CurveType.GRAPH,
+        points=_default_graph_points(30, 80, 30, 80),
+    )
+    performance_curve = CurveConfig(
+        id="perf_curve",
+        name="Performance Ramp",
+        type=CurveType.GRAPH,
+        points=_default_graph_points(30, 75, 50, 100),
+    )
+
+    return [
+        Profile(
+            id="quiet",
+            name="Quiet",
+            description="Low noise, gentle ramp",
+            curves=[quiet_curve],
+            controls=[
+                LogicalControl(
+                    id="quiet_all",
+                    name="All Fans",
+                    mode=ControlMode.CURVE,
+                    curve_id="quiet_curve",
+                ),
+            ],
+        ),
+        Profile(
+            id="balanced",
+            name="Balanced",
+            description="Moderate noise and cooling",
+            curves=[balanced_curve],
+            controls=[
+                LogicalControl(
+                    id="balanced_all",
+                    name="All Fans",
+                    mode=ControlMode.CURVE,
+                    curve_id="balanced_curve",
+                ),
+            ],
+        ),
+        Profile(
+            id="performance",
+            name="Performance",
+            description="Maximum cooling, higher noise",
+            curves=[performance_curve],
+            controls=[
+                LogicalControl(
+                    id="perf_all",
+                    name="All Fans",
+                    mode=ControlMode.CURVE,
+                    curve_id="perf_curve",
+                ),
+            ],
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Profile service
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ImportCandidate:
+    """A local profile migrated to the current schema, ready to upload to the
+    daemon's profile store (DEC-161)."""
+
+    source_path: str
+    profile_id: str
+    name: str
+    document: dict
+
+
+@dataclass
+class ImportCollection:
+    """Result of scanning the local profiles dir for daemon import.
+
+    ``ready`` are migrated v7 documents to upload; ``failed`` are
+    ``(source_path, reason)`` pairs that could not be parsed/migrated —
+    quarantined before any upload, never silently dropped.
+    """
+
+    ready: list[ImportCandidate] = field(default_factory=list)
+    failed: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.ready and not self.failed
+
+
+def collect_local_profiles_for_import(directory: Path | None = None) -> ImportCollection:
+    """Scan the local profiles dir and migrate each file to the current schema.
+
+    Reads ``~/.config/ventulus/profiles/*.json`` (the GUI's own store), runs
+    each file through the existing migration ladder (``Profile.from_dict`` →
+    v7) and re-serialises with ``to_dict``. Files that fail to parse/migrate go
+    to ``failed`` (pre-upload quarantine) rather than aborting the scan.
+    **Originals are only read — never modified or deleted** (rollback path;
+    DEC-161). Qt-free so the import flow stays unit-testable.
+    """
+    coll = ImportCollection()
+    d = directory or profiles_dir()
+    if not d.exists():
+        return coll
+    for path in sorted(d.glob("*.json")):
+        try:
+            data = load_json_capped(path)
+            profile = Profile.from_dict(data)
+            coll.ready.append(
+                ImportCandidate(
+                    source_path=str(path),
+                    profile_id=profile.id,
+                    name=profile.name,
+                    document=profile.to_dict(),
+                )
+            )
+        except Exception as e:
+            log.warning("Profile %s could not be prepared for import: %s", path, e)
+            coll.failed.append((str(path), str(e)))
+    return coll
+
+
+@dataclass
+class ProfileActivateOutcome:
+    """Result of :meth:`ProfileService.activate` — a small, UI-agnostic verdict
+    the pages branch on.
+
+    ``activated`` is the only success signal; ``error`` is a human-readable
+    reason on failure (``None`` on success); ``local_only`` marks the no-client
+    (demo) path where activation was applied without a daemon confirmation.
+    """
+
+    activated: bool
+    error: str | None = None
+    local_only: bool = False
+    # DEC-403: refused by the GUI's own save rule (a Dell machine's shared fan
+    # switch), before the daemon was asked. ``error`` then names the fans to add
+    # or remove, and the caller shows it.
+    refused_by_rule: bool = False
+
+    def failure_message(self, profile_name: str) -> str | None:
+        """The banner text for a failed activation, or ``None`` if it succeeded.
+
+        `CTRL-k`: the ONE wording for every failure, shared by the sidebar and
+        the Dashboard. DEC-403's refusal is shown verbatim — it already names
+        the fans to add or remove — and every other reason (a daemon rejection,
+        a transport error) is prefixed with the profile it was about, since
+        several of them do not say.
+        """
+        if self.activated:
+            return None
+        reason = self.error or "unknown error"
+        if self.refused_by_rule:
+            return reason
+        return f"Could not activate “{profile_name}”: {reason}"
+
+
+@dataclass
+class ProfileDeactivateOutcome:
+    """Result of :meth:`ProfileService.deactivate` (DEC-462) — the activate
+    outcome's twin. ``deactivated`` is the only success signal; ``error`` is a
+    human-readable reason on failure; ``local_only`` marks the no-client (demo)
+    path, where only the local active id was cleared."""
+
+    deactivated: bool
+    error: str | None = None
+    local_only: bool = False
+
+
+# Why :meth:`ProfileService.delete_profile` kept a profile it was asked to delete.
+DELETE_REFUSED_IN_USE = "in_use"  # the daemon is still running it (409 profile_in_use)
+DELETE_REFUSED_OFFLINE = "offline"  # the daemon could not be reached
+DELETE_REFUSED_DAEMON_ERROR = "daemon_error"  # reached, but the delete failed
+DELETE_REFUSED_READ_ONLY = "read_only"  # served from a search dir DELETE never touches
+
+
+@dataclass(frozen=True)
+class DeleteRefusal:
+    """Why the last :meth:`ProfileService.delete_profile` returned ``False``.
+
+    ``kind`` is one of the ``DELETE_REFUSED_*`` tokens; ``detail`` is the
+    daemon's message where there is one."""
+
+    kind: str
+    detail: str = ""
+
+
+class ProfileService(QObject):
+    """Manages profile loading, saving, and selection.
+
+    Persistence is daemon-backed when a :class:`DaemonClient` is supplied (the
+    control-migration model: the daemon owns the authoritative profile store).
+    ``load()`` then pulls from ``GET /profiles`` and mirrors each profile into
+    the local cache dir so they stay viewable/editable offline; ``save_profile``
+    validates-then-uploads and, when the daemon is unreachable, keeps the edit
+    as a local draft (no background auto-sync — the user re-saves explicitly;
+    migration Decision 3). With ``client=None`` the service is purely local —
+    byte-for-byte the pre-migration behaviour — which keeps the existing unit
+    tests unchanged.
+
+    ``persist=False`` is demo mode (DEC-431, `DC-q`): the service still READS the
+    real profile folder, so demo shows the user's own profiles, but never writes
+    or removes a file in it — every save, delete, migration write-back and
+    default seed stays in memory and is gone when the session ends. Demo member
+    ids collide with real hardware (`openfan:chNN`), so a demo profile on disk
+    could later be synced to the daemon as if it were real.
+
+    It is a :class:`QObject` (mirroring :class:`AppState`) so it can emit signals
+    when its data changes, letting every page observe profile CRUD / activation
+    from one place instead of reaching into each other.
+    """
+
+    # active_changed fires when the active profile id changes; profiles_changed
+    # fires when the profile *list* changes (create / duplicate / rename / save /
+    # delete). Both keep cross-page views (e.g. the dashboard combo) in sync.
+    active_changed = Signal(str)  # active profile id
+    profiles_changed = Signal()  # the profile list changed (CRUD)
+
+    def __init__(self, client: DaemonClient | None = None, *, persist: bool = True) -> None:
+        super().__init__()
+        self._profiles: dict[str, Profile] = {}
+        self._active_id: str = ""
+        self._client = client
+        # False in demo mode: nothing is ever written to or removed from the
+        # profile folder (DEC-431). The one gate is `_write_local` plus
+        # `delete_profile`'s unlink, which are the only disk writes here.
+        self._persist = persist
+        # Profile ids known to exist in the daemon store (from the last
+        # successful daemon load or upload). Selects create (POST) vs replace
+        # (PUT) on save without a probe round-trip.
+        self._daemon_ids: set[str] = set()
+        # Profile ids written to the local cache but NOT published to the
+        # daemon — saved while offline, or rejected on upload. The Controls
+        # page badges these as unpublished drafts (Phase 6c). Always empty in
+        # pure-local mode (there is no daemon to publish to).
+        self._unpublished: set[str] = set()
+        # FFA-d: what the daemon said about each profile's last upload — why it
+        # refused it (a subset of `_unpublished`; an offline draft has none),
+        # and the soft warnings it accepted it with. Read by the Controls page,
+        # which used to call a refusal "daemon offline".
+        self._rejections: dict[str, list[str]] = {}
+        self._save_warnings: dict[str, list[str]] = {}
+        # Why the last delete_profile() kept the profile; None after one that
+        # deleted it.
+        self._last_delete_refusal: DeleteRefusal | None = None
+        # True once a load()/save fell back to the local cache because the
+        # daemon was unreachable — the GUI is working against the offline
+        # mirror. Cleared on the next successful daemon load.
+        self._offline: bool = False
+        # DEC-403: the hardware the save rule checks against, attached by the
+        # main window. None until then, and the rule has nothing to check.
+        self._state: AppState | None = None
+
+    def attach_state(self, state: AppState) -> None:
+        """Give the save rule its view of the hardware (DEC-403, `TS-bb`).
+
+        The ONE way the rule learns about headers and fan names: every save reads
+        ``state.hwmon_headers`` and ``state.fan_display_name`` at that moment,
+        so there is no second copy to go stale. Called once by the main window.
+        """
+        self._state = state
+
+    def shared_switch_error(self, profile: Profile) -> SharedSwitchRuleError | None:
+        """The error saving ``profile`` would raise under DEC-403, or ``None``.
+
+        Public so the Controls page can flag a profile saved before the rule, or
+        imported, with the same message a save would give.
+        """
+        if self._state is None:
+            return None
+        violations = shared_switch_violations(profile, self._state.hwmon_headers)
+        if not violations:
+            return None
+        message = describe_shared_switch_violations(violations, self._state.fan_display_name)
+        return SharedSwitchRuleError(violations, message)
+
+    @property
+    def profiles(self) -> list[Profile]:
+        return list(self._profiles.values())
+
+    @property
+    def active_profile(self) -> Profile | None:
+        return self._profiles.get(self._active_id)
+
+    @property
+    def active_id(self) -> str:
+        return self._active_id
+
+    @property
+    def daemon_backed(self) -> bool:
+        """True when persistence is daemon-backed (a client was supplied), so the
+        published/draft distinction is meaningful. False in pure-local mode,
+        where every profile is just a local file."""
+        return self._client is not None
+
+    def is_published(self, profile_id: str) -> bool:
+        """True when ``profile_id`` is in the daemon store with no pending
+        local-only edits. Always False in pure-local mode."""
+        return profile_id in self._daemon_ids and profile_id not in self._unpublished
+
+    def rejection(self, profile_id: str) -> list[str]:
+        """Why the daemon refused ``profile_id``'s last upload, one line per
+        reason; empty when it did not (published, never uploaded, or saved while
+        the daemon was offline). A non-empty answer means an unpublished draft
+        the daemon *reached* — not an offline one (FFA-d)."""
+        return list(self._rejections.get(profile_id, ()))
+
+    def save_warnings(self, profile_id: str) -> list[str]:
+        """The soft warnings the daemon accepted ``profile_id``'s last upload
+        with (e.g. a sensor this machine does not have), one line each."""
+        return list(self._save_warnings.get(profile_id, ()))
+
+    def _forget_upload_outcome(self, profile_id: str) -> None:
+        self._rejections.pop(profile_id, None)
+        self._save_warnings.pop(profile_id, None)
+
+    def load(self) -> list[tuple[str, str]]:
+        """Load profiles, preferring the daemon store when a client is set.
+
+        Returns a list of ``(path_or_id, error_message)`` tuples for every
+        profile that failed to load, for the caller to surface via
+        ``AppState.add_warning``. With a daemon client that is reachable,
+        profiles are listed via ``GET /profiles`` then hydrated to their full
+        documents via ``GET /profiles/{id}`` (DEC-175) and mirrored into the
+        local cache; if the daemon is unreachable the GUI falls back to the
+        local cache so it still opens offline. With no client it reads the
+        local store directly (pre-migration behaviour).
+        """
+        if self._client is not None:
+            errors = self._load_from_daemon()
+            if errors is not None:
+                self._offline = False
+                return errors
+            # Daemon unreachable — fall back to the local mirror so the GUI
+            # still opens; edits become drafts until the daemon returns.
+            log.info("Daemon unreachable at load — using the local profile cache (offline)")
+            self._offline = True
+        return self._load_from_local()
+
+    def _load_from_daemon(self) -> list[tuple[str, str]] | None:
+        """Pull profiles from the daemon store and mirror them locally.
+
+        ``GET /profiles`` returns lightweight summaries (``id``/``name``/
+        ``description`` only — DEC-160), which carry no controls or curves, so
+        each listed profile is *hydrated* to its full document via
+        ``GET /profiles/{id}`` before parsing (DEC-175). Returns the per-profile
+        error list on success (daemon reached, even if some stored documents
+        failed to fetch or parse), or ``None`` when the daemon is unreachable —
+        at the listing *or* mid-hydration — so ``load()`` can fall back to the
+        local cache.
+        """
+        assert self._client is not None
+        try:
+            summaries = self._client.list_profiles()
+        except (DaemonUnavailable, DaemonTimeout):
+            return None
+        except DaemonError as e:
+            # Reachable but errored (unexpected for a GET) — surface it as a
+            # daemon-side failure rather than masking it as an offline fallback.
+            log.warning("Daemon profile listing failed (%s): %s", e.code, e.message)
+            return None
+
+        errors: list[tuple[str, str]] = []
+        hydrated: list[tuple[Profile, bool]] = []
+        for summary in summaries:
+            ident = summary.get("id") if isinstance(summary, dict) else None
+            if not ident:
+                log.warning("Daemon profile summary without an id: %r", summary)
+                errors.append(("<unknown>", "profile summary missing 'id'"))
+                continue
+            try:
+                document = self._client.get_profile(ident)
+            except (DaemonUnavailable, DaemonTimeout):
+                # The daemon went away mid-hydration. Abandon the partial set
+                # and fall back to the local cache so the GUI opens with a
+                # consistent view rather than an arbitrary subset of profiles.
+                log.info(
+                    "Daemon became unreachable while hydrating profile %s — "
+                    "using the local profile cache (offline)",
+                    ident,
+                )
+                return None
+            except DaemonError as e:
+                # One profile could not be fetched (e.g. removed between the
+                # listing and this fetch → 404). Skip and report it, but keep
+                # loading the rest — and never touch its local mirror.
+                log.warning("Failed to fetch daemon profile %s (%s): %s", ident, e.code, e.message)
+                errors.append((str(ident), e.message))
+                continue
+            try:
+                profile = Profile.from_dict(document)
+            except Exception as e:  # malformed stored document
+                log.warning("Failed to parse daemon profile %s: %s", ident, e)
+                errors.append((str(ident), str(e)))
+                continue
+            hydrated.append((profile, repeats_curve_ids(document)))
+
+        # Commit only fully-hydrated profiles. A failed fetch/parse leaves the
+        # existing local mirror untouched, so a transient per-profile error
+        # can't clobber a previously-good cached copy (DEC-175).
+        for profile, curve_ids_deduplicated in hydrated:
+            self._profiles[profile.id] = profile
+            self._daemon_ids.add(profile.id)
+            self._forget_upload_outcome(profile.id)
+            if curve_ids_deduplicated:
+                # The GUI now follows the first of the repeated curves; the daemon
+                # still holds the document whose engine follows the last. Not
+                # "published" until a save sends it the re-identified one.
+                self._unpublished.add(profile.id)
+                log.warning(
+                    "Daemon profile %s repeats a curve id; it differs from the daemon's "
+                    "copy until it is saved",
+                    profile.id,
+                )
+            else:
+                self._unpublished.discard(profile.id)
+            # Mirror to the local cache (write only — never re-upload) so the
+            # profile stays editable while offline.
+            self._write_local(profile)
+
+        # A daemon with no stored profiles (fresh install) — seed the built-in
+        # starters and publish them, matching local-mode default seeding.
+        if not self._profiles:
+            for p in default_profiles():
+                self._profiles[p.id] = p
+                try:
+                    self.save_profile(p)
+                except Exception as e:
+                    # Phase-4 follow-up: a read-only config dir must degrade to
+                    # in-memory defaults + a surfaced error, never crash load().
+                    log.warning("Failed to persist default profile %s: %s", p.id, e)
+                    errors.append((p.id, str(e)))
+
+        # `CTRL-d`: deliberately NO active-id seed here. With a daemon, which
+        # profile is active is the daemon's to state — it arrives on the very
+        # next poll (`has_active_profile` + `active_profile_id`, DEC-194) and on
+        # connect from GET /profile/active. Seeding "the first file in the store"
+        # invented an answer that was right only by coincidence: the daemon lists
+        # profiles sorted by filename, so the GUI marked the alphabetically-first
+        # profile ACTIVE regardless of what was running, and a Save on it
+        # silently activated it (DEC-188). The local/demo path below keeps its
+        # seed — there is no daemon to ask there, so the first profile really is
+        # the active one.
+        return errors
+
+    def _load_from_local(self) -> list[tuple[str, str]]:
+        """Load profiles from the local cache dir (offline / no-client path).
+
+        The pre-migration loader: migrate each file to the current schema,
+        persist migrations/sanitisations to the cache, seed defaults when empty.
+        """
+        d = profiles_dir()
+        if self._persist:
+            d.mkdir(parents=True, exist_ok=True)
+        loaded = False
+        errors: list[tuple[str, str]] = []
+
+        for path in sorted(d.glob("*.json")):
+            try:
+                data = load_json_capped(path)
+                # Snapshot the on-disk member ids before sanitization so we
+                # can detect DEC-102 drops without re-running the pattern
+                # match here. Compares against the post-load profile state.
+                pre_sanitize_member_ids = {
+                    m.get("member_id", "")
+                    for c in data.get("controls", [])
+                    for m in c.get("members", [])
+                }
+                profile = Profile.from_dict(data)
+                self._profiles[profile.id] = profile
+                # Re-save if migrated from any earlier schema version. The
+                # v4 migration may also raise ``minimum_pct`` on disk so the
+                # change persists across restarts.
+                schema_migrated = profile_schema_version(data) < PROFILE_SCHEMA_VERSION
+                # DEC-102: also re-save when load-time sanitization dropped
+                # any members, so the cleanup persists. Without this,
+                # every restart would re-detect and re-warn forever.
+                post_sanitize_member_ids = {
+                    m.member_id for c in profile.controls for m in c.members
+                }
+                # DEC-442: an id brought to its canonical spelling is not a
+                # dropped member — compare canonical ids for the DEC-102 check,
+                # and re-save a rewrite on its own so it persists.
+                members_sanitized = {
+                    canonical_hwmon_id(i) for i in pre_sanitize_member_ids
+                } != post_sanitize_member_ids
+                ids_canonicalised = not members_sanitized and (
+                    pre_sanitize_member_ids != post_sanitize_member_ids
+                )
+                # A repeated curve id was re-identified by from_dict; persist it.
+                curve_ids_deduplicated = repeats_curve_ids(data)
+                if (
+                    schema_migrated
+                    or members_sanitized
+                    or ids_canonicalised
+                    or curve_ids_deduplicated
+                ):
+                    # Local-only write: load() never re-uploads (no auto-sync).
+                    self._write_local(profile)
+                    if schema_migrated:
+                        log.info("Migrated profile %s to v%d", profile.name, PROFILE_SCHEMA_VERSION)
+                    if members_sanitized:
+                        log.info(
+                            "Profile %s persisted after DEC-102 member sanitization",
+                            profile.name,
+                        )
+                    if ids_canonicalised:
+                        log.info(
+                            "Profile %s persisted with canonical hwmon chip names (DEC-442)",
+                            profile.name,
+                        )
+                    if curve_ids_deduplicated:
+                        log.info("Profile %s persisted with unique curve ids", profile.name)
+                loaded = True
+            except Exception as e:
+                log.warning("Failed to load profile %s: %s", path, e)
+                errors.append((str(path), str(e)))
+
+        if not loaded:
+            for p in default_profiles():
+                self._profiles[p.id] = p
+                try:
+                    self._write_local(p)
+                except Exception as e:
+                    # Phase-4 follow-up: a read-only config dir must degrade to
+                    # in-memory defaults + a surfaced error, never crash load().
+                    log.warning("Failed to write default profile %s: %s", p.id, e)
+                    errors.append((p.id, str(e)))
+
+        # The seed is for pure-local/demo mode only, where there is no daemon to
+        # ask and the first profile really is the one the demo runs. With a
+        # client this path is the OFFLINE fallback, and `CTRL-d`'s reasoning
+        # applies unchanged: which profile is active is the daemon's to say, on
+        # the first poll after it comes up. Seeding here marked the first
+        # profile "(active)" while the daemon ran none — AppState also holds
+        # "", so the poll's "" was no change and never corrected it — and a
+        # Save of that profile took the DEC-188 re-apply branch and activated
+        # a profile the user had stopped.
+        if self._client is None and not self._active_id and self._profiles:
+            self._active_id = next(iter(self._profiles))
+
+        return errors
+
+    def _write_local(self, profile: Profile) -> None:
+        """Write a profile to the local cache dir (atomic; 0600 via paths).
+
+        A no-op in demo mode (``persist=False``, DEC-431): the profile stays in
+        memory only.
+        """
+        if not self._persist:
+            return
+        path = profile_file_path(profile.id)
+        atomic_write(path, json.dumps(profile.to_dict(), indent=2) + "\n")
+
+    def save_profile(self, profile: Profile) -> None:
+        """Persist a profile: always to the local cache, then to the daemon.
+
+        [SAFETY]-adjacent, DEC-403: raises :class:`SharedSwitchRuleError`,
+        writing nothing anywhere, when the profile controls some but not all of
+        the fans behind a Dell machine's shared BIOS switch. Every caller handles
+        it; activation saves first, so it refuses the same profile.
+
+        With a daemon client, the local write is the offline mirror/draft and
+        the profile is uploaded (replace if it already exists in the store,
+        else create). If the daemon is unreachable the edit is kept as a local
+        draft (tracked internally; see :meth:`is_published`) and re-published
+        only when the user saves again — there is no background auto-sync
+        (migration Decision 3). With no client this is a pure local write.
+        """
+        rule_error = self.shared_switch_error(profile)
+        if rule_error is not None:
+            raise rule_error
+        self._write_local(profile)
+        if self._client is not None:
+            try:
+                self._publish(profile)
+            except (DaemonUnavailable, DaemonTimeout):
+                self._offline = True
+                self._unpublished.add(profile.id)
+                # Whatever the daemon said last time, it has said nothing now.
+                self._forget_upload_outcome(profile.id)
+                log.info(
+                    "Profile %s saved as a local draft — daemon offline, not published",
+                    profile.id,
+                )
+            except DaemonError as e:
+                # Daemon reached but rejected the document (validation / conflict).
+                # Keep the local draft so the edit is never lost, and keep the
+                # reasons for the caller to show (FFA-d): validation is
+                # server-side on publish (POST/PUT), so this is the only place
+                # they exist. The profile stays an unpublished draft until a
+                # later save succeeds.
+                self._unpublished.add(profile.id)
+                self._save_warnings.pop(profile.id, None)
+                self._rejections[profile.id] = field_violation_lines(e.details) or [
+                    e.message or e.code or "the daemon refused the profile"
+                ]
+                log.warning(
+                    "Profile %s rejected by the daemon (%s): %s — kept as a local draft",
+                    profile.id,
+                    e.code,
+                    e.message,
+                )
+        # A save can create, rename, or otherwise mutate the profile list —
+        # notify observers once, after the write. create/duplicate reach this via
+        # their save_profile call, so they need no separate emit (non-recursive).
+        self.profiles_changed.emit()
+
+    def _publish(self, profile: Profile) -> None:
+        """Upload a profile to the daemon store (replace existing, else create)."""
+        assert self._client is not None
+        document = profile.to_dict()
+        if profile.id in self._daemon_ids:
+            result = self._client.update_profile(profile.id, document)
+        else:
+            try:
+                result = self._client.create_profile(document)
+            except DaemonError as e:
+                if e.code == "already_exists":
+                    # The store already has this id (e.g. imported via DEC-161
+                    # before this session knew about it) — replace it instead.
+                    result = self._client.update_profile(profile.id, document)
+                else:
+                    raise
+        self._daemon_ids.add(profile.id)
+        self._unpublished.discard(profile.id)
+        self._forget_upload_outcome(profile.id)
+        # The persisted-result body carries the soft findings under `warnings`,
+        # in the field-violation shape (docs/08 § Profiles).
+        warnings = result.get("warnings") if isinstance(result, dict) else None
+        lines = field_violation_lines({"field_violations": warnings})
+        if lines:
+            self._save_warnings[profile.id] = lines
+
+    def set_active(self, profile_id: str) -> bool:
+        """Record which profile the daemon is running; ``""`` means none.
+
+        `CTRL-d`: the empty id is a legitimate value, not a lookup miss. The
+        daemon genuinely runs no profile between a deactivate and the next
+        activate, and until this accepted ``""`` there was no way to say so — the
+        guard rejected it as "unknown id" and left the previous profile marked
+        active in the sidebar, in the Controls page's "Editing:" label, and in
+        ``_on_save_profile``'s DEC-188 re-apply test, which would then silently
+        activate a profile the user never chose.
+
+        An id the GUI does not hold is not recorded (returns ``False``) but still
+        clears the local id (`WUI-d`, narrowing DEC-194's old no-op): the daemon
+        runs something else, so leaving a held profile marked active named the
+        wrong one in the sidebar and the Dashboard, and a Save on it took the
+        DEC-188 branch and replaced the daemon's profile. The daemon wins;
+        AppState's name still says what runs (`WUI-a`).
+        """
+        known = not profile_id or profile_id in self._profiles
+        if not known:
+            profile_id = ""
+        if profile_id != self._active_id:
+            self._active_id = profile_id
+            self.active_changed.emit(profile_id)
+        return known
+
+    def activate(self, profile_id: str, *, client: DaemonClient | None) -> ProfileActivateOutcome:
+        """Activate a profile end-to-end: persist it, confirm with the daemon,
+        then set it active *locally* — in that order.
+
+        This is the single activation path shared by the Controls and Dashboard
+        pages (they own only their own visual feedback). The ordering is
+        load-bearing and must not change:
+
+        1. save first, so the daemon reads the latest edited version;
+        2. with no client (demo / local mode) set active immediately and report
+           ``local_only`` — there is no daemon to confirm with;
+        3. otherwise ask the daemon and set active *only after* it confirms, so a
+           rejected or failed activation never desyncs local state from the
+           daemon (daemon-confirm-before-local).
+
+        ``client`` is passed in rather than read from ``self._client`` because the
+        pages hold the live daemon client, whereas the service's own client
+        governs profile persistence. Never raises for a daemon error — the reason
+        is captured into :attr:`ProfileActivateOutcome.error` for the caller to
+        surface. ``set_active`` (fired here) still emits ``active_changed``.
+        """
+        profile = self.get_profile(profile_id)
+        if profile is None:
+            return ProfileActivateOutcome(activated=False, error="Profile not found")
+
+        # Save first so the daemon reads the latest version. A profile the save
+        # rule refuses is refused here too, before the daemon is asked (DEC-403).
+        try:
+            self.save_profile(profile)
+        except SharedSwitchRuleError as exc:
+            return ProfileActivateOutcome(activated=False, error=exc.message, refused_by_rule=True)
+
+        if client is None:
+            # Local-only branch (demo mode): no daemon to confirm with.
+            self.set_active(profile_id)
+            log.debug("No daemon client — profile %s activated locally only", profile_id)
+            return ProfileActivateOutcome(activated=True, local_only=True)
+
+        profile_path = str(self.profile_path(profile_id))
+        try:
+            result = client.activate_profile(profile_path)
+        except DaemonError as exc:
+            return ProfileActivateOutcome(activated=False, error=exc.message or "unknown error")
+        if not result.activated:
+            return ProfileActivateOutcome(activated=False, error="Activation rejected by daemon")
+
+        # Local state is updated only after the daemon confirms.
+        self.set_active(profile_id)
+        # `TS-ae`: the new profile can change which headers the daemon protects
+        # as pumps (DEC-384) — even a re-apply of this same profile, which the
+        # poll's active id cannot show — so ask for fresh headers now.
+        if self._state is not None:
+            self._state.request_hwmon_headers_refresh()
+        return ProfileActivateOutcome(activated=True)
+
+    def deactivate(self, *, client: DaemonClient | None) -> ProfileDeactivateOutcome:
+        """Stop profile control end-to-end (DEC-462): ask the daemon, then clear
+        the active id *locally* — in that order, as :meth:`activate` does.
+
+        The one deactivation path, shared by the sidebar's **Stop** and the
+        delete-the-active-profile flow. With no client (demo) only the local id
+        is cleared. Otherwise the local id is cleared only after the daemon
+        confirms, so a failed stop never shows "no profile" while the daemon is
+        still running one. Never raises for a daemon error — the reason is
+        captured into :attr:`ProfileDeactivateOutcome.error`.
+
+        On success the daemon evaluates no curve from its next tick: it hands
+        back every motherboard header it took (DEC-382), puts each AMD GPU it
+        drove back on its firmware curve (DEC-448), and drops every
+        control-override (DEC-218); its thermal emergency still acts.
+        """
+        if client is None:
+            self.set_active("")
+            log.debug("No daemon client — profile control stopped locally only")
+            return ProfileDeactivateOutcome(deactivated=True, local_only=True)
+        try:
+            result = client.deactivate_profile()
+        except DaemonError as exc:
+            return ProfileDeactivateOutcome(deactivated=False, error=exc.message or "unknown error")
+        if not result.deactivated:
+            return ProfileDeactivateOutcome(deactivated=False, error="Rejected by the daemon")
+        self.set_active("")
+        # `TS-ae`: which headers the daemon protects as pumps follows the active
+        # profile (DEC-384), and there is none now — refresh the headers.
+        if self._state is not None:
+            self._state.request_hwmon_headers_refresh()
+        return ProfileDeactivateOutcome(deactivated=True)
+
+    def create_profile(self, name: str) -> Profile:
+        p = Profile(name=name)
+        self._profiles[p.id] = p
+        # save_profile emits profiles_changed, so create is observed downstream
+        # without a second emit here (keeps emissions minimal / non-recursive).
+        self.save_profile(p)
+        return p
+
+    def duplicate_profile(self, source_id: str, new_name: str) -> Profile | None:
+        source = self._profiles.get(source_id)
+        if not source:
+            return None
+        data = source.to_dict()
+        data["id"] = str(uuid.uuid4())[:8]
+        data["name"] = new_name
+        new_profile = Profile.from_dict(data)
+        # DEC-403: refuse before the copy joins the list, so a refused duplicate
+        # leaves nothing behind.
+        rule_error = self.shared_switch_error(new_profile)
+        if rule_error is not None:
+            raise rule_error
+        self._profiles[new_profile.id] = new_profile
+        self.save_profile(new_profile)
+        return new_profile
+
+    @property
+    def last_delete_refusal(self) -> DeleteRefusal | None:
+        """Why the last :meth:`delete_profile` kept the profile, else ``None``."""
+        return self._last_delete_refusal
+
+    def delete_profile(self, profile_id: str) -> bool:
+        """Delete a profile from the daemon store and the local cache.
+
+        With a client, the local copy goes only once the daemon no longer serves
+        the profile: a confirmed delete, or a ``404`` after which the daemon no
+        longer resolves the id. Anything else keeps the profile and records why
+        in :attr:`last_delete_refusal`. Deleting locally while the daemon kept a
+        copy only hid the profile until the next launch, when ``load()`` listed
+        it again and wrote it back to the cache — there is no reconcile.
+
+        A ``404`` means the daemon's store has no copy, which is not the same as
+        "gone": ``GET /profiles`` also serves the search dirs, and ``DELETE``
+        touches only the store. Those are this GUI's own profiles dir (which the
+        GUI registers, so an unpublished draft is served from its cache file)
+        and the read-only package presets (``/etc/ventulus/profiles``). So on
+        a ``404`` the cache file is removed first and the id asked for again: a
+        draft is now gone, while a preset still resolves and is kept.
+        """
+        self._last_delete_refusal = None
+        if profile_id not in self._profiles:
+            return False
+        if self._client is not None:
+            try:
+                self._client.delete_profile(profile_id)
+            except (DaemonUnavailable, DaemonTimeout) as e:
+                self._offline = True
+                self._last_delete_refusal = DeleteRefusal(DELETE_REFUSED_OFFLINE, e.message)
+                log.warning("Not deleting profile %s — the daemon is unreachable", profile_id)
+                return False
+            except DaemonError as e:
+                if e.code == "profile_in_use":
+                    # The daemon is actively running this profile — refuse the
+                    # delete rather than desync the GUI from a live profile.
+                    self._last_delete_refusal = DeleteRefusal(DELETE_REFUSED_IN_USE, e.message)
+                    log.warning("Cannot delete profile %s — it is active on the daemon", profile_id)
+                    return False
+                if e.status != 404:
+                    self._last_delete_refusal = DeleteRefusal(
+                        DELETE_REFUSED_DAEMON_ERROR, e.message or e.code
+                    )
+                    log.warning(
+                        "Daemon delete of profile %s failed (%s): %s",
+                        profile_id,
+                        e.code,
+                        e.message,
+                    )
+                    return False
+                # 404: not in the store — a draft, or a read-only preset.
+                refusal = self._refuse_if_still_served(profile_id)
+                if refusal is not None:
+                    self._last_delete_refusal = refusal
+                    return False
+        profile = self._profiles.pop(profile_id)
+        path = profile_file_path(profile.id)
+        # Demo mode removes the profile from memory only (DEC-431).
+        if self._persist and path.exists():
+            path.unlink()
+        self._daemon_ids.discard(profile_id)
+        self._unpublished.discard(profile_id)
+        self._forget_upload_outcome(profile_id)
+        if self._active_id == profile_id:
+            # `CTRL-e`: clear rather than promote an arbitrary survivor. The
+            # caller has just told the daemon to deactivate (DEC-097), so "no
+            # profile is active" is the truth; promoting the next profile in
+            # insertion order made the sidebar label one ACTIVE and the Controls
+            # page start editing it while the status banner — which is
+            # daemon-sourced — correctly showed none.
+            self._active_id = ""
+            # Observers of `active_changed` (the sidebar marker, the Controls
+            # page) need to hear this too; `profiles_changed` alone does not say
+            # the active profile moved.
+            self.active_changed.emit("")
+        # delete does not go through save_profile, so emit here for observers.
+        self.profiles_changed.emit()
+        return True
+
+    def _refuse_if_still_served(self, profile_id: str) -> DeleteRefusal | None:
+        """After a ``404`` delete: remove the cache file and ask for the id again.
+
+        ``None`` when the daemon no longer resolves it (the caller finishes the
+        delete). Otherwise the cache file is written back and the refusal says
+        why: a profile served from a search dir ``DELETE`` cannot reach, or a
+        daemon that could not be asked.
+        """
+        assert self._client is not None
+        profile = self._profiles[profile_id]
+        path = profile_file_path(profile_id)
+        if self._persist and path.exists():
+            path.unlink()
+        try:
+            self._client.get_profile(profile_id)
+        except (DaemonUnavailable, DaemonTimeout) as e:
+            self._offline = True
+            refusal = DeleteRefusal(DELETE_REFUSED_OFFLINE, e.message)
+        except DaemonError as e:
+            if e.status == 404:
+                return None
+            refusal = DeleteRefusal(DELETE_REFUSED_DAEMON_ERROR, e.message or e.code)
+        else:
+            refusal = DeleteRefusal(DELETE_REFUSED_READ_ONLY)
+        self._write_local(profile)
+        log.warning("Not deleting profile %s (%s)", profile_id, refusal.kind)
+        return refusal
+
+    def get_profile(self, profile_id: str) -> Profile | None:
+        return self._profiles.get(profile_id)
+
+    def reload_profile(self, profile_id: str) -> Profile | None:
+        """Re-read one profile from its store, discarding in-memory edits (DEC-233).
+
+        Backs the Controls page's "Revert" action. Prefers the daemon document
+        (the store of record — DEC-160) when the profile is published and a
+        client is set, falling back to the local cache on any daemon read
+        failure; with no client it reads the local cache directly. Replaces the
+        in-memory copy and returns the reloaded profile, or ``None`` (leaving the
+        in-memory copy untouched) when the profile has never been persisted or
+        every read fails — so an unsaved brand-new draft is never silently
+        dropped. Does not emit ``profiles_changed``; the caller refreshes its own
+        view.
+        """
+        # Daemon store of record, when this profile is published.
+        if self._client is not None and profile_id in self._daemon_ids:
+            try:
+                document = self._client.get_profile(profile_id)
+                profile = Profile.from_dict(document)
+            except (DaemonUnavailable, DaemonTimeout):
+                profile = None  # offline — fall back to the local mirror
+            except Exception as e:
+                # Daemon reached but the document errored / parsed badly — a 404
+                # after a server-side delete, or a non-dict body (`from_dict`
+                # raises AttributeError). Fall back to the local mirror rather than
+                # escaping. Broad, matching the sibling hydration parse above.
+                log.warning("Reload of profile %s from daemon failed: %s", profile_id, e)
+                profile = None
+            if profile is not None:
+                self._profiles[profile.id] = profile
+                try:
+                    self._write_local(profile)  # best-effort mirror; never abort the revert
+                except OSError as e:
+                    log.warning("Mirror write for reloaded profile %s failed: %s", profile_id, e)
+                return profile
+
+        # Local cache fallback (offline / no client / unpublished draft). The path
+        # build (containment check → ValueError for an unsafe id) and the read are
+        # both inside the guard so a bad id / malformed / unreadable file returns
+        # None cleanly rather than escaping.
+        try:
+            path = profile_file_path(profile_id)
+            if not path.exists():
+                return None
+            data = load_json_capped(path)
+            profile = Profile.from_dict(data)
+        except Exception as e:
+            log.warning("Reload of profile %s from local cache failed: %s", profile_id, e)
+            return None
+        self._profiles[profile.id] = profile
+        return profile
+
+    def profile_path(self, profile_id: str) -> Path:
+        """Return the filesystem path for a profile's JSON file.
+
+        Raises ``ValueError`` for an id that cannot safely name a file under
+        the profiles dir (DEC-223) — ids from this service's own registry
+        always can.
+        """
+        return profile_file_path(profile_id)

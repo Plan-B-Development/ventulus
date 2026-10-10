@@ -1,0 +1,1065 @@
+"""Hardware-readiness verdict, "To fix" guidance, and pop-out report
+(DEC-113, shared formatters added in DEC-115).
+
+The following live here so the inline Fans-tab card and the pop-out window share
+one source of truth (no drift):
+
+* :func:`detect_readiness_problems` — the single problem-detection pass. Both
+  the verdict banner and the "To fix" guidance derive from it.
+* :func:`readiness_verdict` — the one-line status that leads the pop-out
+  report. It has exactly one render site (`build_readiness_report_html`) since
+  DEC-379 deleted the unread `SystemStateVM.verdict_text` pair (`ACK-i`).
+* :func:`build_fix_guidance_html` — GUI-authored "To fix" bullets (disclaimer +
+  clickable doc links). Deliberately contains **no daemon-supplied strings**, so
+  it is safe to render as rich text without the escaping dance DEC-106 requires.
+* :func:`board_identity_line` / :func:`header_summary_line` / :func:`chip_rows` /
+  :func:`module_rows` / :func:`thermal_line` — shared section-body formatters
+  (DEC-115) so the card's widgets and the report's HTML derive their content
+  once and cannot drift (before these, the report had silently dropped the chip
+  "Status" and module "Mainline" columns). They return **raw** daemon strings;
+  HTML consumers escape, plain table-cell consumers do not.
+* :func:`build_readiness_report_html` + :class:`ReadinessReportDialog` — the full
+  scrollable report shown in its own window; daemon strings ARE escaped here.
+"""
+
+from __future__ import annotations
+
+from html import escape
+from typing import TYPE_CHECKING, NamedTuple
+
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QPushButton,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ventulus.services.duty_drift import DutyDriftState, drift_problems
+from ventulus.ui.hwmon_guidance import (
+    REMEDIATION_DISCLAIMER,
+    VendorQuirk,
+    advisory_detail_html,
+    detect_module_conflicts,
+    dual_chip_firmware_counts,
+    dual_chip_warning_html,
+    format_bound_driver_status,
+    format_driver_status,
+    lookup_vendor_quirks,
+    missing_chips_cost_fans,
+    missing_dual_chips,
+    quirk_key,
+    severity_display,
+)
+from ventulus.ui.theme import active_theme
+
+if TYPE_CHECKING:
+    from ventulus.api.models import GpuVerifyResult, HardwareDiagnosticsResult
+
+_HW_COMPAT_URL = (
+    "https://github.com/Plan-B-Development/ventulus/blob/main/docs/19_Hardware_Compatibility.md"
+)
+# The step-by-step recovery for a missing secondary Super-I/O. In-app copy stays
+# short and sends the reader here rather than trying to fit a six-step procedure
+# (including "cut mains power, a reboot will not do") into a card.
+_MISSING_HEADERS_URL = (
+    "https://github.com/Plan-B-Development/ventulus/blob/main/"
+    "manual/hardware-troubleshooting.md"
+    "#some-of-my-fan-headers-are-missing--only-5-of-8-show-up"
+)
+
+
+def _link(url: str, title: str) -> str:
+    """Render a clickable anchor with an inline, theme-derived colour.
+
+    The colour is set inline (not via palette/stylesheet) because both the
+    inline ``QLabel`` and the pop-out ``QTextBrowser`` inherit the app-wide
+    stylesheet, which overrides the palette Link role — inline style is the
+    only reliably-applied path for readable link contrast.
+
+    ``url``/``title`` are GUI-authored today, so escaping is a no-op for the
+    live callers; it is defence-in-depth so a future daemon-derived link can
+    never break out of the ``href`` attribute or inject markup (DEC-106).
+    """
+    return (
+        f'<a href="{escape(url, quote=True)}" '
+        f'style="color:{active_theme().status_info}">{escape(title)}</a>'
+    )
+
+
+#: How long a header must go without a reclaim before the condition stands down.
+#:
+#: The daemon's watchdog re-asserts manual mode on every reclaim, so a BIOS that
+#: is actively fighting produces them continuously — within a poll cycle or two,
+#: not hours apart. An hour of silence is therefore several orders of magnitude
+#: past "still happening" while staying far short of "it might have stopped by
+#: coincidence". Deliberately not spelled into any name or user-facing string
+#: (DEC-292): interpolate it, never restate it.
+RECLAIM_HISTORIC_AFTER_MS = 60 * 60 * 1000
+
+
+def reclaims_are_historic(hw) -> bool:
+    """True when EVERY counted reclaim is older than the stand-down window.
+
+    Every, not the newest-on-average: one header still being fought over is an
+    active condition regardless of how quiet the others have gone.
+
+    Returns False when the age is unknown for any header that has a count —
+    an older daemon, or a count from before the field existed. Absence of a
+    measurement is not evidence of age, and the safe direction for a warning is
+    to keep showing it.
+    """
+    counts = getattr(hw, "enable_revert_counts", None) or {}
+    ages = getattr(hw, "enable_revert_last_seen_ms", None) or {}
+    hot = [h for h, n in counts.items() if n > 0]
+    if not hot:
+        return False
+    return all(h in ages and ages[h] >= RECLAIM_HISTORIC_AFTER_MS for h in hot)
+
+
+def dual_chip_warning_for(diag: HardwareDiagnosticsResult) -> str | None:
+    """The dual-chip warning for *diag* (DEC-101), or ``None`` — the one place
+    its inputs are gathered, for the readiness condition and its issue card."""
+    firmware_fans, reachable = dual_chip_firmware_counts(diag)
+    return dual_chip_warning_html(
+        diag.board.name,
+        list(diag.expected_chips),
+        [c.chip_name for c in diag.hwmon.chips_detected],
+        firmware_fan_count=firmware_fans,
+        reachable_fan_count=reachable,
+        fanless_chips=list(diag.expected_fanless_chips),
+    )
+
+
+def dual_chip_costs_fans(diag: HardwareDiagnosticsResult) -> bool:
+    """Whether the chips missing on *diag* cost fan headers (`BRD-j`), from the
+    same inputs as :func:`dual_chip_warning_for`."""
+    firmware_fans, reachable = dual_chip_firmware_counts(diag)
+    return missing_chips_cost_fans(
+        missing_dual_chips(
+            list(diag.expected_chips), [c.chip_name for c in diag.hwmon.chips_detected]
+        ),
+        list(diag.expected_fanless_chips),
+        firmware_fan_count=firmware_fans,
+        reachable_fan_count=reachable,
+    )
+
+
+def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
+    """The observed readiness conditions, in display order (DEC-357).
+
+    Each condition is ``{key, label, fix, doc_url, doc_title, severity}`` where
+    every string is GUI-authored (no daemon input). ``severity`` is ``"warn"``
+    or ``"critical"``.
+
+    Every entry here is derived from something the daemon **measured** on this
+    machine — a collision in the loaded-module list, a chip that did not
+    enumerate, a reclaim the watchdog counted. That is what makes a condition
+    able to clear itself: fix it in BIOS, refetch, and it is gone. Board/chip
+    quirks are not conditions and no longer live here; they are reference
+    material keyed on which motherboard you bought, and they moved to
+    :func:`board_notes` (DEC-357).
+
+    ``severity`` is ``"critical"`` only where the mechanism risks **damaging
+    hardware**. Losing fan control is serious and is ``"warn"`` — the page words
+    that as ACTION REQUIRED. Ranking the two together is what let a HIGH "the
+    BIOS *may* override fan control" advisory paint a healthy board red.
+    """
+    hw = diag.hwmon
+    problems: list[dict] = []
+
+    collisions = getattr(diag, "module_collisions", []) or []
+    if collisions:
+        problems.append(
+            {
+                "key": "module_collision",
+                "label": "Driver module collision",
+                "fix": (
+                    # DC-x (DEC-433): the daemon keeps writing through a
+                    # collision, so the first step is the one that stops it.
+                    "Two drivers are fighting for the same chip. Now: deactivate "
+                    "the active profile (Stop under the sidebar's profile selector, "
+                    "or the tray's Stop profile control) and run no fan tests. Then "
+                    "blacklist the wrong driver and reboot (see "
+                    "the per-pair remediation below) — deactivating stops the "
+                    "curve, but only removing that driver stops writes to the chip."
+                ),
+                "doc_url": "https://wiki.archlinux.org/title/Fan_speed_control",
+                "doc_title": "Arch Wiki: Fan speed control",
+                "severity": "critical",
+            }
+        )
+    elif detect_module_conflicts([m.name for m in diag.kernel_modules if m.loaded]):
+        problems.append(
+            {
+                "key": "module_conflict",
+                "label": "Conflicting driver modules loaded",
+                "fix": (
+                    "Blacklist all but one of the conflicting modules in "
+                    "/etc/modprobe.d/ and reboot so a single driver owns the chip."
+                ),
+                "doc_url": "https://wiki.archlinux.org/title/Fan_speed_control",
+                "doc_title": "Arch Wiki: Fan speed control",
+                "severity": "critical",
+            }
+        )
+
+    if dual_chip_warning_for(diag):
+        # `BRD-j`: a missing chip that carries no fan header costs readings, not
+        # control, and the line says so before the ladder.
+        costs_fans = dual_chip_costs_fans(diag)
+        problems.append(
+            {
+                "key": "dual_chip",
+                "label": "Super-I/O chip not enumerated",
+                # DEC-326 / `UDOC-h`: this line used to prescribe the
+                # update/mmio=on/reboot loop unconditionally, which is futile on
+                # a board answering DEVID=0x8883.
+                #
+                # DEC-332 then retracted the replacement's own conclusion. It
+                # said 0x8883 "has no local fix", which was measured false: the
+                # bridge is latched by a config-mode unlock from
+                # nct6775/w83627ehf and clears on a full power cut. Telling a
+                # user to give up costs them 3 of 8 headers permanently.
+                #
+                # DEC-421 retired the DEVID discriminator itself: the driver
+                # prints the failing ID only at debug level, a 0xFFFF read is
+                # never printed at all, and 0xFFFF/0x8883 are two readings of one
+                # blocked chip (it87 #70). So the line gives the one ladder that
+                # is right either way; `dmesg` survives only as the "is the
+                # driver loaded at all?" check, with the `sudo` that
+                # dmesg_restrict kernels need.
+                "fix": (
+                    ""
+                    if costs_fans
+                    else "Every fan header is unaffected: the missing chip carries "
+                    "none on this board, so only its temperatures and voltages are "
+                    "missing. To get them back: "
+                )
+                + (
+                    "Work down this list, re-checking after each step: keep "
+                    "sensors-detect and the nct6775/w83627ehf modules away from "
+                    "the Super-I/O; reboot; if the chip is still missing, power "
+                    "down fully at the wall (PSU switch off or unplugged), "
+                    "because the latched bridge keeps standby power and a reboot "
+                    "may not clear it. If 'sudo dmesg | grep -i it87' shows no "
+                    "it87 lines at all, the driver is not loaded — install "
+                    "it87-dkms-git first. Full steps in the guide below."
+                ),
+                "doc_url": _MISSING_HEADERS_URL,
+                "doc_title": "Manual: recovering missing fan headers",
+                # Still `warn` when no fan is lost: a chip that did not
+                # enumerate is a condition with a fix, and every condition here
+                # counts toward ACTION REQUIRED — an `info` one would be counted
+                # under a label its own tier contradicts.
+                "severity": "warn",
+            }
+        )
+
+    if diag.acpi_conflicts:
+        has_it87 = any(c.conflicts_with_driver == "it87" for c in diag.acpi_conflicts)
+        fix = (
+            "Update it87-dkms-git first (2026-03+ builds sidestep most port "
+            "claims via MMIO); if the bind still fails, add "
+            "'options it87 ignore_resource_conflict=1' to "
+            "/etc/modprobe.d/it87.conf (preferred for ITE chips), or add "
+            "'acpi_enforce_resources=lax' to the kernel command line."
+            if has_it87
+            else "Add 'acpi_enforce_resources=lax' to the kernel command line, "
+            "or disable hardware monitoring in BIOS."
+        )
+        problems.append(
+            {
+                "key": "acpi",
+                "label": "ACPI I/O port conflict",
+                "fix": fix,
+                "doc_url": "https://wiki.archlinux.org/title/Lm_sensors",
+                "doc_title": "Arch Wiki: lm_sensors",
+                "severity": "warn",
+            }
+        )
+
+    reverts = getattr(hw, "enable_revert_counts", None) or {}
+    # DEC-360: a reclaim the watchdog remediated hours ago is history, not a
+    # condition. `_base_conditions`' own docstring says of this list "fix it in
+    # BIOS, refetch, and it is gone" — which was false for this entry, because
+    # the count is monotonic for the daemon's lifetime with no reset path
+    # (`ACK-d`). So ONE reclaim pinned an ACTION REQUIRED card for the whole
+    # uptime, and the honest correction is to date the evidence rather than
+    # discard it: the count is still reported by the Interference Monitor, it
+    # simply stops being an alarm once nothing has happened for a while.
+    #
+    # An unknown age (older daemon, or a count from before this field existed)
+    # does NOT suppress the condition — absence of a measurement is not evidence
+    # that it is old.
+    if reverts and max(reverts.values()) > 0 and not reclaims_are_historic(hw):
+        problems.append(
+            {
+                "key": "bios_revert",
+                "label": "BIOS/EC reclaiming fan control",
+                # Curator 2026-09-24 (DEC-421): no BIOS setting "disables" the
+                # automatic curve on these boards — ASUS's Q-Fan Tuning is a
+                # one-shot calibration, and there is no "full manual" item — and
+                # Gigabyte's "Full Speed" is a fail-safe that can lock Linux out
+                # of the header (BRD-16), so it is not offered as the remedy. The
+                # measured remedies are per vendor, and the board notes carry them.
+                "fix": (
+                    "The daemon's watchdog re-asserts manual mode each time. If a "
+                    "header keeps being taken back: on Gigabyte boards keep "
+                    "it87-dkms-git current (its 2026-08-24 fixes address the "
+                    "firmware logic that retakes headers); on MSI "
+                    "B840/B850/B860/X870/Z890 boards load nct6687 with "
+                    "msi_fan_brute_force=1; otherwise see the board notes below. "
+                    "Never give a BIOS curve a 0% point. Then re-test."
+                ),
+                "doc_url": _HW_COMPAT_URL,
+                "doc_title": "Hardware Compatibility Guide",
+                # DEC-357: never "critical". A reclaim means the BIOS took fan
+                # control back and the daemon's watchdog re-asserted it — the
+                # user must act, but nothing is being damaged, and CRITICAL is
+                # reserved for mechanisms that damage hardware.
+                #
+                # The count is NOT ignored: `classify_reclaim_severity` still
+                # separates the HIGH bucket, and `build_interference_vm` titles
+                # the gauge "High Contention Detected" from it. What changed is
+                # only that heavy contention no longer paints the health card
+                # red. (This module's own `_RECLAIM_HIGH` copy was deleted with
+                # the ternary it served — the live threshold has one definition,
+                # in `diagnostics_readiness`.)
+                "severity": "warn",
+            }
+        )
+
+    gpu = diag.gpu
+    if gpu and gpu.ppfeaturemask and not gpu.ppfeaturemask_bit14_set:
+        problems.append(
+            {
+                "key": "gpu_ppfeaturemask",
+                "label": "GPU fan control disabled (ppfeaturemask)",
+                "fix": (
+                    "Add 'amdgpu.ppfeaturemask=0xffffffff' to your kernel "
+                    "command line and reboot to enable PMFW fan control."
+                ),
+                "doc_url": "https://wiki.archlinux.org/title/AMDGPU#Fan_control",
+                "doc_title": "Arch Wiki: AMDGPU fan control",
+                "severity": "warn",
+            }
+        )
+    elif gpu and gpu.fan_control_method == "read_only" and not gpu.ppfeaturemask:
+        problems.append(
+            {
+                "key": "gpu_readonly",
+                "label": "GPU fan control unavailable",
+                "fix": (
+                    "RDNA3+ cards need 'amdgpu.ppfeaturemask=0xffffffff' on the "
+                    "kernel command line; add it and reboot."
+                ),
+                "doc_url": "https://wiki.archlinux.org/title/AMDGPU#Fan_control",
+                "doc_title": "Arch Wiki: AMDGPU fan control",
+                "severity": "warn",
+            }
+        )
+
+    if hw.total_headers > 0 and hw.writable_headers == 0:
+        problems.append(
+            {
+                "key": "all_readonly",
+                "label": "All PWM headers are read-only",
+                "fix": (
+                    "Check BIOS fan settings and confirm the correct hwmon "
+                    "driver is loaded; run Test PWM Control to confirm."
+                ),
+                "doc_url": _HW_COMPAT_URL,
+                "doc_title": "Hardware Compatibility Guide",
+                "severity": "warn",
+            }
+        )
+    if len(hw.chips_detected) == 0:
+        problems.append(
+            {
+                "key": "no_chips",
+                "label": "No hwmon chips detected",
+                "fix": (
+                    "Motherboard fan control may require a kernel driver for "
+                    "your Super-I/O chip — see the modules table and the guide."
+                ),
+                "doc_url": _HW_COMPAT_URL,
+                "doc_title": "Hardware Compatibility Guide",
+                "severity": "warn",
+            }
+        )
+
+    return problems
+
+
+# ── Board notes: reference material, with an evidence status (DEC-357) ─────
+#
+# A board/chip quirk is knowledge about the hardware, not an observation of it.
+# It matches on (board vendor, chip prefix, CPU vendor, board name) and nothing
+# about the machine's state, so it can never clear — which is ISA-18.2's
+# definition of a nuisance alarm: one that "does not return to normal after the
+# correct response is taken". Presented as an alarm it trains the user to ignore
+# the stack, and the stack is where the real conditions live.
+#
+# So a note carries an *evidence* status instead of a severity rollup, and only
+# an OBSERVED note reaches the condition list.
+
+#: A note has been confirmed on this machine; it is a live problem.
+EVIDENCE_OBSERVED = "observed"
+#: Measured counter-evidence exists — the mechanism is not happening here.
+EVIDENCE_NOT_OBSERVED = "not_observed"
+#: Neither confirmed nor refuted; the check that would settle it has not run.
+EVIDENCE_UNVERIFIED = "unverified"
+#: Nothing about this machine could ever confirm or refute it (reference only).
+EVIDENCE_REFERENCE = "reference"
+
+#: The four evidence states in ESCALATION order, quietest first (DEC-358).
+#:
+#: An ordering is what lets a silence be narrower than "forever" without being
+#: as brittle as "until anything at all changes". A dismissal is stored against
+#: the evidence it was made at; it holds while the note stays at or below that
+#: rank and breaks the moment the note escalates past it. So a note dismissed
+#: while *unverified* stays dismissed when a clean fan-control test moves it to
+#: *not_observed* — the good direction — and speaks again if it ever becomes
+#: *observed*.
+EVIDENCE_ORDER: tuple[str, ...] = (
+    EVIDENCE_REFERENCE,
+    EVIDENCE_NOT_OBSERVED,
+    EVIDENCE_UNVERIFIED,
+    EVIDENCE_OBSERVED,
+)
+
+_EVIDENCE_RANK: dict[str, int] = {e: i for i, e in enumerate(EVIDENCE_ORDER)}
+
+
+def known_evidence(evidence: str) -> bool:
+    """Is this a level from the evidence vocabulary? (DEC-359 remediation.)
+
+    See `health_ack.build_index`: an unrecognised *stored* level must void its
+    silence rather than maximise it, which is the opposite of the rule
+    `evidence_rank` applies to the *current* level.
+    """
+    return evidence in _EVIDENCE_RANK
+
+
+def evidence_rank(evidence: str) -> int:
+    """Rank one evidence state; an unknown state ranks ABOVE every known one.
+
+    The direction is deliberate and is the safe one. Ranking an unrecognised
+    state low would let it fall under an existing silence and vanish without
+    anything logging that it had appeared; ranking it high breaks the silence,
+    so a state this build does not understand is shown rather than swallowed.
+    """
+    return _EVIDENCE_RANK.get(evidence, len(EVIDENCE_ORDER))
+
+
+#: Triggers whose ABSENCE is real counter-evidence.
+#:
+#: The distinction matters more than it looks. `module_collision` is derived
+#: from the loaded-module list and `dual_chip` from expected-vs-detected chips:
+#: both are measured on every fetch whether or not anything has been written, so
+#: "not present" genuinely means "not happening". `bios_revert` is not like
+#: that. `enable_revert_counts` only gains an entry when a reclaim is *counted*
+#: (`entry(id).or_insert(0) += 1` in the daemon's pwm_control watchdog), so an
+#: empty map is indistinguishable between "the BIOS never reclaimed" and "the
+#: daemon has never written, so nothing could have been reclaimed". Reading it
+#: as the former would let the page claim a quirk was refuted on a machine that
+#: has never attempted fan control — the presence-before-absence trap.
+_CONCLUSIVE_ABSENCE: frozenset[str] = frozenset({"module_collision", "dual_chip"})
+
+#: Severity a promoted note carries as a condition, by consequence. Q1: CRITICAL
+#: is for risk of damage to hardware; everything else is ACTION REQUIRED.
+_PROMOTED_SEVERITY: dict[str, str] = {
+    "hardware_damage": "critical",
+    "control_loss": "warn",
+}
+
+
+class BoardNote(NamedTuple):
+    """One board/chip quirk, with what this machine actually says about it."""
+
+    quirk: VendorQuirk
+    key: str  # stable across prose edits — see `quirk_key`
+    evidence: str  # one of the EVIDENCE_* constants
+    evidence_text: str  # the phrasing shown beside the note
+    related_key: str  # condition key this note explains ("" if none)
+
+
+def quirk_evidence(
+    diag: HardwareDiagnosticsResult,
+    quirk: VendorQuirk,
+    condition_keys: set[str],
+    *,
+    pwm_control_verified: bool | None = None,
+) -> tuple[str, str, str]:
+    """Return ``(evidence, evidence_text, related_key)`` for one quirk.
+
+    ``pwm_control_verified`` is the outcome of a PWM write verification on this
+    machine: ``True`` (writes land), ``False`` (they did not), ``None`` (never
+    run). It is the only thing that can settle a quirk whose mechanism is
+    "writes are accepted and silently ignored", because no field on
+    ``GET /diagnostics/hardware`` reports that — which is exactly why the
+    honest answer in the absence of a verify is *unverified* rather than *fine*.
+    """
+    if quirk.consequence == "none":
+        return (EVIDENCE_REFERENCE, "reference for this hardware", "")
+
+    trigger = quirk.trigger
+    if trigger:
+        # Only the daemon's own key promotes: `module_conflict` is the GUI-only
+        # nct6683/nct6687 pair, not the nct6687/nct6775 brick these notes
+        # describe (DC-cm).
+        if trigger in condition_keys:
+            return (EVIDENCE_OBSERVED, "observed on this system", trigger)
+        if trigger in _CONCLUSIVE_ABSENCE:
+            return (EVIDENCE_NOT_OBSERVED, "not present on this system", "")
+        # Falls through: absence of this trigger proves nothing on its own.
+
+    if pwm_control_verified is True:
+        return (EVIDENCE_NOT_OBSERVED, "not observed — fan control tested working", "")
+    if pwm_control_verified is False:
+        return (EVIDENCE_OBSERVED, "observed — fan control did not test clean", "")
+    return (EVIDENCE_UNVERIFIED, "not yet verified on this system", "")
+
+
+def board_notes(
+    diag: HardwareDiagnosticsResult,
+    *,
+    condition_keys: set[str] | None = None,
+    pwm_control_verified: bool | None = None,
+) -> list[BoardNote]:
+    """Every board/chip quirk matching this hardware, most-severe first.
+
+    ``condition_keys`` is the set of condition keys already detected; omit it
+    and the base conditions are derived here. Passing it avoids computing them
+    twice when the caller already has them.
+    """
+    if condition_keys is None:
+        # `_base_conditions`, not `detect_readiness_problems`: a trigger must
+        # name a condition the daemon MEASURED. Deriving it from the full set
+        # would include conditions promoted from notes, letting a note's
+        # evidence depend on another note's evidence.
+        condition_keys = {p["key"] for p in _base_conditions(diag)}
+    notes: list[BoardNote] = []
+    for quirk in advisory_rows(diag):
+        evidence, text, related = quirk_evidence(
+            diag, quirk, condition_keys, pwm_control_verified=pwm_control_verified
+        )
+        notes.append(BoardNote(quirk, quirk_key(quirk), evidence, text, related))
+    return notes
+
+
+def promoted_conditions(notes: list[BoardNote]) -> list[dict]:
+    """Conditions minted by an observed note that no existing condition covers.
+
+    A note whose ``related_key`` is set is already explained by a condition card
+    on the page, so promoting it too would print the same problem twice — the
+    duplication that made the old rollup say "review the quirk notes above"
+    while sorting itself above them. Only a note with no owning condition — one
+    whose mechanism only a write can reveal — mints its own.
+    """
+    out: list[dict] = []
+    for note in notes:
+        if note.evidence != EVIDENCE_OBSERVED or note.related_key:
+            continue
+        severity = _PROMOTED_SEVERITY.get(note.quirk.consequence)
+        if severity is None:
+            continue
+        out.append(
+            {
+                "key": f"quirk_{note.key}",
+                "label": note.quirk.summary,
+                "fix": (
+                    "A fan-control test on this system did not come back clean, "
+                    "and this board has a documented quirk that matches. Open the "
+                    "board note below for the remedy."
+                ),
+                "doc_url": _HW_COMPAT_URL,
+                "doc_title": "Hardware Compatibility Guide",
+                "severity": severity,
+            }
+        )
+    return out
+
+
+def detect_readiness_problems(
+    diag: HardwareDiagnosticsResult,
+    *,
+    pwm_control_verified: bool | None = None,
+    duty_drift: DutyDriftState,
+) -> list[dict]:
+    """Return the conditions requiring the user's attention, in display order.
+
+    Conditions the daemon measured, plus any board note this machine has
+    confirmed and no other condition already covers. Same dict shape as before
+    (``{key, label, fix, doc_url, doc_title, severity}``).
+
+    ``pwm_control_verified`` defaults to ``None`` ("never tested"), under which
+    nothing is promoted — so every existing caller keeps the pre-DEC-357
+    contract of "conditions derived from `diag` alone".
+
+    ``duty_drift`` (DEC-404 S4-12) adds one condition per header the daemon has
+    stopped correcting, from the LIVE poll rather than from `diag`. It is a
+    required keyword with no default on purpose: every consumer of this list —
+    the page's pill, its cards, the pop-out's verdict and "To fix" — must see the
+    same conditions, and a default is how DEC-379's missed caller stayed silent.
+    A drift condition carries an extra ``subject`` (a fan's name — daemon- or
+    user-supplied, so escaped by every consumer) and its own ``fingerprint``.
+    """
+    problems = _base_conditions(diag)
+    notes = board_notes(
+        diag,
+        condition_keys={p["key"] for p in problems},
+        pwm_control_verified=pwm_control_verified,
+    )
+    problems.extend(promoted_conditions(notes))
+    problems.extend(
+        drift_problems(duty_drift, doc_url=_HW_COMPAT_URL, doc_title="Hardware Compatibility Guide")
+    )
+    return problems
+
+
+def gpu_verify_problems(result: GpuVerifyResult) -> list[dict]:
+    """GUI-authored "To fix" guidance for a GPU fan verify outcome (DEC-120).
+
+    Returns problem dicts (same shape as :func:`detect_readiness_problems` —
+    ``{key, label, fix, doc_url, doc_title, severity}``) for the failing
+    verdicts; an empty list when control verified or the result is purely
+    informational (``effective`` / ``zero_rpm_suppressed`` / ``rpm_unavailable``).
+    Every string is GUI-authored — the daemon's ``details`` are never rendered
+    (DEC-106). These are the *behavioural* failures the static readiness pass
+    cannot see: writes accepted but silently ignored, the fan not spinning, or a
+    BIOS reclaim.
+    """
+    arch_url = "https://wiki.archlinux.org/title/AMDGPU#Fan_control"
+    arch_title = "Arch Wiki: AMDGPU fan control"
+    specs = {
+        "curve_not_applied": {
+            "key": "gpu_verify_curve_not_applied",
+            "label": "GPU fan write had no effect",
+            "fix": (
+                "The GPU accepted the fan-control write but did not apply it. Add "
+                "'amdgpu.ppfeaturemask=0xffffffff' to the kernel command line and "
+                "reboot; if it is already set, check the GPU advisories above and "
+                "your kernel version. The 'SMU driver interface version' message "
+                "some cards log is not itself a fault."
+            ),
+        },
+        "no_rpm_effect": {
+            "key": "gpu_verify_no_rpm_effect",
+            "label": "GPU fan did not respond",
+            "fix": (
+                "The fan curve was applied but the fan RPM did not change. Confirm "
+                "the fan is physically connected, and check the advisories above. "
+                "A few cards have per-unit fan faults (e.g. some R9700s, ROCm "
+                "#6101) that no kernel change has been shown to fix — compare the "
+                "fan's RPM under load, and consider a warranty claim."
+            ),
+        },
+        "pwm_enable_reverted": {
+            "key": "gpu_verify_pwm_reverted",
+            # `BRD-o`: `pwm1_enable` reads back the card's own driver/SMU state,
+            # so motherboard firmware is not a cause (this text used to blame a
+            # BIOS "Smart Fan" option). A read of 0 is full speed, not automatic.
+            "label": "GPU fan left manual mode",
+            "fix": (
+                "pwm1_enable changed from manual during the test, so something "
+                "other than this test changed the card's fan mode. The usual cause "
+                "is another GPU fan tool (for example LACT, CoreCtrl or "
+                "amdgpu-fan): stop it, then re-test. The amdgpu driver also hands "
+                "the fan back to the card's own automatic control when the GPU "
+                "re-initialises (resume from suspend, a GPU reset). Motherboard "
+                "BIOS fan settings do not drive a graphics card's fan."
+            ),
+        },
+        "write_failed": {
+            "key": "gpu_verify_write_failed",
+            "label": "GPU fan write was rejected",
+            "fix": (
+                "The driver/firmware rejected the fan write outright. Ensure "
+                "'amdgpu.ppfeaturemask=0xffffffff' is set and the amdgpu driver is "
+                "bound to this GPU (not vfio-pci), then re-test."
+            ),
+        },
+    }
+    spec = specs.get(result.result)
+    if spec is None:
+        return []
+    return [{**spec, "doc_url": arch_url, "doc_title": arch_title, "severity": "critical"}]
+
+
+def readiness_verdict(
+    diag: HardwareDiagnosticsResult,
+    *,
+    pwm_control_verified: bool | None = None,
+    duty_drift: DutyDriftState,
+) -> tuple[str, str]:
+    """Return ``(verdict_text, css_class)`` for the readiness banner.
+
+    ``pwm_control_verified`` is the same tri-state
+    :func:`detect_readiness_problems` takes and must be threaded from the same
+    place the page's own pill gets it (`SSN-l`, DEC-379). Before it was added
+    here, this function called the detector bare while
+    :func:`~ventulus.services.system_state_view.build_system_state_vm`
+    passed the flag, so the pop-out report could open with "✓ System ready" on a
+    machine whose System State page read "1 ACTION REQUIRED" — the report is
+    that page's answer at length, not a second opinion (`SSN-i`).
+    """
+    hw = diag.hwmon
+    problems = detect_readiness_problems(
+        diag, pwm_control_verified=pwm_control_verified, duty_drift=duty_drift
+    )
+    ts = diag.thermal_safety
+    thermal = f"thermal safety {ts.state}" if ts and ts.state else "thermal safety unknown"
+    if not problems:
+        return (
+            f"✓ System ready — {hw.total_headers} PWM header(s), "
+            f"{hw.writable_headers} writable · {thermal}",
+            "SuccessChip",
+        )
+    n = len(problems)
+    phrase = "issue needs" if n == 1 else "issues need"
+    critical = any(p["severity"] == "critical" for p in problems)
+    cls = "CriticalChip" if critical else "WarningChip"
+    # "see the checklist below, or open the full report" named neither thing
+    # that is here: the only render site is the top of the full report itself,
+    # where "the checklist" means the System State page's condition cards and
+    # "the full report" is the document you are already reading. "To fix" is a
+    # real section of this report and the last one before the footer.
+    return (f'⚠ {n} {phrase} attention — see "To fix" below', cls)
+
+
+def build_fix_guidance_html(
+    diag: HardwareDiagnosticsResult,
+    *,
+    pwm_control_verified: bool | None = None,
+    duty_drift: DutyDriftState,
+) -> str | None:
+    """Return the "To fix" block (rich text), or ``None`` when nothing is wrong.
+
+    GUI-authored content only — safe to render as rich text with external
+    links enabled (no daemon strings are interpolated; DEC-106).
+
+    ``pwm_control_verified`` threads for the same reason it does on
+    :func:`readiness_verdict` (`SSN-l`): without it this block was empty on
+    exactly the machines whose promoted board note is the thing to fix.
+    """
+    problems = detect_readiness_problems(
+        diag, pwm_control_verified=pwm_control_verified, duty_drift=duty_drift
+    )
+    if not problems:
+        return None
+    parts = ["<b>To fix:</b>"]
+    for p in problems:
+        # `subject` is the one field that is not GUI-authored (a fan's name), so
+        # it is the one field escaped here (DEC-106).
+        subject = f" ({escape(p['subject'])})" if p.get("subject") else ""
+        parts.append(
+            f"&nbsp;&nbsp;• <b>{p['label']}</b>{subject} — {p['fix']} "
+            f"{_link(p['doc_url'], p['doc_title'])}"
+        )
+    parts.append(f"<br><i>⚠ {REMEDIATION_DISCLAIMER}</i>")
+    return "<br>".join(parts)
+
+
+# ── Shared section-body formatters (DEC-115) ──────────────────────────────
+# One derivation per section, consumed by BOTH the inline card (QLabel /
+# QTableWidget) and the pop-out report (HTML). Strings are returned raw — the
+# HTML consumer escapes them, the table-cell consumer sets them verbatim.
+
+
+class ChipRow(NamedTuple):
+    """One detected-chip row. ``status`` is computed from driver-load state."""
+
+    chip: str
+    driver: str
+    status: str
+    mainline: str
+    headers: str
+
+
+class ModuleRow(NamedTuple):
+    """One kernel-module row."""
+
+    name: str
+    loaded: str
+    mainline: str
+
+
+def board_identity_line(diag: HardwareDiagnosticsResult) -> str | None:
+    """Return ``"vendor — name — BIOS x"`` (no ``"Board:"`` prefix), or ``None``
+    when the board reports neither vendor nor name."""
+    board = diag.board
+    parts = [p for p in (board.vendor, board.name) if p]
+    if not parts:
+        return None
+    if board.bios_version:
+        parts.append(f"BIOS {board.bios_version}")
+    return " — ".join(parts)
+
+
+def header_summary_line(hw) -> str:
+    """Return the one-line PWM-header count summary (GUI text; ints only)."""
+    return f"{hw.total_headers} PWM header(s) detected, {hw.writable_headers} writable"
+
+
+def chip_rows(diag: HardwareDiagnosticsResult) -> list[ChipRow]:
+    """Per-chip display rows. Where the daemon observed the bound driver
+    (DEC-469) the row reports it; otherwise ``status`` reflects whether the
+    name-suggested driver is among the loaded kernel modules."""
+    loaded = {m.name for m in diag.kernel_modules if m.loaded}
+    return [
+        ChipRow(
+            chip=c.chip_name,
+            driver=c.bound_driver or c.expected_driver,
+            status=(
+                format_bound_driver_status(
+                    c.chip_name, c.bound_driver, c.in_mainline_kernel, loaded
+                )
+                if c.bound_driver
+                else format_driver_status(c.chip_name, c.expected_driver in loaded)
+            ),
+            mainline="Yes" if c.in_mainline_kernel else "No (out-of-tree)",
+            headers=str(c.header_count),
+        )
+        for c in diag.hwmon.chips_detected
+    ]
+
+
+def module_rows(diag: HardwareDiagnosticsResult) -> list[ModuleRow]:
+    """Per-kernel-module display rows."""
+    return [
+        ModuleRow(
+            name=m.name,
+            loaded="Loaded" if m.loaded else "Not loaded",
+            mainline="Yes" if m.in_mainline else "No",
+        )
+        for m in diag.kernel_modules
+    ]
+
+
+def severity_hex(css_class: str, t) -> str:
+    """Resolve a severity chip class to its themed hex colour (DEC-158).
+
+    The single place the pop-out report (HTML — no QSS class cascade) derives
+    the same colours the inline panel gets from the ``.*Chip`` stylesheet rules,
+    so the two presentations cannot drift.
+    """
+    return {
+        "CriticalChip": t.status_crit,
+        "WarningChip": t.status_warn,
+        "CautionChip": t.status_caution,
+        "InfoChip": t.status_info,
+        "SuccessChip": t.status_ok,
+    }.get(css_class, t.text_primary)
+
+
+def advisory_rows(diag: HardwareDiagnosticsResult) -> list[VendorQuirk]:
+    """Vendor/chip advisories for the detected hardware, most-severe first.
+
+    Shared by the inline Troubleshooting panel and the pop-out report
+    (DEC-115/DEC-158) so both render the same advisories in the same order.
+    De-duplicated by summary — a board with two Super-I/O chips can match one
+    generic vendor quirk twice.
+    """
+    board = diag.board
+    quirks: list[VendorQuirk] = []
+    seen: set[str] = set()
+    for chip in diag.hwmon.chips_detected:
+        for q in lookup_vendor_quirks(
+            board.vendor,
+            chip.chip_name,
+            cpu_vendor=diag.cpu_vendor,
+            board_name=board.name,
+        ):
+            if q.summary in seen:
+                continue
+            seen.add(q.summary)
+            quirks.append(q)
+    quirks.sort(key=lambda q: severity_display(q.severity).rank, reverse=True)
+    return quirks
+
+
+def thermal_line(ts) -> str | None:
+    """Return the one-line thermal-safety summary, or ``None`` when no thermal
+    info is present. Only ``state`` is daemon-supplied (escape in HTML)."""
+    if ts is None:
+        return None
+    # DEC-269: the daemon changed what this field answers. It used to mean "is a
+    # CpuTemp sensor present?"; since the freshness filter it means "is there a
+    # CURRENT reading?" — false for a sensor that is still listed but has
+    # stopped updating. Rendering that as "NOT found" produced
+    # "State: emergency · CPU sensor: NOT found" while the emergency was
+    # triggered by a sensor sitting right there in the sensor table.
+    found = "reading current" if ts.cpu_sensor_found else "no current reading"
+    # DEC-443: the coolant rung has its own limit, and this snapshot does not say
+    # which rung an emergency came from — so each limit is named for its rung
+    # rather than one unqualified "emergency" figure beside "State: emergency".
+    line = (
+        f"State: {ts.state} · CPU sensor: {found} · "
+        f"CPU emergency {ts.emergency_threshold_c:.0f}°C · "
+        f"release {ts.release_threshold_c:.0f}°C"
+    )
+    if ts.coolant_limit_c is not None:
+        line += f" · coolant limit {ts.coolant_limit_c:.0f}°C"
+        if ts.coolant_release_c is not None:
+            line += f" · release {ts.coolant_release_c:.0f}°C"
+    return line
+
+
+def build_readiness_report_html(
+    diag: HardwareDiagnosticsResult,
+    *,
+    pwm_control_verified: bool | None = None,
+    duty_drift: DutyDriftState,
+) -> str:
+    """Build the full, self-contained HTML report for the pop-out window.
+
+    Daemon-supplied strings are HTML-escaped; GUI guidance text is trusted.
+
+    ``pwm_control_verified`` is passed straight through to both derivations
+    below, which is what makes this report the System State page's answer at
+    length rather than an independent one (`SSN-i` / `SSN-l`).
+    """
+    t = active_theme()
+    hw = diag.hwmon
+    verdict_text, verdict_cls = readiness_verdict(
+        diag, pwm_control_verified=pwm_control_verified, duty_drift=duty_drift
+    )
+    sev_color = severity_hex(verdict_cls, t)
+
+    def h(title: str) -> str:
+        return f'<h3 style="color:{t.text_primary};margin-bottom:2px">{escape(title)}</h3>'
+
+    out: list[str] = []
+    out.append(
+        f'<div style="color:{sev_color};font-size:large;font-weight:bold">'
+        f"{escape(verdict_text)}</div>"
+    )
+
+    # Board + summary (shared formatters, DEC-115)
+    out.append(h("Summary"))
+    identity = board_identity_line(diag)
+    if identity:
+        out.append(f"<div>Board: {escape(identity)}</div>")
+    out.append(f"<div>{header_summary_line(hw)}.</div>")
+
+    # Advisories — board/chip quirks, most-severe first, with the same
+    # per-severity colour + icon + word as the inline panel (DEC-158). Shared
+    # data + presentation (advisory_rows / severity_display) so the report and
+    # the panel cannot drift (DEC-115).
+    advisories = advisory_rows(diag)
+    if advisories:
+        out.append(h("Advisories"))
+        for q in advisories:
+            d = severity_display(q.severity)
+            color = severity_hex(d.css_class, t)
+            out.append(
+                f'<div style="margin-bottom:6px">'
+                f'<span style="color:{color};font-weight:bold">'
+                f"{d.glyph} {d.word}</span> <b>{escape(q.summary)}</b>"
+            )
+            detail = advisory_detail_html(q.details)
+            if detail:
+                out.append(f'<div style="color:{t.text_secondary};margin-left:10px">{detail}</div>')
+            out.append("</div>")
+
+    # Detected chips — same five columns as the inline card (DEC-115).
+    crows = chip_rows(diag)
+    if crows:
+        out.append(h("Detected hardware"))
+        rows = [
+            '<tr><th align="left">Chip</th><th align="left">Driver</th>'
+            '<th align="left">Status</th><th align="left">Mainline</th>'
+            '<th align="left">Headers</th></tr>'
+        ]
+        for r in crows:
+            rows.append(
+                f"<tr><td>{escape(r.chip)}</td><td>{escape(r.driver)}</td>"
+                f"<td>{escape(r.status)}</td><td>{escape(r.mainline)}</td>"
+                f"<td>{escape(r.headers)}</td></tr>"
+            )
+        out.append(f'<table cellpadding="4">{"".join(rows)}</table>')
+
+    # Kernel modules — same three columns as the inline card (DEC-115).
+    mrows = module_rows(diag)
+    if mrows:
+        out.append(h("Kernel modules"))
+        rows = [
+            '<tr><th align="left">Module</th><th align="left">Loaded</th>'
+            '<th align="left">Mainline</th></tr>'
+        ]
+        for r in mrows:
+            rows.append(
+                f"<tr><td>{escape(r.name)}</td><td>{escape(r.loaded)}</td>"
+                f"<td>{escape(r.mainline)}</td></tr>"
+            )
+        out.append(f'<table cellpadding="4">{"".join(rows)}</table>')
+
+    # Thermal + GPU
+    thermal = thermal_line(diag.thermal_safety)
+    if thermal:
+        out.append(h("Thermal safety"))
+        out.append(f"<div>{escape(thermal)}</div>")
+    if diag.gpu:
+        g = diag.gpu
+        out.append(h("GPU"))
+        out.append(
+            f"<div>{escape(g.model_name or 'AMD D-GPU')} (PCI {escape(g.pci_bdf)}) · "
+            f"fan control: {escape(g.fan_control_method)}</div>"
+        )
+
+    # To fix
+    fix = build_fix_guidance_html(
+        diag, pwm_control_verified=pwm_control_verified, duty_drift=duty_drift
+    )
+    if fix:
+        out.append(h("To fix"))
+        out.append(f'<div style="color:{t.status_warn}">{fix}</div>')
+
+    out.append(
+        f'<hr><div style="color:{t.text_secondary};font-size:small">'
+        f"For full hardware-compatibility detail see the "
+        f"{_link(_HW_COMPAT_URL, 'Hardware Compatibility Guide')}.</div>"
+    )
+
+    body = "".join(out)
+    return f'<div style="color:{t.text_primary}">{body}</div>'
+
+
+class ReadinessReportDialog(QDialog):
+    """A themed, resizable window showing the full hardware-readiness report.
+
+    Uses a ``QTextBrowser`` so the report scrolls for arbitrary volume and all
+    links open externally with a single click.
+    """
+
+    def __init__(self, html: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ReadinessReport_Dialog")
+        # Named for the System State card it opens from, never "Hardware
+        # Readiness": that is the Hardware page's checklist, a different
+        # surface answering a different question (D13, `DC-bv` (m)).
+        self.setWindowTitle("System Health — Full Report")
+        self.resize(720, 640)
+
+        layout = QVBoxLayout(self)
+
+        self._browser = QTextBrowser()
+        self._browser.setObjectName("ReadinessReport_Browser")
+        self._browser.setOpenExternalLinks(True)
+        self._browser.setHtml(html)
+        layout.addWidget(self._browser, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setObjectName("ReadinessReport_Btn_close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def set_html(self, html: str) -> None:
+        """Replace the report contents (used when reopened with fresh data)."""
+        self._browser.setHtml(html)

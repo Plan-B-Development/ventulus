@@ -1,0 +1,756 @@
+"""Daemon-backed persistence for ProfileService (control-migration Phase 6b).
+
+These exercise the ``client``-injected mode: load pulls from the daemon store
+and mirrors to the local cache, save validates-then-uploads with an offline
+local-draft fallback (no auto-sync), and delete propagates to the daemon
+(refusing an in-use profile). Pure-local mode (``client=None``) stays
+byte-for-byte the pre-migration behaviour and is covered by
+``test_profile_service.py``; one test here pins that it makes no daemon calls.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from ventulus.api.errors import DaemonError, DaemonTimeout, DaemonUnavailable
+from ventulus.paths import profiles_dir
+from ventulus.services.profile_service import (
+    DELETE_REFUSED_DAEMON_ERROR,
+    DELETE_REFUSED_IN_USE,
+    DELETE_REFUSED_OFFLINE,
+    DELETE_REFUSED_READ_ONLY,
+    ControlMember,
+    ControlMode,
+    CurveConfig,
+    CurvePoint,
+    CurveType,
+    DeleteRefusal,
+    LogicalControl,
+    Profile,
+    ProfileService,
+    default_profiles,
+)
+
+
+@pytest.fixture
+def cfg(tmp_path, monkeypatch):
+    """Isolate the GUI config tree (and thus ``profiles_dir()``) per test."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    return tmp_path
+
+
+class FakeDaemonClient:
+    """In-memory stand-in for the profile-CRUD slice of ``DaemonClient``.
+
+    Records every call and can be made to raise per-method (to simulate an
+    offline daemon, a timeout, or a daemon-side rejection).
+    """
+
+    def __init__(self) -> None:
+        self.store: dict[str, dict] = {}
+        self.calls: list[tuple[str, str | None]] = []
+        self.raise_on: dict[str, Exception] = {}
+        # Per-id fetch failures for get_profile (id -> exception). Lets a test
+        # fail one profile's hydration while the rest still succeed (DEC-175).
+        self.fail_get: dict[str, Exception] = {}
+        # Soft findings a create/update is accepted with — the persisted-result
+        # body's `warnings` (docs/08 § Profiles), in the field-violation shape.
+        self.warnings: list[dict] = []
+
+    def _maybe(self, name: str) -> None:
+        exc = self.raise_on.get(name)
+        if exc is not None:
+            raise exc
+
+    def list_profiles(self) -> list[dict]:
+        self.calls.append(("list", None))
+        self._maybe("list_profiles")
+        # The real daemon returns lightweight summaries (DEC-160) — id/name/
+        # description only, never the controls or curves. Mirroring that here
+        # is what forces load() to hydrate per id (DEC-175); a fake that
+        # returned full documents would hide the bug it now guards against.
+        return [
+            {"id": d["id"], "name": d.get("name", ""), "description": d.get("description", "")}
+            for d in self.store.values()
+        ]
+
+    def get_profile(self, profile_id: str) -> dict:
+        self.calls.append(("get", profile_id))
+        self._maybe("get_profile")
+        exc = self.fail_get.get(profile_id)
+        if exc is not None:
+            raise exc
+        try:
+            return dict(self.store[profile_id])
+        except KeyError:
+            raise DaemonError(
+                code="validation_error",
+                message=f"profile '{profile_id}' not found",
+                status=404,
+            ) from None
+
+    def create_profile(self, document: dict) -> dict:
+        self.calls.append(("create", document.get("id")))
+        self._maybe("create_profile")
+        pid = document["id"]
+        if pid in self.store:
+            raise DaemonError(code="already_exists", message="profile exists", status=409)
+        self.store[pid] = dict(document)
+        return {"created": pid, "warnings": list(self.warnings)}
+
+    def update_profile(self, profile_id: str, document: dict) -> dict:
+        self.calls.append(("update", profile_id))
+        self._maybe("update_profile")
+        self.store[profile_id] = dict(document)
+        return {"updated": profile_id, "warnings": list(self.warnings)}
+
+    def delete_profile(self, profile_id: str) -> dict:
+        self.calls.append(("delete", profile_id))
+        self._maybe("delete_profile")
+        self.store.pop(profile_id, None)
+        return {"deleted": profile_id}
+
+
+def _seed(fake: FakeDaemonClient, *profiles: Profile) -> None:
+    for p in profiles:
+        fake.store[p.id] = p.to_dict()
+
+
+def _names(fake: FakeDaemonClient) -> list[str]:
+    return [c[0] for c in fake.calls]
+
+
+def _ids(svc: ProfileService) -> set[str]:
+    return {p.id for p in svc.profiles}
+
+
+def _rich_profile(name: str = "Rich") -> Profile:
+    """A profile carrying a real control + curve.
+
+    The whole point of DEC-175 is that controls and curves survive a daemon
+    round-trip; a bare ``Profile(name=...)`` has neither, so it can't prove
+    hydration is lossless. This one does.
+    """
+    p = Profile(name=name)
+    p.curves.append(
+        CurveConfig(
+            id="c1",
+            name="CPU Fan",
+            type=CurveType.GRAPH,
+            sensor_id="cpu_temp",
+            points=[CurvePoint(30, 20), CurvePoint(55, 60), CurvePoint(80, 100)],
+        )
+    )
+    p.controls.append(
+        LogicalControl(
+            id="ctrl1",
+            name="Chassis",
+            mode=ControlMode.CURVE,
+            curve_id="c1",
+            members=[
+                ControlMember(source="openfan", member_id="openfan:ch00", member_label="Fan 1")
+            ],
+        )
+    )
+    return p
+
+
+# ---------------------------------------------------------------------------
+# load()
+# ---------------------------------------------------------------------------
+
+
+def test_load_pulls_from_daemon_and_mirrors(cfg):
+    fake = FakeDaemonClient()
+    p = Profile(name="Daemon One")
+    _seed(fake, p)
+    svc = ProfileService(client=fake)
+
+    errors = svc.load()
+
+    assert errors == []
+    assert "list" in _names(fake)
+    assert p.id in _ids(svc)
+    assert svc._offline is False
+    assert svc.is_published(p.id)
+    # Mirrored into the local cache so it is editable offline.
+    assert (profiles_dir() / f"{p.id}.json").exists()
+
+
+def test_load_falls_back_to_local_when_daemon_unreachable(cfg):
+    # A previously-mirrored profile already sits in the local cache.
+    cached = Profile(name="Cached")
+    profiles_dir().mkdir(parents=True, exist_ok=True)
+    (profiles_dir() / f"{cached.id}.json").write_text(json.dumps(cached.to_dict()))
+
+    fake = FakeDaemonClient()
+    fake.raise_on["list_profiles"] = DaemonUnavailable()
+    svc = ProfileService(client=fake)
+
+    errors = svc.load()
+
+    assert errors == []
+    assert svc._offline is True
+    assert cached.id in _ids(svc)
+
+
+def test_load_empty_daemon_seeds_and_publishes_defaults(cfg):
+    fake = FakeDaemonClient()  # daemon store starts empty (fresh install)
+    svc = ProfileService(client=fake)
+
+    errors = svc.load()
+
+    assert errors == []
+    assert len(svc.profiles) == len(default_profiles())
+    # Seeded starters are published to the daemon, not left local-only.
+    assert len(fake.store) == len(default_profiles())
+    assert _names(fake).count("create") == len(default_profiles())
+    assert svc._unpublished == set()
+
+
+def test_load_reports_malformed_daemon_document(cfg):
+    fake = FakeDaemonClient()
+    good = Profile(name="Good")
+    _seed(fake, good)
+    fake.store["broken"] = {"id": "broken", "curves": [{"points": "not-a-list"}]}
+    svc = ProfileService(client=fake)
+
+    errors = svc.load()
+
+    assert any(ident == "broken" for ident, _ in errors)
+    assert good.id in _ids(svc)  # the good one still loads
+    assert svc._offline is False
+
+
+def test_load_hydrates_full_profile_documents(cfg):
+    # Regression for DEC-175: GET /profiles returns id/name/description summaries
+    # with no controls or curves; load() must hydrate each via GET /profiles/{id}.
+    # Before the fix the summary was parsed directly, so every fan role (control)
+    # and curve was silently dropped on restart.
+    fake = FakeDaemonClient()
+    rich = _rich_profile()
+    _seed(fake, rich)
+    svc = ProfileService(client=fake)
+
+    errors = svc.load()
+
+    assert errors == []
+    # The listing was hydrated per id, not parsed in place.
+    assert ("get", rich.id) in fake.calls
+    loaded = svc.get_profile(rich.id)
+    assert loaded is not None
+    assert len(loaded.controls) == 1  # would be 0 with the summary-only bug
+    assert len(loaded.curves) == 1
+    assert loaded.controls[0].curve_id == "c1"
+    assert loaded.controls[0].members[0].member_id == "openfan:ch00"
+    assert len(loaded.curves[0].points) == 3
+    # The lossless document — not the stripped summary — is mirrored locally.
+    mirror = json.loads((profiles_dir() / f"{rich.id}.json").read_text())
+    assert len(mirror["controls"]) == 1
+    assert len(mirror["curves"]) == 1
+
+
+def test_load_skips_unfetchable_profile_and_preserves_its_mirror(cfg):
+    # DEC-175: if one profile fails to hydrate (e.g. deleted between the listing
+    # and the fetch → 404), the rest still load, the failure is reported, and
+    # that profile's existing local mirror is left intact (not clobbered by the
+    # failed fetch).
+    good = _rich_profile("Good")
+    stale = _rich_profile("Stale")
+    fake = FakeDaemonClient()
+    _seed(fake, good, stale)
+
+    # A previously-good local mirror of `stale` already sits on disk.
+    profiles_dir().mkdir(parents=True, exist_ok=True)
+    mirror_path = profiles_dir() / f"{stale.id}.json"
+    mirror_path.write_text(json.dumps(stale.to_dict(), indent=2))
+
+    # The daemon still lists `stale` but now 404s its fetch (removed under us).
+    fake.fail_get[stale.id] = DaemonError(
+        code="validation_error", message=f"profile '{stale.id}' not found", status=404
+    )
+    svc = ProfileService(client=fake)
+
+    errors = svc.load()
+
+    assert svc._offline is False  # daemon was reachable — this is not an outage
+    assert good.id in _ids(svc)  # the healthy profile still loaded
+    assert stale.id not in _ids(svc)  # the 404'd one was skipped
+    assert any(ident == stale.id for ident, _ in errors)
+    # Its existing mirror was not overwritten by the failed hydration.
+    assert mirror_path.exists()
+    preserved = json.loads(mirror_path.read_text())
+    assert len(preserved["controls"]) == 1
+
+
+def test_load_disconnect_mid_hydration_falls_back_to_local(cfg):
+    # DEC-175: a daemon that drops *after* listing but *during* hydration must
+    # abandon the partial set and fall back to the local cache (offline), rather
+    # than committing an arbitrary subset of profiles.
+    cached = _rich_profile("Cached")
+    profiles_dir().mkdir(parents=True, exist_ok=True)
+    (profiles_dir() / f"{cached.id}.json").write_text(json.dumps(cached.to_dict()))
+
+    fake = FakeDaemonClient()
+    _seed(fake, cached)  # the daemon lists it...
+    fake.raise_on["get_profile"] = DaemonUnavailable()  # ...but dies on the fetch
+    svc = ProfileService(client=fake)
+
+    errors = svc.load()
+
+    assert errors == []
+    assert svc._offline is True
+    # Present from the local cache, controls intact.
+    loaded = svc.get_profile(cached.id)
+    assert loaded is not None
+    assert len(loaded.controls) == 1
+
+
+# ---------------------------------------------------------------------------
+# save_profile()
+# ---------------------------------------------------------------------------
+
+
+def test_save_new_profile_creates_on_daemon(cfg):
+    fake = FakeDaemonClient()
+    svc = ProfileService(client=fake)
+    p = Profile(name="New")
+
+    svc.save_profile(p)
+
+    assert ("create", p.id) in fake.calls
+    assert p.id in fake.store
+    assert svc.is_published(p.id)
+    assert p.id not in svc._unpublished
+    assert (profiles_dir() / f"{p.id}.json").exists()
+
+
+def test_save_known_daemon_id_updates(cfg):
+    fake = FakeDaemonClient()
+    p = Profile(name="Existing")
+    _seed(fake, p)
+    svc = ProfileService(client=fake)
+    svc.load()  # learns p.id is a daemon id
+    fake.calls.clear()
+
+    p.name = "Edited"
+    svc.save_profile(p)
+
+    assert ("update", p.id) in fake.calls
+    assert ("create", p.id) not in fake.calls
+    assert fake.store[p.id]["name"] == "Edited"
+
+
+def test_save_create_conflict_falls_back_to_update(cfg):
+    # Daemon already has the id (e.g. imported via DEC-161) but this session
+    # never loaded it, so it is not yet a known daemon id.
+    fake = FakeDaemonClient()
+    p = Profile(name="Imported")
+    _seed(fake, p)
+    svc = ProfileService(client=fake)
+    svc._profiles[p.id] = p  # present in memory, absent from _daemon_ids
+
+    p.name = "Edited Offline Copy"
+    svc.save_profile(p)
+
+    names = _names(fake)
+    assert "create" in names and "update" in names  # tried create, then updated
+    assert svc.is_published(p.id)
+    assert fake.store[p.id]["name"] == "Edited Offline Copy"
+
+
+def test_save_offline_keeps_local_draft(cfg):
+    fake = FakeDaemonClient()
+    fake.raise_on["create_profile"] = DaemonTimeout()
+    svc = ProfileService(client=fake)
+    p = Profile(name="Draft")
+
+    svc.save_profile(p)
+
+    assert p.id in svc._unpublished
+    assert svc.is_published(p.id) is False
+    assert svc._offline is True
+    # The edit is never lost — the local draft is written regardless.
+    assert (profiles_dir() / f"{p.id}.json").exists()
+
+
+def test_save_rejected_by_daemon_keeps_draft_not_offline(cfg):
+    fake = FakeDaemonClient()
+    fake.raise_on["create_profile"] = DaemonError(
+        code="validation_error", message="bad floor", status=400
+    )
+    svc = ProfileService(client=fake)
+    p = Profile(name="Bad")
+
+    svc.save_profile(p)
+
+    assert p.id in svc._unpublished
+    assert svc.is_published(p.id) is False
+    assert svc._offline is False  # daemon was reachable, it just rejected the doc
+    assert (profiles_dir() / f"{p.id}.json").exists()
+
+
+_SYNC_VIOLATION = {
+    "field": "curves[0].sync_control_id",
+    "reason": "UNKNOWN_CONTROL_REF",
+    "description": "sync references control '', which does not exist in this profile",
+}
+
+
+def _validation_error(*violations: dict) -> DaemonError:
+    return DaemonError(
+        code="validation_error",
+        message="profile failed validation",
+        status=400,
+        details={"field_violations": list(violations)},
+    )
+
+
+def test_a_refusal_keeps_the_daemons_reasons_and_an_offline_save_has_none(cfg):
+    """FFA-d: the reasons were only logged, so the page could not tell a refusal
+    from an offline daemon and called both "daemon offline"."""
+    fake = FakeDaemonClient()
+    fake.raise_on["create_profile"] = _validation_error(_SYNC_VIOLATION)
+    svc = ProfileService(client=fake)
+    p = Profile(name="Bad")
+
+    svc.save_profile(p)
+
+    assert svc.rejection(p.id) == [f"{_SYNC_VIOLATION['field']}: {_SYNC_VIOLATION['description']}"]
+
+    # The same profile saved again while the daemon is away: the old reasons are
+    # not this save's answer.
+    fake.raise_on["create_profile"] = DaemonTimeout()
+    svc.save_profile(p)
+
+    assert svc.is_published(p.id) is False
+    assert svc.rejection(p.id) == []
+
+
+def test_a_refusal_without_violations_falls_back_to_the_envelope_message(cfg):
+    fake = FakeDaemonClient()
+    fake.raise_on["create_profile"] = DaemonError(code="conflict", message="store busy", status=409)
+    svc = ProfileService(client=fake)
+    p = Profile(name="Busy")
+
+    svc.save_profile(p)
+
+    assert svc.rejection(p.id) == ["store busy"]
+
+
+def test_a_later_successful_save_clears_the_refusal(cfg):
+    fake = FakeDaemonClient()
+    fake.raise_on["create_profile"] = _validation_error(_SYNC_VIOLATION)
+    svc = ProfileService(client=fake)
+    p = Profile(name="Fixed later")
+    svc.save_profile(p)
+    assert svc.rejection(p.id), "precondition: the first save was refused"
+
+    del fake.raise_on["create_profile"]
+    svc.save_profile(p)
+
+    assert svc.is_published(p.id)
+    assert svc.rejection(p.id) == []
+
+
+def test_soft_warnings_on_an_accepted_save_are_kept_and_replaced_by_the_next(cfg):
+    """FFA-d: a valid create/update carries soft `warnings` (a sensor this machine
+    lacks, whose curve the daemon will skip); they were dropped."""
+    fake = FakeDaemonClient()
+    fake.warnings = [
+        {"field": "curves[0].sensor_id", "reason": "UNKNOWN_SENSOR", "description": "not found"}
+    ]
+    svc = ProfileService(client=fake)
+    p = Profile(name="Portable")
+
+    svc.save_profile(p)
+
+    assert svc.is_published(p.id)
+    assert svc.save_warnings(p.id) == ["curves[0].sensor_id: not found"]
+
+    fake.warnings = []
+    svc.save_profile(p)  # now an update (PUT)
+
+    assert ("update", p.id) in fake.calls
+    assert svc.save_warnings(p.id) == []
+
+
+def test_deleting_a_profile_forgets_its_refusal(cfg):
+    fake = FakeDaemonClient()
+    fake.raise_on["create_profile"] = _validation_error(_SYNC_VIOLATION)
+    svc = ProfileService(client=fake)
+    p = Profile(name="Gone")
+    svc._profiles[p.id] = p  # held, as `create_profile` would leave it
+    svc.save_profile(p)
+    assert svc.rejection(p.id), "precondition: refused"
+
+    assert svc.delete_profile(p.id)
+
+    assert svc.rejection(p.id) == []
+
+
+def test_create_profile_method_uploads(cfg):
+    fake = FakeDaemonClient()
+    svc = ProfileService(client=fake)
+
+    p = svc.create_profile("Made")
+
+    assert p.id in fake.store
+    assert svc.is_published(p.id)
+
+
+def test_duplicate_profile_uploads(cfg):
+    fake = FakeDaemonClient()
+    src = Profile(name="Source")
+    _seed(fake, src)
+    svc = ProfileService(client=fake)
+    svc.load()
+    fake.calls.clear()
+
+    dup = svc.duplicate_profile(src.id, "Copy")
+
+    assert dup is not None
+    assert dup.id in fake.store
+    assert svc.is_published(dup.id)
+
+
+# ---------------------------------------------------------------------------
+# delete_profile()
+# ---------------------------------------------------------------------------
+
+
+def test_delete_propagates_to_daemon(cfg):
+    fake = FakeDaemonClient()
+    p = Profile(name="Doomed")
+    _seed(fake, p)
+    svc = ProfileService(client=fake)
+    svc.load()
+
+    assert svc.delete_profile(p.id) is True
+    assert ("delete", p.id) in fake.calls
+    assert p.id not in fake.store
+    assert p.id not in _ids(svc)
+    assert not (profiles_dir() / f"{p.id}.json").exists()
+
+
+def test_delete_refused_when_profile_in_use(cfg):
+    fake = FakeDaemonClient()
+    p = Profile(name="Active")
+    _seed(fake, p)
+    svc = ProfileService(client=fake)
+    svc.load()
+    fake.raise_on["delete_profile"] = DaemonError(
+        code="profile_in_use", message="active", status=409
+    )
+
+    assert svc.delete_profile(p.id) is False
+    # Still present both locally and on the daemon — no desync.
+    assert p.id in _ids(svc)
+    assert p.id in fake.store
+    assert (profiles_dir() / f"{p.id}.json").exists()
+
+
+def test_delete_offline_is_refused_and_keeps_the_profile(cfg):
+    """Deleting only the local copy while the daemon kept its own hid the
+    profile until the next launch: load() lists the store and writes it back to
+    the cache. There is no reconcile, so the delete is refused instead."""
+    fake = FakeDaemonClient()
+    p = Profile(name="Gone")
+    _seed(fake, p)
+    svc = ProfileService(client=fake)
+    svc.load()
+    fake.raise_on["delete_profile"] = DaemonUnavailable()
+
+    assert svc.delete_profile(p.id) is False
+    assert svc.last_delete_refusal.kind == DELETE_REFUSED_OFFLINE
+    assert p.id in _ids(svc)
+    assert (profiles_dir() / f"{p.id}.json").exists()
+    assert svc._offline is True
+
+    # And the next launch agrees with what the user was told.
+    fake.raise_on.clear()
+    relaunched = ProfileService(client=fake)
+    relaunched.load()
+    assert p.id in _ids(relaunched)
+
+
+def test_delete_of_a_profile_the_daemon_never_had_is_local(cfg):
+    """404: not in the store (a draft never published) — delete the local copy."""
+    fake = FakeDaemonClient()
+    p = Profile(name="Draft")
+    svc = ProfileService(client=fake)
+    svc.load()
+    svc._profiles[p.id] = p
+    fake.raise_on["delete_profile"] = DaemonError(
+        code="validation_error", message="not found in store", status=404
+    )
+
+    assert svc.delete_profile(p.id) is True
+    assert svc.last_delete_refusal is None
+    assert p.id not in _ids(svc)
+    assert ("get", p.id) in fake.calls  # it asked whether the daemon still serves it
+
+
+def test_delete_of_a_read_only_preset_is_refused_and_keeps_it(cfg):
+    """DELETE touches only the daemon's store, so a package preset (served from
+    /etc/ventulus/profiles) answers 404 and is still listed afterwards.
+    Deleting the local copy on that 404 brought it back on the next launch."""
+    fake = FakeDaemonClient()
+    preset = Profile(id="quiet", name="Quiet")
+    _seed(fake, preset)  # listed and served, as a search-dir preset is
+    svc = ProfileService(client=fake)
+    svc.load()
+    fake.raise_on["delete_profile"] = DaemonError(
+        code="validation_error", message="profile 'quiet' not found in store", status=404
+    )
+
+    assert svc.delete_profile("quiet") is False
+    assert svc.last_delete_refusal == DeleteRefusal(DELETE_REFUSED_READ_ONLY)
+    assert "quiet" in _ids(svc)
+    assert (profiles_dir() / "quiet.json").exists()  # the cache copy is written back
+
+
+def test_delete_the_daemon_failed_is_refused_with_its_message(cfg):
+    fake = FakeDaemonClient()
+    p = Profile(name="Stuck")
+    _seed(fake, p)
+    svc = ProfileService(client=fake)
+    svc.load()
+    fake.raise_on["delete_profile"] = DaemonError(
+        code="internal_error", message="failed to delete profile", status=500
+    )
+
+    assert svc.delete_profile(p.id) is False
+    assert svc.last_delete_refusal == DeleteRefusal(
+        DELETE_REFUSED_DAEMON_ERROR, "failed to delete profile"
+    )
+    assert p.id in _ids(svc)
+    assert (profiles_dir() / f"{p.id}.json").exists()
+
+
+def test_delete_refusal_in_use_is_recorded(cfg):
+    fake = FakeDaemonClient()
+    p = Profile(name="Running")
+    _seed(fake, p)
+    svc = ProfileService(client=fake)
+    svc.load()
+    fake.raise_on["delete_profile"] = DaemonError(
+        code="profile_in_use", message="active", status=409
+    )
+    assert svc.delete_profile(p.id) is False
+    assert svc.last_delete_refusal.kind == DELETE_REFUSED_IN_USE
+
+
+# ---------------------------------------------------------------------------
+# offline load invents no active profile (the CTRL-d rule, offline too)
+# ---------------------------------------------------------------------------
+
+
+def _two_cached_profiles(cfg) -> list[Profile]:
+    """Write two profiles into the local cache, as a previous online run did."""
+    profiles = [Profile(id="alpha", name="Alpha"), Profile(id="beta", name="Beta")]
+    local = ProfileService()  # pure local: writes the cache
+    for prof in profiles:
+        local.save_profile(prof)
+    return profiles
+
+
+def test_offline_load_with_a_client_marks_no_profile_active(cfg):
+    """The daemon could not be asked, so no profile is "(active)". Seeding the
+    first one was never corrected (AppState also held ""), and a Save of it
+    then re-activated a profile the user had stopped (DEC-188)."""
+    _two_cached_profiles(cfg)
+    fake = FakeDaemonClient()
+    fake.raise_on["list_profiles"] = DaemonUnavailable()
+    svc = ProfileService(client=fake)
+    svc.load()
+
+    assert svc._offline is True
+    assert _ids(svc) == {"alpha", "beta"}  # precondition: the cache loaded
+    assert svc.active_id == ""
+    assert svc.active_profile is None
+
+
+def test_pure_local_load_still_seeds_the_first_profile_active(cfg):
+    """No daemon to ask: the demo/local evaluator runs the first profile."""
+    _two_cached_profiles(cfg)
+    svc = ProfileService()
+    svc.load()
+    assert svc.active_id == "alpha"
+
+
+# ---------------------------------------------------------------------------
+# pure-local mode (client=None) makes no daemon calls
+# ---------------------------------------------------------------------------
+
+
+def test_no_client_is_pure_local(cfg):
+    svc = ProfileService()  # no client
+
+    errors = svc.load()
+    assert errors == []
+    assert len(svc.profiles) == len(default_profiles())  # seeded locally
+
+    p = Profile(name="LocalOnly")
+    svc.save_profile(p)
+
+    # No daemon concept: nothing is "published", nothing is a pending draft.
+    assert svc._unpublished == set()
+    assert svc.is_published(p.id) is False
+    assert svc._offline is False
+    assert (profiles_dir() / f"{p.id}.json").exists()
+
+
+def test_daemon_document_with_traversal_id_is_rejected_not_mirrored(cfg):
+    """DEC-223: a malicious/compromised daemon returning a stored document
+    whose ``id`` traverses must surface as a per-profile hydrate error
+    (DEC-175 keeps the rest intact) and must not be mirrored to disk —
+    neither inside the profiles dir nor through the traversal."""
+    fake = FakeDaemonClient()
+    fake.store["../evil"] = {
+        "id": "../evil",
+        "name": "Evil",
+        "version": 7,
+        "controls": [],
+        "curves": [],
+    }
+    fake.store["good"] = {
+        "id": "good",
+        "name": "Good",
+        "version": 7,
+        "controls": [],
+        "curves": [],
+    }
+    svc = ProfileService(client=fake)
+    errors = svc.load()
+
+    assert any("unsafe profile id" in msg for _, msg in errors)
+    assert svc.get_profile("../evil") is None
+    assert svc.get_profile("good") is not None
+    # The pre-fix mirror write would have landed at <config>/evil.json
+    # (profiles/../evil.json). Only good.json may exist, inside the dir.
+    assert not (cfg / "ventulus" / "evil.json").exists()
+    assert (profiles_dir() / "good.json").exists()
+    assert sorted(p.name for p in profiles_dir().glob("*.json")) == ["good.json"]
+
+
+def test_default_seeding_on_readonly_config_degrades_not_crashes_daemon_backed(cfg, monkeypatch):
+    """Loop-1 twin of the local seed guard (test_profile_service.py): with an
+    EMPTY daemon store and every local write failing, load() must surface the
+    seed errors and keep the in-memory defaults — never raise."""
+    import ventulus.services.profile_service as ps_mod
+
+    def failing_write(path, content):
+        raise PermissionError("read-only filesystem")
+
+    monkeypatch.setattr(ps_mod, "atomic_write", failing_write)
+
+    fake = FakeDaemonClient()  # empty store → seeding path
+    svc = ProfileService(client=fake)
+    errors = svc.load()  # must not raise
+
+    assert errors, "daemon-path seed-write failures must be surfaced"
+    assert all("read-only filesystem" in msg for _, msg in errors)
+    assert len(svc.profiles) == len(default_profiles())

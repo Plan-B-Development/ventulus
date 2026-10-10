@@ -1,0 +1,684 @@
+"""Demo mode — synthetic data generation for testing without hardware.
+
+DemoService produces the same typed models as the real daemon API, allowing
+all UI code to work identically in demo and live modes.
+"""
+
+from __future__ import annotations
+
+import math
+import random
+import time
+
+from ventulus.api.models import (
+    AioHwmonCapability,
+    AmdGpuCapability,
+    BoardInfo,
+    Capabilities,
+    ControlCapability,
+    DaemonStatus,
+    FanReading,
+    FeatureFlags,
+    GpuDiagnosticsInfo,
+    GpuFanResetResult,
+    GpuVerifyResult,
+    GpuVerifyState,
+    HardwareDiagnosticsResult,
+    HwmonCapability,
+    HwmonChipInfo,
+    HwmonDiagnostics,
+    HwmonHeader,
+    IntelGpuCapability,
+    IntelGpuDiagnosticsInfo,
+    KernelModuleInfo,
+    NvidiaGpuCapability,
+    NvidiaGpuDiagnosticsInfo,
+    OpenfanCapability,
+    SensorReading,
+    SubsystemStatus,
+    ThermalSafetyInfo,
+    UnsupportedCapability,
+    VoltageRail,
+)
+
+# ---------------------------------------------------------------------------
+# Demo fan / sensor definitions
+# ---------------------------------------------------------------------------
+
+# `VOLT-f` (`U19`): each chip's `device_id` is the platform device name a daemon
+# reports — the basename of the hwmon directory's `device` link
+# (`hwmon/util.rs::device_id_from_path`) — and every hwmon id embeds it, as
+# `hwmon:<chip>:<device_id>:…`. The two Super I/O chips are the it87 platform
+# devices at 0xa40 and 0xa60, as on a real X870E AORUS MASTER; the Kraken Z53 is
+# its HID device (bus 0003, NZXT 1E71, product 3008); an NVMe drive is `nvmeN`.
+_IT8696_DEVICE = "it87.2624"
+_IT87952_DEVICE = "it87.2656"
+_KRAKEN_DEVICE = "0003:1E71:3008.0001"
+
+_DEMO_FANS: list[dict] = [
+    {"id": "openfan:ch00", "source": "openfan", "label": "Front Intake 1"},
+    {"id": "openfan:ch01", "source": "openfan", "label": "Front Intake 2"},
+    {"id": "openfan:ch02", "source": "openfan", "label": "Rear Exhaust"},
+    {"id": "openfan:ch03", "source": "openfan", "label": "Top Exhaust 1"},
+    {"id": "openfan:ch04", "source": "openfan", "label": "Top Exhaust 2"},
+    {"id": "openfan:ch05", "source": "openfan", "label": "GPU Adjacent Intake"},
+    {"id": "openfan:ch06", "source": "openfan", "label": "Radiator Push 1"},
+    {"id": "openfan:ch07", "source": "openfan", "label": "Radiator Push 2"},
+    {"id": f"hwmon:it8696:{_IT8696_DEVICE}:pwm1:CHA_FAN1", "source": "hwmon", "label": "CPU Fan"},
+    {
+        "id": f"hwmon:it8696:{_IT8696_DEVICE}:pwm3:CHA_FAN3",
+        "source": "hwmon",
+        "label": "CPU OPT / Pump",
+    },
+    # `VOLT-e`: the board's second chip, whose rails the Voltages panel shows.
+    {
+        "id": f"hwmon:it87952:{_IT87952_DEVICE}:pwm1:SYS_FAN5",
+        "source": "hwmon",
+        "label": "Bottom Intake 1",
+    },
+    {
+        "id": f"hwmon:it87952:{_IT87952_DEVICE}:pwm2:SYS_FAN6",
+        "source": "hwmon",
+        "label": "Bottom Intake 2",
+    },
+    {
+        "id": f"hwmon:it87952:{_IT87952_DEVICE}:pwm3:SYS_FAN4",
+        "source": "hwmon",
+        "label": "Side Exhaust",
+    },
+    # `VOLT-f`: the Kraken pump header's reading. A pump spins faster than a fan
+    # at the same duty (the Z53's runs to about 2800 RPM).
+    {
+        "id": f"hwmon:z53:{_KRAKEN_DEVICE}:pwm1:Pump",
+        "source": "hwmon",
+        "label": "Kraken Pump",
+        "rpm_per_pct": 28,
+    },
+    {"id": "amd_gpu:0000:2d:00.0", "source": "amd_gpu", "label": "RX 7900 XTX Fan"},
+    # Intel discrete GPU (DEC-121) — read-only fan; demonstrates the
+    # "(read-only)" treatment and firmware-managed messaging.
+    {"id": "intel_gpu:0000:03:00.0", "source": "intel_gpu", "label": "Arc B580 Fan"},
+    # NVIDIA discrete GPU (DEC-204) — read-only fan; exercises the measured
+    # duty_pct display and the read-only wizard/member exclusions.
+    {"id": "nvidia_gpu:0000:01:00.0", "source": "nvidia_gpu", "label": "RTX 4080 Fan"},
+]
+
+# `kind` is the WIRE contract: snake_case, exactly as `GET /sensors` sends it
+# (`docs/08` § GET /sensors). This file emitted PascalCase for most of the
+# project's life, and six consumers grew a dual-casing tax to compensate — each
+# testing the kind against a tuple of both spellings. The seventh consumer, the
+# Overview sensor summary, was written against the wire contract alone and
+# therefore reported `Sensors: 10 total` with no breakdown at all in demo mode
+# (register row `WIRE-c`). Do not reintroduce the other spelling: a demo payload
+# that does not match the wire is a fixture that tests the compensation instead
+# of the code, and `test_wire_g9_coolant_and_casing.py` scans this tree for it.
+_DEMO_SENSORS: list[dict] = [
+    {
+        "id": "hwmon:k10temp:0000:00:18.3:Tctl",
+        "kind": "cpu_temp",
+        "label": "Tctl",
+        "source": "hwmon",
+        "chip_name": "k10temp",
+    },
+    {
+        "id": "hwmon:k10temp:0000:00:18.3:Tccd1",
+        "kind": "cpu_temp",
+        "label": "Tccd1",
+        "source": "hwmon",
+        "chip_name": "k10temp",
+    },
+    {
+        "id": "hwmon:amdgpu:0000:2d:00.0:edge",
+        "kind": "gpu_temp",
+        "label": "edge",
+        "source": "amd_gpu",
+        "chip_name": "amdgpu",
+    },
+    {
+        "id": "hwmon:amdgpu:0000:2d:00.0:junction",
+        "kind": "gpu_temp",
+        "label": "junction",
+        "source": "amd_gpu",
+        "chip_name": "amdgpu",
+    },
+    # Intel Arc (Battlemage) via the xe driver — temps start at temp2 (DEC-121).
+    {
+        "id": "hwmon:xe:0000:03:00.0:temp2",
+        "kind": "gpu_temp",
+        "label": "temp2",
+        "source": "intel_gpu",
+        "chip_name": "xe",
+    },
+    {
+        "id": "hwmon:xe:0000:03:00.0:temp3",
+        "kind": "gpu_temp",
+        "label": "temp3",
+        "source": "intel_gpu",
+        "chip_name": "xe",
+    },
+    # NVIDIA discrete GPU (DEC-204) — via the open nouveau driver hwmon node.
+    {
+        "id": "hwmon:nouveau:0000:01:00.0:temp1",
+        "kind": "gpu_temp",
+        "label": "temp1",
+        "source": "nvidia_gpu",
+        "chip_name": "nouveau",
+    },
+    {
+        "id": f"hwmon:it8696:{_IT8696_DEVICE}:temp1",
+        "kind": "mb_temp",
+        "label": "temp1",
+        "source": "hwmon",
+        "chip_name": "it8696",
+    },
+    # DDR5 memory modules (DEC-491): SPD hubs on the board's SMBus, in the
+    # bus-independent id form (controller, piix4 port, SPD address — DEC-492). Listed after
+    # the board sensor, as the daemon's discovery order usually puts them; the
+    # default chart's mobo slot skips them either way.
+    {
+        "id": "hwmon:spd5118:0000:00:14.0-p0-0051:temp1",
+        "kind": "mb_temp",
+        "label": "temp1",
+        "source": "hwmon",
+        "chip_name": "spd5118",
+    },
+    {
+        "id": "hwmon:spd5118:0000:00:14.0-p0-0053:temp1",
+        "kind": "mb_temp",
+        "label": "temp1",
+        "source": "hwmon",
+        "chip_name": "spd5118",
+    },
+    {
+        "id": "hwmon:nvme:nvme0:Composite",
+        "kind": "disk_temp",
+        "label": "Composite",
+        "source": "hwmon",
+        "chip_name": "nvme",
+    },
+    # NZXT Kraken AIO coolant temperature (DEC-156) — classifies as Liquid.
+    {
+        "id": f"hwmon:z53:{_KRAKEN_DEVICE}:Coolant",
+        "kind": "coolant_temp",
+        "label": "Coolant",
+        "source": "hwmon",
+        "chip_name": "z53",
+    },
+]
+
+# Every seed declares `is_writable` explicitly. `HwmonHeader.is_writable`
+# defaults to False (the fail-safe direction, register row `WIRE-t`), so a seed
+# that stays silent would be dropped by the member-picker and demo mode would
+# offer no hwmon headers at all. `tests/test_demo_hwmon_headers.py` pins this.
+_DEMO_HWMON_HEADERS: list[dict] = [
+    {
+        "id": f"hwmon:it8696:{_IT8696_DEVICE}:pwm1:CHA_FAN1",
+        "label": "CPU Fan",
+        "chip_name": "it8696",
+        "device_id": _IT8696_DEVICE,
+        "pwm_index": 1,
+        "supports_enable": True,
+        "rpm_available": True,
+        "is_writable": True,
+        "min_pwm_percent": 0,
+        "max_pwm_percent": 100,
+    },
+    {
+        "id": f"hwmon:it8696:{_IT8696_DEVICE}:pwm3:CHA_FAN3",
+        "label": "CPU OPT / Pump",
+        "chip_name": "it8696",
+        "device_id": _IT8696_DEVICE,
+        "pwm_index": 3,
+        "supports_enable": True,
+        "rpm_available": True,
+        "is_writable": True,
+        "min_pwm_percent": 0,
+        "max_pwm_percent": 100,
+    },
+    # `VOLT-e`: the IT87952E's three headers, in the board's channel order
+    # (`knowledge/hwmon_label_resolver.py`: pwm1 SYS_FAN5_PUMP, pwm2
+    # SYS_FAN6_PUMP, pwm3 SYS_FAN4). The demo drops the `_PUMP` suffix on
+    # purpose: those labels make a header pump-protected, and the demo's one
+    # pump is the Kraken below — three running pumps is no real build.
+    *(
+        {
+            "id": f"hwmon:it87952:{_IT87952_DEVICE}:pwm{index}:{label}",
+            "label": label,
+            "chip_name": "it87952",
+            "device_id": _IT87952_DEVICE,
+            "pwm_index": index,
+            "supports_enable": True,
+            "rpm_available": True,
+            "is_writable": True,
+            "min_pwm_percent": 0,
+            "max_pwm_percent": 100,
+        }
+        for index, label in ((1, "SYS_FAN5"), (2, "SYS_FAN6"), (3, "SYS_FAN4"))
+    ),
+    # NZXT Kraken pump — liquid-cooler header (DEC-156): is_aio + writable.
+    {
+        "id": f"hwmon:z53:{_KRAKEN_DEVICE}:pwm1:Pump",
+        "label": "Pump",
+        "chip_name": "z53",
+        "device_id": _KRAKEN_DEVICE,
+        "pwm_index": 1,
+        "supports_enable": True,
+        "rpm_available": True,
+        "is_writable": True,
+        "min_pwm_percent": 0,
+        "max_pwm_percent": 100,
+        "is_aio": True,
+    },
+]
+
+# DEC-176: one-zone-per-fan demo seed (fan_id -> zone name). Flattened from the
+# old overlapping _DEMO_GROUPS rollup (its "Case" group double-counted the Intake
+# and Exhaust fans; a physical zone is exclusive). GPU fans are intentionally left
+# unassigned so demo mode exercises BOTH the user-zone path and the role/source
+# fallback the retired fan-zone grid used (DEC-222 removed that UI; the zone
+# map is retained dormant, so nothing consumes these assignments today).
+_DEMO_ZONES: dict[str, str] = {
+    "openfan:ch00": "Front Intake",
+    "openfan:ch01": "Front Intake",
+    "openfan:ch05": "Front Intake",
+    "openfan:ch02": "Exhaust",
+    "openfan:ch03": "Exhaust",
+    "openfan:ch04": "Exhaust",
+    "openfan:ch06": "Radiator",
+    "openfan:ch07": "Radiator",
+    f"hwmon:it8696:{_IT8696_DEVICE}:pwm1:CHA_FAN1": "CPU",
+    f"hwmon:it8696:{_IT8696_DEVICE}:pwm3:CHA_FAN3": "CPU",
+}
+
+
+# `VOLT-e`: what the daemon reports about each demo chip beyond its headers.
+# `chips_detected` and both header counts are DERIVED from
+# `_DEMO_HWMON_HEADERS`, as the daemon derives them from the same list it serves
+# on `GET /hwmon/headers` (`hw_diagnostics.rs::chips_detected`) — a hand-written
+# count is what let the chip list name one chip of two. Driver fields follow the
+# daemon's `chip_db`: the it87952 is a mainline it87 chip and the it8696 is not;
+# the daemon's table has no entry for the Kraken's chip, so it says "unknown"
+# beside the bound `nzxt-kraken3`. `device_id` is the platform device name the
+# chip's ids embed (`VOLT-f`).
+_DEMO_CHIP_INFO: dict[str, dict] = {
+    "it8696": {
+        "device_id": _IT8696_DEVICE,
+        "expected_driver": "it87",
+        "bound_driver": "it87",
+        "in_mainline_kernel": False,
+    },
+    "it87952": {
+        "device_id": _IT87952_DEVICE,
+        "expected_driver": "it87",
+        "bound_driver": "it87",
+        "in_mainline_kernel": True,
+    },
+    "z53": {
+        "device_id": _KRAKEN_DEVICE,
+        "expected_driver": "unknown",
+        "bound_driver": "nzxt-kraken3",
+        "in_mainline_kernel": False,
+    },
+}
+
+
+def _demo_hwmon_diagnostics() -> HwmonDiagnostics:
+    """`/diagnostics/hardware`'s ``hwmon`` block, derived from the demo headers."""
+    counts: dict[str, int] = {}
+    for header in _DEMO_HWMON_HEADERS:
+        counts[header["chip_name"]] = counts.get(header["chip_name"], 0) + 1
+    return HwmonDiagnostics(
+        chips_detected=[
+            HwmonChipInfo(chip_name=chip, header_count=count, **_DEMO_CHIP_INFO[chip])
+            for chip, count in counts.items()
+        ],
+        total_headers=sum(counts.values()),
+        writable_headers=sum(1 for h in _DEMO_HWMON_HEADERS if h["is_writable"]),
+        enable_revert_counts={
+            f"hwmon:it8696:{_IT8696_DEVICE}:pwm1:CHA_FAN1": 0,
+            f"hwmon:it8696:{_IT8696_DEVICE}:pwm3:CHA_FAN3": 0,
+        },
+    )
+
+
+# `VOLT-c` / `VOLT-b`: the demo board's voltage channels, as a current daemon
+# reports them on a real X870E AORUS MASTER (SIV A008090A, AMD; DEC-464 Q6):
+# the it8696's in0-in6 named by the board catalogue (x1.649 / x6 / x2.5 on
+# in1-in3, turning the reference host's ~2 V pins into 3.3 / 12 / 5 V) and
+# in7-in9 by the driver; the second chip it87952's in2/in4/in5 named by the
+# catalogue, in0/in1/in6 not mapped by it, and in3/in7/in8 named by the driver —
+# which the catalogue `ignore`s and the daemon deliberately does not (Q2).
+# Every kind the panel draws except a raw unnamed channel, which that board
+# does not have. Entries: (chip, channel, driver label, pin volts,
+# catalogue label, multiplier, not mapped).
+_DEMO_VOLTAGES: tuple[tuple[str, int, str, float, str, float | None, bool], ...] = (
+    ("it8696", 0, "", 1.224, "CPU Vcore", 1.0, False),
+    ("it8696", 1, "", 2.004, "+3.3V", 1.649, False),
+    ("it8696", 2, "", 1.992, "+12V", 6.0, False),
+    ("it8696", 3, "", 1.992, "+5V", 2.5, False),
+    ("it8696", 4, "", 1.260, "CPU VCORE SOC", 1.0, False),
+    ("it8696", 5, "", 1.128, "CPU VCORE MISC", 1.0, False),
+    ("it8696", 6, "", 1.440, "CPU VDDIO MEM", 1.0, False),
+    ("it8696", 7, "3VSB", 3.312, "", None, False),
+    ("it8696", 8, "Vbat", 3.216, "", None, False),
+    ("it8696", 9, "+3.3V", 3.072, "", None, False),
+    ("it87952", 0, "", 1.804, "", None, True),
+    ("it87952", 1, "", 2.805, "", None, True),
+    ("it87952", 2, "", 1.826, "PM VCC18", 1.0, False),
+    ("it87952", 3, "+3.3V", 2.332, "", None, False),
+    ("it87952", 4, "", 1.804, "CPU VDD18", 1.0, False),
+    ("it87952", 5, "", 1.045, "PM VDD1V", 1.0, False),
+    ("it87952", 6, "", 1.419, "", None, True),
+    ("it87952", 7, "3VSB", 3.388, "", None, False),
+    ("it87952", 8, "Vbat", 3.190, "", None, False),
+)
+
+
+def _demo_voltages() -> list[VoltageRail]:
+    return [
+        VoltageRail(
+            id=f"hwmon:{chip}:{_DEMO_CHIP_INFO[chip]['device_id']}:in{channel}",
+            chip_name=chip,
+            channel=channel,
+            label=label or f"in{channel}",
+            value_v=value_v,
+            identified=bool(label),
+            board_label=board_label,
+            board_multiplier=multiplier,
+            board_unmapped=unmapped,
+        )
+        for chip, channel, label, value_v, board_label, multiplier, unmapped in _DEMO_VOLTAGES
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Demo service
+# ---------------------------------------------------------------------------
+
+
+class DemoService:
+    """Generates plausible synthetic sensor/fan data for demo mode.
+
+    Call tick() on each polling cycle to advance the simulation.
+    """
+
+    def __init__(self) -> None:
+        self._start_time = time.monotonic()
+        self._base_cpu_temp = 45.0
+        self._base_gpu_temp = 38.0
+        self._base_mb_temp = 32.0
+        self._base_disk_temp = 35.0
+        self._base_coolant_temp = 34.0
+        self._fan_pwm: dict[str, int] = {f["id"]: 40 for f in _DEMO_FANS}
+
+    @property
+    def _elapsed(self) -> float:
+        return time.monotonic() - self._start_time
+
+    def _drift(self, base: float, amplitude: float = 5.0, period: float = 120.0) -> float:
+        """Sinusoidal drift with small random noise."""
+        t = self._elapsed
+        wave = amplitude * math.sin(2 * math.pi * t / period)
+        noise = random.gauss(0, 0.3)
+        return round(base + wave + noise, 1)
+
+    def capabilities(self) -> Capabilities:
+        return Capabilities(
+            api_version=1,
+            daemon_version="2.0.0-demo",
+            ipc_transport="demo",
+            openfan=OpenfanCapability(
+                present=True, channels=8, rpm_support=True, write_support=True
+            ),
+            hwmon=HwmonCapability(present=True, pwm_header_count=2, write_support=True),
+            amd_gpu=AmdGpuCapability(
+                present=True,
+                model_name="Radeon RX 7900 XTX",
+                display_label="RX 7900 XTX",
+                pci_id="0000:2d:00.0",
+                fan_control_method="pmfw_curve",
+                pmfw_supported=True,
+                fan_rpm_available=True,
+                fan_write_supported=True,
+                is_discrete=True,
+                overdrive_enabled=True,
+                gpu_zero_rpm_available=True,
+            ),
+            intel_gpu=IntelGpuCapability(
+                present=True,
+                model_name="Intel Arc B580",
+                display_label="Arc B580",
+                pci_id="0000:03:00.0",
+                pci_device_id=0xE20B,
+                driver="xe",
+                fan_control_method="read_only",
+                fan_rpm_available=True,
+                is_discrete=True,
+            ),
+            nvidia_gpu=NvidiaGpuCapability(
+                present=True,
+                model_name="NVIDIA GeForce RTX 4080",
+                display_label="NVIDIA GeForce RTX 4080",
+                pci_id="0000:01:00.0",
+                driver="nvidia",
+                driver_version="565.77",
+                fan_control_method="read_only",
+                fan_rpm_available=True,
+                is_discrete=True,
+            ),
+            aio_hwmon=AioHwmonCapability(
+                present=True,
+                status="supported",
+                pump_writable=True,
+                coolant_available=True,
+            ),
+            aio_usb=UnsupportedCapability(present=False, status="unsupported"),
+            features=FeatureFlags(
+                openfan_write_supported=True,
+                hwmon_write_supported=True,
+            ),
+            # Demo simulates a modern, autonomous 2.0.0+ daemon (the sole fan
+            # writer), so the Controls override cards stay live — the card gate now
+            # requires autonomous_control (see controls_page._on_capabilities_updated
+            # and the main-window control gate).
+            # Mirror what a real 2.0.0+ daemon advertises. `manual_override` and
+            # `fan_identify` are set unconditionally alongside `autonomous_control`
+            # by the daemon (`api/handlers/status.rs`), and the Controls page now
+            # GATES on them rather than inferring them from `autonomous_control`
+            # alone — so omitting them here would silently disable demo mode's
+            # Manual toggle and hide its identify wizard.
+            control=ControlCapability(
+                autonomous_control=True,
+                manual_override=True,
+                fan_identify=True,
+                min_supported_gui="2.0.0",
+                # DEC-489: the band is editable in demo so a profile authored
+                # there keeps it; the demo evaluator does not simulate it, and
+                # the editor says so.
+                curve_hysteresis=True,
+            ),
+        )
+
+    def status(self) -> DaemonStatus:
+        return DaemonStatus(
+            api_version=1,
+            daemon_version="2.0.0-demo",
+            overall_status="healthy",
+            subsystems=[
+                SubsystemStatus(name="openfan", status="ok", age_ms=500, reason=""),
+                SubsystemStatus(name="hwmon_sensors", status="ok", age_ms=500, reason=""),
+                SubsystemStatus(name="hwmon_pwm", status="ok", age_ms=500, reason=""),
+            ],
+        )
+
+    def sensors(self) -> list[SensorReading]:
+        readings = []
+        for s in _DEMO_SENSORS:
+            if s["kind"] == "cpu_temp":
+                val = self._drift(self._base_cpu_temp, 8.0, 90.0)
+            elif s["kind"] == "gpu_temp":
+                val = self._drift(self._base_gpu_temp, 12.0, 150.0)
+            elif s["kind"] == "mb_temp":
+                val = self._drift(self._base_mb_temp, 3.0, 200.0)
+            elif s["kind"] == "coolant_temp":
+                val = self._drift(self._base_coolant_temp, 5.0, 60.0)
+            else:
+                val = self._drift(self._base_disk_temp, 2.0, 300.0)
+
+            readings.append(
+                SensorReading(
+                    id=s["id"],
+                    kind=s["kind"],
+                    label=s["label"],
+                    value_c=val,
+                    source=s["source"],
+                    age_ms=random.randint(100, 800),
+                    chip_name=s.get("chip_name", ""),
+                )
+            )
+        return readings
+
+    def fans(self) -> list[FanReading]:
+        fans = []
+        for f in _DEMO_FANS:
+            pwm = self._fan_pwm.get(f["id"], 40)
+            base_rpm = int(pwm * f.get("rpm_per_pct", 18) + random.gauss(0, 15))
+            # Intel (DEC-121) + NVIDIA (DEC-204) discrete GPU fans are read-only:
+            # the daemon never commands them, so report no last_commanded_pwm.
+            # NVIDIA additionally exposes a firmware-reported *measured* duty %.
+            read_only = f["source"] in ("intel_gpu", "nvidia_gpu")
+            duty_pct = pwm if f["source"] == "nvidia_gpu" else None
+            fans.append(
+                FanReading(
+                    id=f["id"],
+                    source=f["source"],
+                    rpm=max(0, base_rpm),
+                    last_commanded_pwm=None if read_only else pwm,
+                    duty_pct=duty_pct,
+                    age_ms=random.randint(100, 800),
+                )
+            )
+        return fans
+
+    def hwmon_headers(self) -> list[HwmonHeader]:
+        return [HwmonHeader(**h) for h in _DEMO_HWMON_HEADERS]
+
+    def hardware_diagnostics(self) -> HardwareDiagnosticsResult:
+        """Synthetic /diagnostics/hardware payload for demo / screenshot use.
+
+        ``MainWindow._start_demo_mode`` loads it into the shared diagnostics
+        cache (`VOLT-c`), so System State and the Voltages panel render in demo.
+
+        Models a realistic Gigabyte X870E AORUS MASTER reading: IT8696E primary
+        chip via the out-of-tree it87 driver, the IT87952E secondary (mainline),
+        an NZXT Kraken, k10temp and amdgpu mainline,
+        no ACPI conflicts, healthy thermal safety, and a discrete RDNA3 GPU
+        with PMFW fan curves available.
+        """
+        return HardwareDiagnosticsResult(
+            api_version=1,
+            hwmon=_demo_hwmon_diagnostics(),
+            gpu=GpuDiagnosticsInfo(
+                pci_bdf="0000:2d:00.0",
+                pci_device_id=0x744C,
+                pci_revision=0xC8,
+                model_name="Radeon RX 7900 XTX",
+                fan_control_method="pmfw_curve",
+                overdrive_enabled=True,
+                ppfeaturemask="0xffffffff",
+                ppfeaturemask_bit14_set=True,
+                zero_rpm_available=True,
+            ),
+            intel_gpu=IntelGpuDiagnosticsInfo(
+                pci_bdf="0000:03:00.0",
+                pci_device_id=0xE20B,
+                pci_revision=0x00,
+                model_name="Intel Arc B580",
+                driver="xe",
+                fan_control_method="read_only",
+                fan_rpm_available=True,
+                fan_control_note=(
+                    "Intel GPU fan control is managed autonomously by on-card firmware and is "
+                    "not exposed to Linux userspace (the xe/i915 drivers register no PWM "
+                    "interface). Temperature and fan RPM are read-only."
+                ),
+            ),
+            nvidia_gpu=NvidiaGpuDiagnosticsInfo(
+                pci_bdf="0000:01:00.0",
+                model_name="NVIDIA GeForce RTX 4080",
+                driver="nvidia",
+                driver_version="565.77",
+                fan_control_method="read_only",
+                fan_rpm_available=True,
+                fan_control_note=(
+                    "NVIDIA GPU fan control is not exposed to this daemon: the open nouveau "
+                    "driver's writable pwm1 is deliberately excluded for safety, and the "
+                    "proprietary NVML backend is read-only telemetry. Temperature and fan "
+                    "telemetry are read-only."
+                ),
+            ),
+            thermal_safety=ThermalSafetyInfo(
+                state="normal",
+                cpu_sensor_found=True,
+                emergency_threshold_c=105.0,
+                release_threshold_c=80.0,
+            ),
+            kernel_modules=[
+                KernelModuleInfo(name="it87", loaded=True, in_mainline=False),
+                KernelModuleInfo(name="k10temp", loaded=True, in_mainline=True),
+                KernelModuleInfo(name="amdgpu", loaded=True, in_mainline=True),
+                KernelModuleInfo(name="nvme", loaded=True, in_mainline=True),
+            ],
+            acpi_conflicts=[],
+            board=BoardInfo(
+                vendor="Gigabyte",
+                name="X870E AORUS MASTER",
+                bios_version="F4 (demo)",
+            ),
+            voltages=_demo_voltages(),
+        )
+
+    def set_fan_pwm(self, fan_id: str, pwm_percent: int) -> None:
+        """Simulate a PWM write in demo mode."""
+        if fan_id in self._fan_pwm:
+            self._fan_pwm[fan_id] = max(0, min(100, pwm_percent))
+
+    def reset_gpu_fan(self, gpu_id: str) -> GpuFanResetResult:
+        """Synthetic GPU restore-to-automatic (DEC-147) for demo / screenshot
+        use — never touches hardware. Always reports a successful reset."""
+        return GpuFanResetResult(gpu_id=gpu_id, reset=True)
+
+    def hwmon_rescan(self) -> list[HwmonHeader]:
+        """Synthetic hwmon rescan (DEC-147) — returns the static demo header
+        set, mirroring a daemon whose re-enumeration found nothing new."""
+        return self.hwmon_headers()
+
+    def verify_gpu_fan(self, gpu_id: str) -> GpuVerifyResult:
+        """Synthetic GPU fan verify (DEC-120) for demo / screenshot use — never
+        touches hardware. Reports a healthy ``effective`` outcome: an idle
+        zero-RPM fan that spins up when the test curve is applied."""
+        return GpuVerifyResult(
+            gpu_id=gpu_id,
+            result="effective",
+            initial_state=GpuVerifyState(applied_speed_pct=None, rpm=0, zero_rpm_enabled=True),
+            final_state=GpuVerifyState(applied_speed_pct=75, rpm=1650, zero_rpm_enabled=False),
+            test_speed_pct=75,
+            wait_seconds=6,
+            fan_control_method="pmfw_curve",
+            details="GPU fan control verified (demo).",
+            restore_failed=False,
+        )
+
+    @staticmethod
+    def fan_aliases() -> dict[str, str]:
+        """Return demo-friendly display names for fans."""
+        return {f["id"]: f["label"] for f in _DEMO_FANS}
+
+    @staticmethod
+    def fan_zones() -> dict[str, str]:
+        """Return demo-friendly physical zone assignments (DEC-176).
+
+        One zone per fan; GPU fans are intentionally left unassigned so demo
+        mode exercises the role/source fallback alongside the user-zone path.
+        """
+        return dict(_DEMO_ZONES)

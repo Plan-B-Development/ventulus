@@ -1,0 +1,10 @@
+#compdef ventulus
+
+_ventulus() {
+    _arguments \
+        '--socket=[Daemon socket path]:socket path:_files' \
+        '--demo[Run in demo mode with simulated hardware]' \
+        '--help[Show help message]'
+}
+
+_ventulus "$@"

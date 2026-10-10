@@ -1,0 +1,393 @@
+"""DEC-209: Qt-free Overview view-model builders (headless, no QApplication).
+
+These pin the builders as line-for-line ports of the current Diagnostics
+Overview/Fans/Sensors rendering so the new Overview page can't silently diverge.
+"""
+
+from __future__ import annotations
+
+from ventulus.api.models import (
+    AmdGpuCapability,
+    Capabilities,
+    DaemonStatus,
+    FanReading,
+    FeatureFlags,
+    HwmonCapability,
+    HwmonHeader,
+    OpenfanCapability,
+    SensorReading,
+    SensorThresholds,
+)
+from ventulus.knowledge.sensor_knowledge import classify_reading
+from ventulus.services import overview_view as ov
+
+
+def _classifier(board_vendor: str = "", overrides: dict[str, str] | None = None):
+    """The pure half of ``AppState.classify_sensor`` with fixed inputs."""
+    return lambda s: classify_reading(s, board_vendor=board_vendor, overrides=overrides or {})
+
+
+def _sensor(sid: str = "hwmon:k10temp:0000:00:18.3:Tctl", **kw) -> SensorReading:
+    return SensorReading(
+        id=sid,
+        kind=kw.get("kind", "cpu_temp"),
+        label=kw.get("label", sid.split(":")[-1]),
+        value_c=kw.get("value_c", 45.0),
+        chip_name=kw.get("chip_name", "k10temp"),
+        source=kw.get("source", "hwmon"),
+        age_ms=kw.get("age_ms", 500),
+        rate_c_per_s=kw.get("rate_c_per_s"),
+        session_min_c=kw.get("session_min_c"),
+        session_max_c=kw.get("session_max_c"),
+        temp_type=kw.get("temp_type"),
+        thresholds=kw.get("thresholds"),
+    )
+
+
+# ─── fan_control_method (decomposed-arg parity) ──
+
+
+def test_fan_control_method_openfan():
+    f = FanReading(id="openfan:ch00", source="openfan", rpm=1200)
+    assert ov.fan_control_method(f, [], None) == "OpenFan USB"
+
+
+def test_fan_control_method_amd_gpu():
+    caps = Capabilities(
+        amd_gpu=AmdGpuCapability(
+            present=True, display_label="9070XT", fan_control_method="pmfw_curve"
+        )
+    )
+    f = FanReading(id="amd_gpu:x", source="amd_gpu", rpm=0)
+    assert ov.fan_control_method(f, [], caps) == "PMFW curve"
+    assert ov.fan_control_method(f, [], None) == "unknown"  # no caps → unknown
+
+
+def test_a_legacy_amd_gpu_is_verify_only_and_not_controllable():
+    """DEC-445: a pre-RDNA3 card's legacy pwm1 is written by verify and reset,
+    never by the engine, on every daemon — so ``"hwmon_pwm"`` reads as verify
+    only and the fan is not controllable, whatever ``fan_write_supported`` says
+    (daemons before DEC-445 said ``true``). PMFW is the opposite arm."""
+    from ventulus.services.fan_cards_view import is_fan_controllable
+
+    f = FanReading(id="amd_gpu:0000:0a:00.0", source="amd_gpu", rpm=900)
+    for fan_write_supported in (True, False):
+        legacy = Capabilities(
+            amd_gpu=AmdGpuCapability(
+                present=True,
+                fan_control_method="hwmon_pwm",
+                fan_write_supported=fan_write_supported,
+            )
+        )
+        method = ov.fan_control_method(f, [], legacy)
+        assert method == "verify only (legacy pwm1)"
+        assert method in ov.CONTROL_METHOD_TOOLTIPS, "every method string has a tooltip"
+        assert not is_fan_controllable(f, [], legacy), fan_write_supported
+    pmfw = Capabilities(
+        amd_gpu=AmdGpuCapability(
+            present=True, fan_control_method="pmfw_curve", fan_write_supported=True
+        )
+    )
+    assert is_fan_controllable(f, [], pmfw)
+
+
+def test_each_amd_gpu_fan_reads_its_own_cards_method():
+    """`GPU-b`: the Overview and the Dashboard's read-only card read the fan's
+    own card. A read-only card behind a PMFW primary used to read "PMFW curve"
+    and be offered as controllable."""
+    from ventulus.services.fan_cards_view import is_fan_controllable
+
+    primary = AmdGpuCapability(present=True, pci_id="0000:03:00.0", fan_control_method="pmfw_curve")
+    second = AmdGpuCapability(
+        present=True,
+        pci_id="0000:0a:00.0",
+        display_label="7900XTX",
+        fan_control_method="read_only",
+    )
+    caps = Capabilities(amd_gpu=primary, amd_gpus=[primary, second])
+    fan1 = FanReading(id="amd_gpu:0000:03:00.0", source="amd_gpu", rpm=900)
+    fan2 = FanReading(id="amd_gpu:0000:0a:00.0", source="amd_gpu", rpm=900)
+    assert ov.fan_control_method(fan1, [], caps) == "PMFW curve"
+    assert ov.fan_control_method(fan2, [], caps) == "read-only"
+    assert is_fan_controllable(fan1, [], caps)
+    assert not is_fan_controllable(fan2, [], caps)
+    assert "GPU: 7900XTX\nPCI: 0000:0a:00.0" in ov.fan_row_tooltip(fan2, [], caps)
+    # An older daemon describes only the primary: the second card is unknown,
+    # not the primary's answer.
+    older = Capabilities(amd_gpu=primary)
+    assert ov.fan_control_method(fan2, [], older) == "unknown"
+
+
+def test_fan_control_method_intel_nvidia_readonly():
+    assert (
+        ov.fan_control_method(FanReading(id="i", source="intel_gpu", rpm=0), [], None)
+        == "read-only"
+    )
+    assert (
+        ov.fan_control_method(FanReading(id="n", source="nvidia_gpu", rpm=0), [], None)
+        == "read-only"
+    )
+
+
+def test_fan_control_method_hwmon_writable_vs_readonly():
+    f = FanReading(id="hwmon:nct6798:fan1", source="hwmon", rpm=1000)
+    writable = [HwmonHeader(id="hwmon:nct6798:fan1", label="CPU", is_writable=True)]
+    readonly = [HwmonHeader(id="hwmon:nct6798:fan1", label="CPU", is_writable=False)]
+    assert ov.fan_control_method(f, writable, None) == "hwmon PWM"
+    assert ov.fan_control_method(f, readonly, None) == "read-only"
+    assert ov.fan_control_method(f, [], None) == "unknown"
+
+
+# ─── build_fan_rows ──
+
+
+def test_build_fan_rows_pwm_only_synthesis_and_freshness():
+    fans = [FanReading(id="openfan:ch00", source="openfan", rpm=1200, age_ms=500)]
+    headers = [
+        HwmonHeader(id="hwmon:nct6798:pwm2", label="SYS", is_writable=True)
+    ]  # no fan → pwm-only
+    rows = ov.build_fan_rows(fans, headers, None, display_name=lambda x: x)
+    assert len(rows) == 2
+    assert rows[0].control_method == "OpenFan USB"
+    assert rows[0].freshness_label == "fresh" and rows[0].freshness_state == "ok"
+    assert not rows[0].is_pwm_only
+    assert rows[1].is_pwm_only
+    assert rows[1].source == "hwmon (PWM-only)"
+    assert rows[1].control_method == "hwmon PWM — no RPM"
+    assert rows[1].freshness_label == "N/A" and rows[1].freshness_state == "neutral"
+    assert rows[1].rpm_text == "—" and rows[1].pwm_text == "—"
+
+
+def test_build_fan_rows_pwm_only_tooltip_hides_a_synthesised_label():
+    """DEC-229: don't pass off the daemon's invented `pwmN` as sysfs truth.
+
+    The row *name* already resolves (DEC-227), so a "Label: pwm1" line beneath
+    it contradicts the name directly above and claims a hardware source the
+    value never had. A real label is still reported.
+    """
+    real = HwmonHeader(id="hwmon:it8696:pwm1", label="CPU_FAN", pwm_index=1, is_writable=True)
+    fake = HwmonHeader(id="hwmon:it8696:pwm2", label="pwm2", pwm_index=2, is_writable=True)
+    rows = ov.build_fan_rows([], [real, fake], None, display_name=lambda x: "Resolved")
+    assert "Label: CPU_FAN" in rows[0].row_tooltip
+    assert "Label:" not in rows[1].row_tooltip
+    # The rest of the tooltip is untouched — only the label line is suppressed.
+    assert "ID: hwmon:it8696:pwm2" in rows[1].row_tooltip
+
+
+def test_build_fan_rows_freshness_state_map():
+    fans = [
+        FanReading(id="a", source="openfan", rpm=1, age_ms=500),
+        FanReading(id="b", source="openfan", rpm=1, age_ms=5000),
+        FanReading(id="c", source="openfan", rpm=1, age_ms=20000),
+    ]
+    rows = {r.name: r.freshness_state for r in ov.build_fan_rows(fans, [], None, lambda x: x)}
+    assert rows == {"a": "ok", "b": "warn", "c": "crit"}
+
+
+# ─── build_sensor_rows ──
+
+
+def test_build_sensor_rows_moves_source_into_tooltip():
+    r = ov.build_sensor_rows([_sensor(source="amd_gpu")], classify=_classifier())[0]
+    assert r.chip == "k10temp"
+    assert "Source: amd_gpu" in r.tooltip  # the daemon-subsystem column is now hover-only
+    assert r.confidence_state in ("ok", "info", "neutral", "warn")
+
+
+def test_build_sensor_rows_alarm_suffix():
+    s = _sensor(value_c=95.0, thresholds=SensorThresholds(crit_c=90.0))
+    r = ov.build_sensor_rows([s], classify=_classifier())[0]
+    assert "⚠ ALARM" in r.value_text
+    assert r.is_alarm
+
+
+def test_build_sensor_rows_prefix_matches_flags():
+    r = ov.build_sensor_rows([_sensor()], classify=_classifier())[0]
+    if r.is_quirky:
+        assert r.label.startswith("⚠ ")
+    elif r.is_low_confidence:
+        assert r.label.startswith("? ")
+    else:
+        assert not r.label.startswith(("⚠ ", "? "))
+
+
+def test_build_sensor_rows_low_confidence_gets_question_prefix():
+    # B5: an unknown chip classifies as low-confidence → "? " prefix and
+    # confidence_state "warn". The existing prefix test uses a high-confidence
+    # k10temp sensor, so this arm (and the low→warn map entry) was dead.
+    r = ov.build_sensor_rows(
+        [_sensor(sid="x:temp1", chip_name="mystery", label="temp1")],
+        classify=_classifier(),
+    )[0]
+    assert r.is_low_confidence and not r.is_quirky
+    assert r.label.startswith("? ")
+    assert r.confidence_state == "warn"
+
+
+def test_build_sensor_rows_quirky_gets_warning_prefix():
+    # B5: the ASUS + nct6776 + CPUTIN quirk classifies as bogus → "⚠ " prefix.
+    r = ov.build_sensor_rows(
+        [_sensor(sid="x:cputin", chip_name="nct6776", label="CPUTIN")],
+        classify=_classifier("ASUS"),
+    )[0]
+    assert r.is_quirky
+    assert r.label.startswith("⚠ ")
+
+
+# ─── build_sensor_summary ──
+
+
+def test_build_sensor_summary_counts():
+    sensors = [_sensor(kind="cpu_temp"), _sensor(sid="x:edge", kind="gpu_temp", label="edge")]
+    line = ov.build_sensor_summary(
+        sensors, hidden_count=1, unavailable_count=2, classify=_classifier()
+    )
+    assert line.startswith("Sensors: 2 total")
+    assert "1 CPU" in line and "1 GPU" in line
+    assert "2 unavailable" in line and "1 hidden" in line
+
+
+def test_build_sensor_summary_empty_and_unavailable_only():
+    assert (
+        ov.build_sensor_summary([], hidden_count=0, unavailable_count=0, classify=_classifier())
+        == "Sensors: —"
+    )
+    line = ov.build_sensor_summary([], hidden_count=0, unavailable_count=3, classify=_classifier())
+    assert "3 unavailable" in line
+
+
+# ─── daemon health + device discovery ──
+
+
+def test_build_daemon_health():
+    assert ov.build_daemon_health_vm(None, None).version_text == "Daemon: —"
+    vm = ov.build_daemon_health_vm(None, DaemonStatus(overall_status="ok", uptime_seconds=3661))
+    assert vm.status_text == "Status: ok" and vm.status_state == "ok"
+    assert vm.uptime_text.startswith("Uptime: 1h")
+
+
+def test_build_daemon_health_severity_arms():
+    """Pin the three strings the daemon ACTUALLY emits.
+
+    This test previously exercised only "error"/"critical"/"degraded" — none of
+    which any daemon sends. `HealthStatus::Display` emits exactly
+    "ok" | "warn" | "crit", and "crit" was absent from `_STATUS_STATE`, so a
+    critical daemon painted a neutral grey pill while this test reported the map
+    as covered. Invented inputs are worse than no test: they buy confidence in
+    the one case that was broken.
+    """
+    for wire, expected in (("ok", "ok"), ("warn", "warn"), ("crit", "crit")):
+        vm = ov.build_daemon_health_vm(None, DaemonStatus(overall_status=wire, uptime_seconds=0))
+        assert vm.status_state == expected, f"daemon '{wire}' must map to {expected}"
+
+    # docs/08: anything but "ok" is a warning, so a token a newer daemon adds is
+    # "warn", never a calm grey; it must not raise either. Only "unknown" — the
+    # parser's word for an absent field — stays neutral.
+    assert (
+        ov.build_daemon_health_vm(
+            None, DaemonStatus(overall_status="wat", uptime_seconds=0)
+        ).status_state
+        == "warn"
+    )
+    assert (
+        ov.build_daemon_health_vm(
+            None, DaemonStatus(overall_status="unknown", uptime_seconds=0)
+        ).status_state
+        == "neutral"
+    )
+
+    # Legacy spellings kept for older/third-party daemons.
+    for wire, expected in (("error", "crit"), ("critical", "crit"), ("degraded", "warn")):
+        assert (
+            ov.build_daemon_health_vm(
+                None, DaemonStatus(overall_status=wire, uptime_seconds=0)
+            ).status_state
+            == expected
+        )
+
+
+def test_build_device_discovery_hwmon_all_readonly_warn():
+    caps = Capabilities(
+        hwmon=HwmonCapability(present=True, pwm_header_count=3, write_support=True),
+        features=FeatureFlags(hwmon_write_supported=True),
+    )
+    vm = ov.build_device_discovery_vm(caps, writable_headers=0)
+    assert vm.hwmon_warn is True
+    assert "ALL read-only" in vm.hwmon
+    assert "0 writable headers" in vm.features
+
+
+def test_build_device_discovery_none():
+    vm = ov.build_device_discovery_vm(None, None)
+    # `OFN-g`: no capabilities yet means the OpenFan row is hidden, not shown as
+    # a placeholder. Otherwise every start would flash "OpenFan: —" and then drop
+    # it a second later on a machine that has no controller.
+    assert vm.openfan is None
+    # The other rows DO keep their placeholder — without this the test would pass
+    # against a VM that returned None for everything.
+    assert vm.hwmon == "hwmon: —"
+    assert vm.hwmon_warn is False
+
+
+def test_openfan_row_presence_tracks_the_wire_field():
+    """`OFN-g`: the Overview row exists iff the daemon reports a controller.
+
+    Asserted as a relationship against `caps.openfan.present`, with both arms.
+    A literal-string assertion would be satisfied by a build that ignored the
+    wire field entirely, which is the defect this line exists to prevent.
+    """
+    for present in (True, False):
+        caps = Capabilities(openfan=OpenfanCapability(present=present, channels=3))
+        vm = ov.build_device_discovery_vm(caps, 2)
+        assert (vm.openfan is not None) == caps.openfan.present, (
+            f"openfan row presence disagreed with the wire field for {present=}"
+        )
+        # The GPU rows are the deliberate contrast (`OFN-g` was a user decision,
+        # not a blanket rule): they keep "Not detected" whatever OpenFan does.
+        assert "Not detected" in vm.amd_gpu
+
+
+def test_the_age_note_does_not_claim_age_is_the_poll_time():
+    """DEC-302 retraction guard.
+
+    The note used to read "Age = time since daemon last polled this hardware
+    subsystem". On daemon >= 2.24.2 that is false whenever a poll is running but
+    not covering everything: the openfan/hwmon entries report the worse of poll
+    liveness and data freshness, so `age_ms` is then the OLDEST READING's age.
+
+    The old wording described precisely the number that let a 3-of-10-channel
+    frame report "readings fresh" while seven channels aged without bound — so a
+    note asserting it would send a user to the wrong conclusion at exactly the
+    moment the new signal is trying to correct them.
+
+    Asserts the absence AND the replacement: absence alone would pass against an
+    empty string, which is the vacuous-assertion trap in the project rulebook.
+    """
+    vm = ov.build_daemon_health_vm(None, None)
+    assert "last polled" not in vm.age_note.lower(), (
+        f"the note must not claim age is the poll time, got {vm.age_note!r}"
+    )
+    assert "refreshed" in vm.age_note.lower(), (
+        f"the note must still explain what age means, got {vm.age_note!r}"
+    )
+
+
+def test_support_bundle_says_whether_a_profile_can_drive_the_gpu_fan():
+    """Contract review of DEC-446: a pre-DEC-445 daemon reports a legacy card
+    ``fan_write_supported: true``, so the bundle also prints the GUI's own
+    answer — otherwise bundles from two daemon versions disagree about one card."""
+    from ventulus.services.app_state import AppState
+    from ventulus.services.diagnostics_service import DiagnosticsService
+
+    for method, drivable in (("hwmon_pwm", "No"), ("pmfw_curve", "Yes")):
+        state = AppState()
+        state.set_capabilities(
+            Capabilities(
+                amd_gpu=AmdGpuCapability(
+                    present=True, fan_control_method=method, fan_write_supported=True
+                )
+            )
+        )
+        text = DiagnosticsService(state=state).format_gpu_status()
+        assert "Fan write supported: Yes" in text, "the wire value is still shown"
+        assert f"Profile can drive the fan: {drivable}" in text, method

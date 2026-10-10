@@ -1,0 +1,294 @@
+"""Series selection model for dashboard chart visibility.
+
+Tracks which time-series keys are visible on the chart. New series
+default to visible; the model stores the set of *hidden* keys so
+that newly discovered sensors appear automatically.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+
+from PySide6.QtCore import QObject, Signal
+
+from ventulus.api.models import SensorReading
+from ventulus.knowledge.sensor_knowledge import sensor_is_memory
+
+# The curated default chart series (refinement §7.3 / B-fork DEC-181): one CPU
+# temp, one GPU temp, one mobo/case temp — and, since `WIRE-ai`, one coolant
+# temp where the machine has a liquid cooler, which on such a machine is
+# arguably the headline number and was absent by default.
+#
+# Kind-aware, so it cannot be derived from the series keys alone: the model
+# cannot tell a CPU temp from a GPU temp by key.
+#
+# Single-spelling since `WIRE-c`. These are wire tokens (`docs/08` § GET
+# /sensors) and the PascalCase alternates were here only because `DemoService`
+# emitted a shape the daemon never sends. Six modules carried that tax; the
+# seventh, written against the contract, silently lost its whole breakdown in
+# demo mode. Fixed at the source, not compensated for again.
+_DEFAULT_SERIES_KINDS: tuple[str, ...] = (
+    "cpu_temp",
+    "gpu_temp",
+    "mb_temp",
+    "coolant_temp",
+)
+
+
+def default_series_keys(sensors: list[SensorReading]) -> set[str]:
+    """The curated default series: one each of CPU, GPU, mobo/case and coolant.
+
+    This is what ``ChartMode.COMBINED`` resolves to. It lives here rather than in
+    a page view-model because it is chart logic, not page logic — it was
+    previously three functions in ``dashboard_view`` named after the summary
+    cards that seeded it, which DEC-222 removed.
+
+    Slots with no matching sensor are simply dropped: ``set_only_visible`` later
+    intersects with the known keys, so an absent or filtered sensor is harmless.
+    That is also what scopes the coolant slot to machines that have one — an
+    air-cooled machine gets exactly the three series it got before (`WIRE-ai`).
+
+    A memory module is `mb_temp` on the wire but never fills the mobo slot
+    (DEC-491): it would stand in for the board on a machine that lists its DIMMs
+    first, and with only DIMMs the slot stays empty.
+    """
+    keys: set[str] = set()
+    for kind in _DEFAULT_SERIES_KINDS:
+        sensor = next(
+            (s for s in sensors if s.kind == kind and not sensor_is_memory(s)),
+            None,
+        )
+        if sensor is not None:
+            keys.add(f"sensor:{sensor.id}")
+    return keys
+
+
+class SeriesGroup(Enum):
+    TEMPS = "temps"
+    MOBO_FANS = "mobo_fans"
+    OPENFAN_FANS = "openfan_fans"
+
+
+class ChartMode(Enum):
+    """Chart readability presets (DEC-181). Each resolves to a visible-series set."""
+
+    THERMALS = "thermals"
+    FANS = "fans"
+    COMBINED = "combined"  # the curated default subset (see default_series_keys)
+    DIAGNOSTICS = "diagnostics"  # everything (power-user "show all")
+
+
+# Group-based modes resolve to a fixed set of groups. COMBINED is intentionally
+# absent — it is curated by sensor *kind* (CPU/GPU/one mobo), so it is applied
+# with explicit keys from default_series_keys, not groups. DIAGNOSTICS is absent
+# too — it means "all known keys" (select_all).
+_MODE_GROUPS: dict[ChartMode, set[SeriesGroup]] = {
+    ChartMode.THERMALS: {SeriesGroup.TEMPS},
+    ChartMode.FANS: {SeriesGroup.MOBO_FANS, SeriesGroup.OPENFAN_FANS},
+}
+
+
+class SeriesSelectionModel(QObject):
+    """Tracks which chart series are visible. Emits on change."""
+
+    selection_changed = Signal()
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._known_keys: set[str] = set()
+        self._hidden_keys: set[str] = set()
+        # Active chart-readability mode (DEC-181). Defaults to COMBINED, which is
+        # NOT group-based, so the "new keys default visible" contract is untouched
+        # until the user picks a group-based mode (Thermals/Fans).
+        self._active_mode: ChartMode = ChartMode.COMBINED
+        # Whether the group-mode new-key rule may fire on the next key
+        # registration. Cleared by `restore_mode` — see there for why.
+        self._mode_rule_armed = True
+
+    # -- visibility --
+
+    def is_visible(self, key: str) -> bool:
+        return key in self._known_keys and key not in self._hidden_keys
+
+    def is_hidden(self, key: str) -> bool:
+        """True only if the key was explicitly hidden (persisted or user-toggled).
+
+        Unlike :meth:`is_visible`, an unknown key is *not* hidden — new series
+        default to visible. UI that builds rows before the dashboard registers
+        keys via :meth:`update_known_keys` must use this, not ``is_visible``,
+        or first-discovery rows start unchecked and get synced back into the
+        model as hidden.
+        """
+        return key in self._hidden_keys
+
+    def set_visible(self, key: str, visible: bool) -> None:
+        changed = False
+        if visible and key in self._hidden_keys:
+            self._hidden_keys.discard(key)
+            changed = True
+        elif not visible and key not in self._hidden_keys:
+            self._hidden_keys.add(key)
+            changed = True
+        if changed:
+            self.selection_changed.emit()
+
+    def visible_keys(self) -> set[str]:
+        return self._known_keys - self._hidden_keys
+
+    def known_keys(self) -> set[str]:
+        """Return all keys the selection model knows about (displayable entities)."""
+        return set(self._known_keys)
+
+    def select_all(self) -> None:
+        if self._hidden_keys:
+            self._hidden_keys.clear()
+            self.selection_changed.emit()
+
+    # -- chart modes (DEC-181) --
+
+    def set_only_visible(self, keys: set[str]) -> None:
+        """Show exactly ``keys`` (those that are known); hide every other known
+        key. One ``selection_changed`` emit. The primitive behind COMBINED/seed.
+
+        A hidden key for hardware that is not *currently* known is carried through
+        untouched (DEC-356). Recomputing the hidden set from the known set alone
+        would re-open, at every mode application, exactly the hole
+        :meth:`update_known_keys` used to have: a fan hidden while it was spinning
+        must stay hidden across the polls where it reports nothing.
+        """
+        target_visible = self._known_keys & set(keys)
+        new_hidden = (self._known_keys - target_visible) | (self._hidden_keys - self._known_keys)
+        if new_hidden != self._hidden_keys:
+            self._hidden_keys = new_hidden
+            self.selection_changed.emit()
+
+    def restore_mode(self, mode: ChartMode) -> None:
+        """Adopt a persisted mode *without* recomputing visibility (DEC-245).
+
+        The restored ``hidden_chart_series`` is already the result of that mode
+        plus whatever the user adjusted afterwards, so re-applying the preset here
+        would discard those adjustments. Only the new-key rule and the selector
+        label need to know which mode is active.
+
+        This is what closes the label/data divergence: before, the mode reset to
+        Combined on every launch while the hidden set still held the previous
+        mode's result, so the selector and the chart disagreed.
+
+        **Disarming the new-key rule for one registration is load-bearing**, and
+        the first cut of this method omitted it. On the first poll ``_known_keys``
+        is empty, so *every* key counts as newly added; with a group mode active
+        the rule would then re-hide every out-of-group series — including the ones
+        the user had deliberately re-shown while in that mode — and the resulting
+        ``selection_changed`` persists the loss. Their tweak would be destroyed on
+        every launch. Pre-DEC-245 this could not happen because the mode always
+        reset to COMBINED, which is not group-based.
+
+        The rule re-arms after that first registration, so genuinely new hardware
+        arriving later still follows the mode.
+        """
+        self._active_mode = mode
+        self._mode_rule_armed = False
+
+    def apply_mode(self, mode: ChartMode, curated_keys: set[str] | None = None) -> None:
+        """Apply a chart-readability preset and remember it for the new-key rule.
+
+        - DIAGNOSTICS → everything visible (``select_all``).
+        - COMBINED → the curated, kind-aware subset; ``curated_keys`` MUST be
+          supplied by the caller (see :func:`default_series_keys` — the model
+          holds keys, not sensor kinds). If ``None`` (e.g. before any sensors
+          arrive) visibility is left unchanged but the mode is still recorded.
+        - THERMALS / FANS → the group-based preset (``_MODE_GROUPS``).
+        """
+        self._active_mode = mode
+        self._mode_rule_armed = True
+        if mode == ChartMode.DIAGNOSTICS:
+            self.select_all()
+            return
+        if mode == ChartMode.COMBINED:
+            if curated_keys is not None:
+                self.set_only_visible(curated_keys)
+            return
+        visible: set[str] = set()
+        for group in _MODE_GROUPS.get(mode, set()):
+            visible |= self.keys_for_group(group)
+        self.set_only_visible(visible)
+
+    # -- classification --
+
+    @staticmethod
+    def classify(key: str) -> SeriesGroup:
+        """Classify a history key into a group.
+
+        - sensor:* → TEMPS
+        - fan:hwmon:*:rpm → MOBO_FANS
+        - fan:openfan:*:rpm → OPENFAN_FANS
+        """
+        if key.startswith("sensor:"):
+            return SeriesGroup.TEMPS
+        if ":hwmon:" in key:
+            return SeriesGroup.MOBO_FANS
+        return SeriesGroup.OPENFAN_FANS
+
+    def keys_for_group(self, group: SeriesGroup) -> set[str]:
+        return {k for k in self._known_keys if self.classify(k) == group}
+
+    # -- key management --
+
+    def update_known_keys(self, all_keys: list[str]) -> None:
+        """Update from HistoryStore.series_keys(). Excludes PWM keys.
+
+        New keys default *visible* (the auto-appear contract) UNLESS a group-based
+        mode (Thermals/Fans) is active — then a newly-discovered key follows that
+        mode (e.g. a new fan stays hidden under Thermals) so the mode doesn't
+        silently leak (DEC-181). Emits ``selection_changed`` only if the mode rule
+        actually hid a freshly-seen key, so panels/legends re-sync.
+
+        **A key leaving the known set does NOT clear its hidden state** (DEC-356).
+        Removing stale keys is owned by the user-triggered Settings action DEC-246
+        added ("Removed N setting(s) for missing hardware"), for the reason
+        ``services/orphan_prune.py`` already states and enforces: from a single
+        poll "unplugged for good" and "asleep right now" are indistinguishable, so
+        a device that is merely off would silently lose its hide state. The view
+        this method is handed is filtered by construction — ``hide_unused_fan_headers``
+        drops a stopped fan and DEC-193 evicts a quarantined sensor — so pruning
+        against it un-hid series the user had deliberately hidden.
+        """
+        filtered = {k for k in all_keys if not k.endswith(":pwm")}
+        if filtered == self._known_keys:
+            return
+        added = filtered - self._known_keys
+        self._known_keys = filtered
+        # After `restore_mode` the first registration is not "new hardware" — it
+        # is the hardware the saved hidden set already describes, so the mode rule
+        # must sit that one out or it overwrites the user's own adjustments.
+        groups = _MODE_GROUPS.get(self._active_mode) if self._mode_rule_armed else None
+        self._mode_rule_armed = True
+        changed = False
+        if groups:
+            for key in added:
+                if self.classify(key) not in groups and key not in self._hidden_keys:
+                    self._hidden_keys.add(key)
+                    changed = True
+        if changed:
+            self.selection_changed.emit()
+
+    # -- persistence --
+
+    def to_dict(self) -> dict:
+        return {"hidden_keys": sorted(self._hidden_keys)}
+
+    def load_hidden(self, hidden: list[str]) -> None:
+        """Restore hidden keys from persisted data."""
+        self._hidden_keys = set(hidden)
+
+    def replace_hidden(self, hidden: list[str]) -> None:
+        """Replace the hidden set wholesale (a settings import) and announce it.
+
+        Unlike ``load_hidden`` — the startup restore, before anything renders —
+        this emits ``selection_changed`` so the chart redraws and MainWindow
+        persists the new set.
+        """
+        new = set(hidden)
+        if new != self._hidden_keys:
+            self._hidden_keys = new
+            self.selection_changed.emit()

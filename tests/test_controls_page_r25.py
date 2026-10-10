@@ -1,0 +1,1230 @@
+"""Tests for Refinement 25: Card ordering, fixed sizing, flow layout, syslog fields."""
+
+from __future__ import annotations
+
+from PySide6.QtWidgets import QPushButton
+
+from ventulus.services.profile_service import (
+    ControlMode,
+    CurveConfig,
+    CurveType,
+    LogicalControl,
+    Profile,
+)
+from ventulus.ui.pages.controls_page import ControlsPage
+from ventulus.ui.widgets.control_card import ControlCard
+from ventulus.ui.widgets.draggable_flow import DraggableFlowContainer
+from ventulus.ui.widgets.flow_layout import FlowLayout
+
+
+class TestFlowLayoutInvalidation:
+    """FlowLayout.addItem() must trigger invalidation so cards are positioned."""
+
+    def test_add_item_invalidates(self, qtbot):
+        container = DraggableFlowContainer()
+        qtbot.addWidget(container)
+        btn = QPushButton("Test")
+        btn.setFixedSize(100, 50)
+        container.add_card(btn, "t1")
+        # After add, layout should have the item
+        assert container.flow_layout().count() == 1
+
+    def test_add_item_calls_invalidate(self, qtbot):
+        """FlowLayout.addItem() must call invalidate() so layout recalculates.
+
+        Verify by showing the container and checking positions after Qt processes events.
+        """
+        from PySide6.QtWidgets import QWidget
+
+        container = QWidget()
+        layout = FlowLayout(container, margin=4, h_spacing=6, v_spacing=6)
+        qtbot.addWidget(container)
+        container.resize(500, 200)
+        container.show()
+        qtbot.waitExposed(container)
+
+        for i in range(3):
+            btn = QPushButton(f"Card {i}")
+            btn.setFixedSize(100, 50)
+            layout.addWidget(btn)
+
+        # Process events so Qt triggers setGeometry → _do_layout
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.processEvents()
+
+        # Cards should now have been positioned at different x offsets
+        positions = set()
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item and item.geometry().width() > 0:
+                positions.add(item.geometry().x())
+        assert len(positions) > 1, "Cards must have different x positions after layout"
+
+    def test_cards_positioned_in_hidden_parent(self, qtbot):
+        """Cards must be positioned even when parent is not yet shown.
+
+        This is the root cause of R27: FlowLayout used isVisible() which
+        checks the entire parent chain. Before the window is shown, all
+        children report isVisible()=False, so _do_layout() skipped them
+        all, leaving cards stacked at (0,0). The fix uses isHidden()
+        which only checks if the widget itself was explicitly hidden.
+        """
+        from PySide6.QtCore import QRect
+        from PySide6.QtWidgets import QWidget
+
+        container = QWidget()  # NOT shown — simulates pre-show construction
+        layout = FlowLayout(container, margin=4, h_spacing=6, v_spacing=6)
+        qtbot.addWidget(container)
+
+        for i in range(3):
+            btn = QPushButton(f"Card {i}")
+            btn.setFixedSize(100, 50)
+            layout.addWidget(btn)
+
+        # Force layout calculation at width=500 — simulates what Qt does on resize
+        layout._do_layout(QRect(0, 0, 500, 200), test_only=False)
+
+        # Cards must have different x positions, not all stacked at (0,0)
+        positions = set()
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item and item.geometry().width() > 0:
+                positions.add(item.geometry().x())
+        assert len(positions) > 1, "Cards stacked — layout skipped items in hidden parent"
+
+
+class TestCurveCardAppend:
+    """New curve cards append to the end of the sequence."""
+
+    def test_new_curve_appends_to_end(self, qtbot, app_state, profile_service):
+        page = ControlsPage(state=app_state, profile_service=profile_service)
+        qtbot.addWidget(page)
+
+        profile = page._get_current_profile()
+        initial_count = len(profile.curves)
+
+        # Add a new curve
+        page._on_add_curve(CurveType.FLAT)
+
+        profile = page._get_current_profile()
+        assert len(profile.curves) == initial_count + 1
+        assert profile.curves[-1].name.startswith("New Flat")
+
+    def test_existing_curve_order_preserved_after_add(self, qtbot, app_state, profile_service):
+        page = ControlsPage(state=app_state, profile_service=profile_service)
+        qtbot.addWidget(page)
+
+        profile = page._get_current_profile()
+        original_ids = [c.id for c in profile.curves]
+
+        page._on_add_curve(CurveType.LINEAR)
+
+        profile = page._get_current_profile()
+        new_ids = [c.id for c in profile.curves]
+        # Original IDs should appear at the same positions
+        assert new_ids[: len(original_ids)] == original_ids
+
+
+class TestCurveOrderStability:
+    """Curve card order survives refresh/rebuild cycles."""
+
+    def test_order_survives_refresh(self, qtbot, app_state, profile_service):
+        page = ControlsPage(state=app_state, profile_service=profile_service)
+        qtbot.addWidget(page)
+
+        profile = page._get_current_profile()
+        if len(profile.curves) < 2:
+            page._on_add_curve(CurveType.FLAT)
+            page._on_add_curve(CurveType.LINEAR)
+            profile = page._get_current_profile()
+
+        ids_before = [c.id for c in profile.curves]
+        page._refresh_all()
+        ids_after = [c.id for c in profile.curves]
+        assert ids_before == ids_after
+
+    def test_reorder_persists_through_refresh(self):
+        """Model-level: reordering profile.curves survives iteration."""
+        c1 = CurveConfig(id="c1", name="A", type=CurveType.FLAT)
+        c2 = CurveConfig(id="c2", name="B", type=CurveType.LINEAR)
+        c3 = CurveConfig(id="c3", name="C", type=CurveType.GRAPH)
+        profile = Profile(id="test", name="Test", curves=[c1, c2, c3])
+
+        # Simulate drag reorder: c3, c1, c2
+        curve_map = {c.id: c for c in profile.curves}
+        profile.curves = [curve_map["c3"], curve_map["c1"], curve_map["c2"]]
+
+        # Simulate refresh: iterate profile.curves
+        rebuilt = [c.id for c in profile.curves]
+        assert rebuilt == ["c3", "c1", "c2"]
+
+
+class TestControlCardSizing:
+    """Fan Role cards: fixed width, minimum-height floor (DEC-128)."""
+
+    def test_control_card_width_fixed_height_floored(self, qtbot):
+        control = LogicalControl(name="Test Role", mode=ControlMode.CURVE)
+        card = ControlCard(control, [])
+        qtbot.addWidget(card)
+        from ventulus.ui.theme import active_theme
+        from ventulus.ui.widgets.card_metrics import DEFAULT_CARD_SIZE, card_dimensions
+
+        w, h = card_dimensions(active_theme().base_font_size_pt, DEFAULT_CARD_SIZE)
+        assert card.minimumWidth() == w
+        assert card.maximumWidth() == w
+        assert card.minimumHeight() == h
+        # Height is a floor, not a cap — content can grow the card taller.
+        assert card.maximumHeight() > h
+
+
+class TestControlCardFlowContainer:
+    """Fan Role cards use DraggableFlowContainer like Curve cards."""
+
+    def test_controls_use_flow_container(self, qtbot, app_state, profile_service):
+        page = ControlsPage(state=app_state, profile_service=profile_service)
+        qtbot.addWidget(page)
+        assert hasattr(page, "_controls_flow")
+        assert isinstance(page._controls_flow, DraggableFlowContainer)
+
+    def test_new_control_appends_to_end(self, qtbot, app_state, profile_service):
+        page = ControlsPage(state=app_state, profile_service=profile_service)
+        qtbot.addWidget(page)
+
+        profile = page._get_current_profile()
+        initial_count = len(profile.controls)
+
+        page._on_new_control(single=True, name="Appended Role")
+
+        profile = page._get_current_profile()
+        assert len(profile.controls) == initial_count + 1
+        assert profile.controls[-1].name == "Appended Role"
+
+    def test_control_reorder_syncs_model(self):
+        """Reordering controls updates profile.controls list."""
+        c1 = LogicalControl(id="r1", name="First", mode=ControlMode.CURVE)
+        c2 = LogicalControl(id="r2", name="Second", mode=ControlMode.CURVE)
+        c3 = LogicalControl(id="r3", name="Third", mode=ControlMode.CURVE)
+        profile = Profile(id="test", name="Test", controls=[c1, c2, c3])
+
+        # Simulate reorder: r3, r1, r2
+        control_map = {c.id: c for c in profile.controls}
+        profile.controls = [control_map["r3"], control_map["r1"], control_map["r2"]]
+
+        assert profile.controls[0].name == "Third"
+        assert profile.controls[1].name == "First"
+        assert profile.controls[2].name == "Second"
+
+
+class TestManualOverrideWiring:
+    """A card's Manual toggle must drive the control loop's per-control API."""
+
+    @staticmethod
+    def _page_with_one_control(qtbot, app_state, profile_service, mock_loop):
+        from ventulus.services.profile_service import ControlMember
+
+        page = ControlsPage(
+            state=app_state, profile_service=profile_service, demo_controller=mock_loop
+        )
+        qtbot.addWidget(page)
+        curve = CurveConfig(id="c1", name="C", type=CurveType.FLAT, flat_output_pct=40.0)
+        ctrl = LogicalControl(
+            id="lc1",
+            name="LC",
+            mode=ControlMode.CURVE,
+            curve_id="c1",
+            members=[ControlMember(source="openfan", member_id="openfan:ch00")],
+        )
+        page._refresh_controls_grid(Profile(id="p", name="P", controls=[ctrl], curves=[curve]))
+        return page
+
+    def test_toggle_on_calls_set_control_manual(self, qtbot, app_state, profile_service):
+        from unittest.mock import MagicMock
+
+        mock_loop = MagicMock()
+        page = self._page_with_one_control(qtbot, app_state, profile_service, mock_loop)
+
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        mock_loop.set_control_manual.assert_called_once()
+        assert mock_loop.set_control_manual.call_args[0][0] == "lc1"
+
+    def test_toggle_off_calls_clear_control_manual(self, qtbot, app_state, profile_service):
+        from unittest.mock import MagicMock
+
+        mock_loop = MagicMock()
+        page = self._page_with_one_control(qtbot, app_state, profile_service, mock_loop)
+
+        btn = page._control_cards["lc1"]._manual_btn
+        btn.setChecked(True)
+        btn.setChecked(False)
+
+        mock_loop.clear_control_manual.assert_called_once_with("lc1")
+
+
+class TestManualOverrideLiveWiring:
+    """In live (daemon-connected) mode the Manual toggle drives the daemon
+    override API (DEC-163), not the local loop — with renew + fail-safe revert."""
+
+    @staticmethod
+    def _grant(token=1, renew_secs=5):
+        from ventulus.api.models import OverrideGrant
+
+        return OverrideGrant(
+            control_id="lc1",
+            override_token=token,
+            pwm_percent=50,
+            ttl_secs=15,
+            renew_secs=renew_secs,
+            expires_in_secs=15,
+        )
+
+    @classmethod
+    def _live_page(cls, qtbot, app_state, profile_service, client):
+        from ventulus.services.profile_service import ControlMember
+
+        page = ControlsPage(state=app_state, profile_service=profile_service, client=client)
+        qtbot.addWidget(page)
+        curve = CurveConfig(id="c1", name="C", type=CurveType.FLAT, flat_output_pct=40.0)
+        ctrl = LogicalControl(
+            id="lc1",
+            name="LC",
+            mode=ControlMode.CURVE,
+            curve_id="c1",
+            members=[ControlMember(source="openfan", member_id="openfan:ch00")],
+        )
+        page._refresh_controls_grid(Profile(id="p", name="P", controls=[ctrl], curves=[curve]))
+        return page
+
+    def test_toggle_on_takes_override_and_renews(self, qtbot, app_state, profile_service):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        client.override_take.assert_called_once()
+        assert client.override_take.call_args[0][0] == "lc1"
+        assert page._overrides["lc1"] == 7
+        assert page._override_renew_timer.isActive()
+        # The renew cadence is driven by the grant's renew_secs (the GUI ignores
+        # ttl_secs entirely), so the deadman is honoured by re-pinning well inside
+        # the daemon's TTL. _grant() advises renew_secs=5 → a 5000 ms interval.
+        assert page._override_renew_timer.interval() == 5000
+        # The demo controller is never present in live mode.
+        assert page._demo_controller is None
+
+    def test_toggle_off_releases_override(self, qtbot, app_state, profile_service):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+
+        btn = page._control_cards["lc1"]._manual_btn
+        btn.setChecked(True)
+        btn.setChecked(False)
+
+        client.override_release.assert_called_once_with("lc1", 7, timeout=2.0)
+        assert "lc1" not in page._overrides
+        assert not page._override_renew_timer.isActive()
+
+    def test_take_failure_reverts_card(self, qtbot, app_state, profile_service):
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+
+        client = MagicMock()
+        client.override_take.side_effect = DaemonError(
+            code="internal_error", message="x", status=500
+        )
+        page = self._live_page(qtbot, app_state, profile_service, client)
+
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        assert "lc1" not in page._overrides
+        assert not page._control_cards["lc1"]._manual_btn.isChecked()
+        # A non-actionable code stays SILENT on the take path.
+        assert page._unsaved_label.text() == ""
+
+    def test_take_refused_outside_the_running_profile_says_so(
+        self, qtbot, app_state, profile_service
+    ):
+        """The daemon answers a take for a control its running profile lacks with
+        404 `validation_error` — the profile changed under the page (the tray, say).
+        The card reverting with no word was the silent refusal."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+
+        client = MagicMock()
+        client.override_take.side_effect = DaemonError(
+            code="validation_error", message="no control 'lc1' in the active profile", status=404
+        )
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        assert page._unsaved_label.text() == ""
+
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        assert not page._control_cards["lc1"]._manual_btn.isChecked()
+        assert "running profile" in page._unsaved_label.text()
+
+    def test_take_refused_by_an_openfan_firmware_update_says_so(
+        self, qtbot, app_state, profile_service
+    ):
+        """DEC-481's refusal, the one a user can act on (wait for the update),
+        reverted the card with no explanation."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import OPENFAN_MAINTENANCE_REASON, DaemonError
+
+        client = MagicMock()
+        client.override_take.side_effect = DaemonError(
+            code="validation_error",
+            message="an OpenFan firmware update is running",
+            status=409,
+            retryable=True,
+            details={"reason": OPENFAN_MAINTENANCE_REASON},
+        )
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        assert page._unsaved_label.text() == ""
+
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        assert not page._control_cards["lc1"]._manual_btn.isChecked()
+        assert "firmware update" in page._unsaved_label.text()
+
+    def test_manual_figure_names_the_duty_a_member_floor_holds(
+        self, qtbot, app_state, profile_service
+    ):
+        """The grant echoes the request, so a DC pump asked for 40 % read "40%"
+        while it ran at 70 %. The poll's per-fan `last_commanded_pwm` says what
+        the fans run at; the card now shows it beside the request."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.models import ControlOutput, DaemonStatus, FanReading
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        card = page._control_cards["lc1"]
+        card._manual_btn.setChecked(True)
+        card._manual_slider.setValue(40)
+        page._flush_override_values()
+        requested = card._manual_slider.value()
+        assert card._manual_pct_label.text() == f"{requested}%"  # precondition
+
+        app_state.set_fans([FanReading(id="openfan:ch00", source="openfan", last_commanded_pwm=70)])
+        page._apply_live_outputs(
+            DaemonStatus(control_outputs=[ControlOutput(control_id="lc1", output_pct=requested)])
+        )
+        assert card._manual_pct_label.text() == f"{requested}% · fans at 70%"
+
+        # Opposite branch: the fan runs at the request, so the figure is bare.
+        app_state.set_fans(
+            [FanReading(id="openfan:ch00", source="openfan", last_commanded_pwm=requested)]
+        )
+        page._apply_live_outputs(
+            DaemonStatus(control_outputs=[ControlOutput(control_id="lc1", output_pct=requested)])
+        )
+        assert card._manual_pct_label.text() == f"{requested}%"
+
+    def test_renew_failure_reverts_card(self, qtbot, app_state, profile_service):
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        client.override_renew.side_effect = DaemonError(
+            code="override_expired", message="gone", status=404
+        )
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+        assert page._control_cards["lc1"]._manual_btn.isChecked()
+
+        page._renew_overrides()
+
+        assert "lc1" not in page._overrides
+        assert not page._control_cards["lc1"]._manual_btn.isChecked()
+
+    def test_renew_skipped_while_prior_renew_in_flight(self, qtbot, app_state, profile_service):
+        """CONC-4 (2026-07-21 audit): a renew still on the worker (daemon
+        slower than one renew period) must suppress this cycle's dispatch for
+        that control, keeping the worker queue bounded under a stalled daemon;
+        the arriving result re-enables dispatch."""
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+        client.override_renew.reset_mock()
+
+        page._renew_in_flight.add("lc1")  # prior renew still pending
+        page._renew_overrides()
+        client.override_renew.assert_not_called()
+
+        page._on_renew_result("lc1", 7, 7, None)  # pending result lands
+        assert "lc1" not in page._renew_in_flight
+
+        page._renew_overrides()  # next cycle dispatches again
+        assert client.override_renew.call_count == 1
+
+    def test_renew_in_flight_flag_lifecycle_completes(self, qtbot, app_state, profile_service):
+        """A normal renew cycle marks and clears the in-flight flag. Under the
+        synchronous test wiring the two timer fires run sequentially (each
+        completes inline) — true overlap is pinned by the previous test via
+        manual flag injection; this one pins the clean end-state and token
+        idempotence of back-to-back cycles."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.models import OverrideRenewResult
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        client.override_renew.return_value = OverrideRenewResult(
+            control_id="lc1", override_token=7, ttl_secs=15, expires_in_secs=15
+        )
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        page._renew_overrides()
+        page._renew_overrides()
+
+        assert page._renew_in_flight == set()
+        assert page._overrides["lc1"] == 7
+
+    def test_renew_in_flight_cleared_on_superseded_error(self, qtbot, app_state, profile_service):
+        """The result handler clears the flag on EVERY outcome — including the
+        self-superseded stale rejection it otherwise ignores — so a re-pinned
+        control keeps renewing."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+        page._overrides["lc1"] = 9  # re-pin superseded token 7
+        page._renew_in_flight.add("lc1")
+
+        page._on_renew_result(
+            "lc1", 7, None, DaemonError(code="stale_fencing_token", message="x", status=409)
+        )
+
+        assert "lc1" not in page._renew_in_flight
+        assert page._overrides["lc1"] == 9
+
+    def test_stale_renew_success_after_own_repin_does_not_clobber_token(
+        self, qtbot, app_state, profile_service
+    ):
+        """Success twin of the stale-rejection guard (DEC-220): an in-flight
+        renew for a superseded token that SUCCEEDS must clear the in-flight
+        flag without overwriting the re-pinned token."""
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+        page._overrides["lc1"] = 9  # re-pin superseded token 7
+        page._renew_in_flight.add("lc1")
+
+        page._on_renew_result("lc1", 7, 8, None)  # old renew came back OK
+
+        assert page._overrides["lc1"] == 9  # re-pinned token survives
+        assert "lc1" not in page._renew_in_flight
+
+    def test_renew_worker_crash_still_delivers_result_and_clears_flag(
+        self, qtbot, app_state, profile_service
+    ):
+        """CONC-4 review F1: a non-DaemonError escape from the client layer
+        must still produce a renew result (shaped as internal_error) — the
+        in-flight flag clears and the card reverts instead of renews stalling
+        silently until release."""
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        client.override_renew.side_effect = RuntimeError("boom")
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        page._renew_overrides()
+
+        assert page._renew_in_flight == set()
+        assert "lc1" not in page._overrides
+        assert not page._control_cards["lc1"]._manual_btn.isChecked()
+
+    def test_take_worker_crash_still_delivers_result_and_does_not_latch_manual(
+        self, qtbot, app_state, profile_service
+    ):
+        """AUD-m: a non-DaemonError escape from `take` must still produce a take
+        result, shaped as internal_error — the same rule CONC-4 gave `renew`.
+
+        `take_result` is the only thing that resolves a take, so emitting nothing
+        left `_manual_intent` latched with no token: the card sat in Manual,
+        nothing was pinned daemon-side, no renew was ever scheduled, and
+        `_on_status_reconcile` permanently excluded the card because it believes a
+        manual intent is still pending. A failed take must land as a FAILED take,
+        never as silence.
+        """
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.side_effect = RuntimeError("boom")
+        page = self._live_page(qtbot, app_state, profile_service, client)
+
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        assert "lc1" not in page._overrides, "no override may be recorded for a failed take"
+        assert not page._control_cards["lc1"]._manual_btn.isChecked(), (
+            "the card must fall back out of Manual — a latched toggle with no token "
+            "is the phantom state this fix removes"
+        )
+        assert "lc1" not in page._manual_intent, (
+            "the manual intent must be cleared, or _on_status_reconcile excludes this "
+            "card from reconciliation for the rest of the session"
+        )
+
+    def test_release_worker_crash_is_contained(self, qtbot, app_state, profile_service):
+        """AUD-m: `release` is fire-and-forget, so a non-DaemonError escape has no
+        result to deliver — but it must not propagate out of the worker slot. The
+        daemon's deadman reverts the override either way."""
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        client.override_release.side_effect = RuntimeError("boom")
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        page._release_override("lc1")
+
+        assert "lc1" not in page._overrides
+        assert "lc1" not in page._renew_in_flight
+
+    def test_release_clears_in_flight_flag(self, qtbot, app_state, profile_service):
+        """Releasing an override drops any pending-renew marker so a fresh
+        take/renew cycle starts clean."""
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+        page._renew_in_flight.add("lc1")
+
+        page._release_override("lc1")
+
+        assert "lc1" not in page._renew_in_flight
+
+    def test_stale_renew_after_own_repin_does_not_revert(self, qtbot, app_state, profile_service):
+        """DEC-220 release-review regression (P2): a slider re-pin mints a new
+        fencing token; a renew dispatched for the PRIOR token then comes back
+        `stale_fencing_token`. Because the held token no longer matches the token
+        the renew was issued for, the rejection is a self-inflicted race — the card
+        must NOT revert and the valid re-pinned override must survive."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+        assert page._overrides["lc1"] == 7
+
+        # A re-pin completed and installed a newer token (9) while a renew for the
+        # old token (7) was still in flight.
+        page._overrides["lc1"] = 9
+        page._on_renew_result(
+            "lc1", 7, None, DaemonError(code="stale_fencing_token", message="x", status=409)
+        )
+
+        assert page._overrides["lc1"] == 9  # valid re-pinned token survives
+        assert page._control_cards["lc1"]._manual_btn.isChecked()  # card stays Manual
+        assert page._unsaved_label.text() == ""  # no spurious "superseded" message
+
+    def test_stale_renew_for_current_token_still_reverts(self, qtbot, app_state, profile_service):
+        """Contrast to the self-race: when the rejected renew's token IS still the
+        held one (a genuine external supersession, no re-pin), the card reverts and
+        surfaces the message exactly as before — the guard must not swallow that."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        page._on_renew_result(
+            "lc1", 7, None, DaemonError(code="stale_fencing_token", message="x", status=409)
+        )
+
+        assert "lc1" not in page._overrides
+        assert not page._control_cards["lc1"]._manual_btn.isChecked()
+        assert "superseded" in page._unsaved_label.text()
+
+    def test_thermal_abort_surfaces_message_take_path(self, qtbot, app_state, profile_service):
+        """T1b (take path): a thermal_abort on override_take must revert the card
+        AND surface the safety message on the page status chip (not a silent
+        revert like a benign lapse)."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+
+        client = MagicMock()
+        client.override_take.side_effect = DaemonError(
+            code="thermal_abort", message="held", status=409
+        )
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        assert page._unsaved_label.text() == ""  # baseline: nothing surfaced yet
+
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        # Card reverts to auto.
+        assert "lc1" not in page._overrides
+        assert not page._control_cards["lc1"]._manual_btn.isChecked()
+        # Thermal message surfaced.
+        assert "thermal emergency" in page._unsaved_label.text()
+
+    def test_thermal_abort_surfaces_message_renew_path(self, qtbot, app_state, profile_service):
+        """T1b (renew path): a thermal_abort on override_renew must revert the card
+        AND surface the safety message."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        client.override_renew.side_effect = DaemonError(
+            code="thermal_abort", message="held", status=409
+        )
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+        assert page._control_cards["lc1"]._manual_btn.isChecked()
+
+        page._renew_overrides()
+
+        assert "lc1" not in page._overrides
+        # renew_secs bookkeeping drained in lockstep on the failure path.
+        assert "lc1" not in page._override_renew_secs
+        assert not page._control_cards["lc1"]._manual_btn.isChecked()
+        assert "thermal emergency" in page._unsaved_label.text()
+
+    def test_stale_token_surfaces_message_and_expiry_is_silent(
+        self, qtbot, app_state, profile_service
+    ):
+        """T1e: a stale_fencing_token renew reject shows the 'superseded' message,
+        whereas an override_expired reject stays SILENT — the distinctness that
+        separates client supersession from a benign lapse. Both still revert."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+
+        # stale_fencing_token → superseded message on the chip.
+        stale_client = MagicMock()
+        stale_client.override_take.return_value = self._grant(token=7)
+        stale_client.override_renew.side_effect = DaemonError(
+            code="stale_fencing_token", message="superseded", status=409
+        )
+        stale_page = self._live_page(qtbot, app_state, profile_service, stale_client)
+        stale_page._control_cards["lc1"]._manual_btn.setChecked(True)
+        stale_page._renew_overrides()
+        assert "lc1" not in stale_page._overrides
+        assert not stale_page._control_cards["lc1"]._manual_btn.isChecked()
+        assert "superseded" in stale_page._unsaved_label.text()
+
+        # override_expired → quiet revert, NO message (the distinctness).
+        expired_client = MagicMock()
+        expired_client.override_take.return_value = self._grant(token=7)
+        expired_client.override_renew.side_effect = DaemonError(
+            code="override_expired", message="gone", status=404
+        )
+        expired_page = self._live_page(qtbot, app_state, profile_service, expired_client)
+        expired_page._control_cards["lc1"]._manual_btn.setChecked(True)
+        expired_page._renew_overrides()
+        assert "lc1" not in expired_page._overrides
+        assert not expired_page._control_cards["lc1"]._manual_btn.isChecked()
+        assert expired_page._unsaved_label.text() == ""
+        # Compare surfaces: supersession speaks, expiry stays silent.
+        assert expired_page._unsaved_label.text() != stale_page._unsaved_label.text()
+
+    def test_activation_success_clears_live_overrides(self, qtbot, app_state, profile_service):
+        """T1c (DEC-214): a successful profile activation clears all held overrides
+        and stops the renew timer. Activation now runs through the shared
+        ``ProfileService.activate`` path; the page follows it via the
+        ``active_changed`` signal → ``_on_active_profile_changed`` → ``_refresh_all``
+        → ``_refresh_controls_grid`` → ``_release_all_overrides``."""
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+
+        # Hold a live override.
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+        assert page._overrides == {"lc1": 7}
+        assert page._override_renew_timer.isActive()
+
+        # Activating a DIFFERENT profile fires active_changed (set_active is
+        # edge-triggered), which the page follows to rebuild the grid + release
+        # every held override. The mock client's activate_profile returns a
+        # truthy result so the daemon round-trip "succeeds".
+        prof = page._profile_service.create_profile("Activate-Me")
+        page._profile_service.activate(prof.id, client=client)
+
+        assert page._overrides == {}
+        assert page._override_renew_timer.isActive() is False
+
+    def test_renew_updates_token(self, qtbot, app_state, profile_service):
+        from unittest.mock import MagicMock
+
+        from ventulus.api.models import OverrideRenewResult
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        client.override_renew.return_value = OverrideRenewResult(
+            control_id="lc1", override_token=8, ttl_secs=15, expires_in_secs=15
+        )
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+
+        page._renew_overrides()
+
+        assert page._overrides["lc1"] == 8
+
+    def test_rebuild_releases_held_overrides(self, qtbot, app_state, profile_service):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+        assert page._overrides
+
+        # Rebuilding the grid (e.g. a profile switch) must release the override
+        # so card state never diverges from the daemon.
+        page._refresh_controls_grid(Profile(id="p", name="P", controls=[], curves=[]))
+
+        client.override_release.assert_called_once_with("lc1", 7, timeout=2.0)
+        assert not page._overrides
+
+    def test_slider_drag_debounces_into_one_repin(self, qtbot, app_state, profile_service):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+        page._control_cards["lc1"]._manual_btn.setChecked(True)
+        client.override_take.reset_mock()
+
+        # Several rapid drag values queue; one flush re-pins with only the last.
+        page._on_card_manual_value("lc1", 60)
+        page._on_card_manual_value("lc1", 70)
+        page._on_card_manual_value("lc1", 80)
+        page._flush_override_values()
+
+        client.override_take.assert_called_once_with("lc1", 80, timeout=2.0)
+
+    def test_renew_interval_is_min_across_held_grants(self, qtbot, app_state, profile_service):
+        """F-2: with heterogeneous renew cadences the single shared renew timer
+        fires on the MIN cadence — a later, larger renew_secs must NOT stretch
+        the interval past an earlier, shorter override's TTL (the old
+        last-writer-wins bug, which setInterval would compound by also resetting
+        the running countdown)."""
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        page = self._live_page(qtbot, app_state, profile_service, client)
+
+        # Take the shorter-cadence override first (5 s), then a longer one (10 s).
+        client.override_take.return_value = self._grant(token=1, renew_secs=5)
+        page._take_override("lc1", 50)
+        assert page._override_renew_timer.interval() == 5000
+
+        client.override_take.return_value = self._grant(token=2, renew_secs=10)
+        page._take_override("lc2", 50)
+
+        # MIN(5, 10) = 5 s — NOT the last grant's 10 s.
+        assert page._override_renew_timer.interval() == 5000
+        assert page._override_renew_secs == {"lc1": 5, "lc2": 10}
+
+    def test_renew_interval_tightens_when_shorter_grant_added(
+        self, qtbot, app_state, profile_service
+    ):
+        """F-2: adding a shorter-cadence override to an existing longer one
+        tightens the running timer down to the new minimum."""
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        page = self._live_page(qtbot, app_state, profile_service, client)
+
+        client.override_take.return_value = self._grant(token=1, renew_secs=10)
+        page._take_override("lc1", 50)
+        assert page._override_renew_timer.interval() == 10000
+
+        client.override_take.return_value = self._grant(token=2, renew_secs=5)
+        page._take_override("lc2", 50)
+        assert page._override_renew_timer.interval() == 5000  # tightened to the min
+
+    def test_release_drops_renew_secs_entry(self, qtbot, app_state, profile_service):
+        """The per-grant renew_secs bookkeeping is dropped in lockstep with the
+        override token so a stale entry can't skew a later MIN."""
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7, renew_secs=5)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+
+        page._take_override("lc1", 50)
+        assert page._override_renew_secs == {"lc1": 5}
+
+        page._release_override("lc1")
+        assert page._override_renew_secs == {}
+
+    def test_take_uses_bounded_http_timeout(self, qtbot, app_state, profile_service):
+        """F-3: override_take passes an explicit ~2 s HTTP timeout so a slow or
+        half-dead daemon can only freeze the Qt main thread for ~2 s, not the
+        full 5 s client default."""
+        from unittest.mock import MagicMock
+
+        from ventulus.ui.pages.controls_page import _OVERRIDE_HTTP_TIMEOUT_S
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        page = self._live_page(qtbot, app_state, profile_service, client)
+
+        page._take_override("lc1", 50)
+
+        assert client.override_take.call_args.kwargs["timeout"] == _OVERRIDE_HTTP_TIMEOUT_S
+        assert _OVERRIDE_HTTP_TIMEOUT_S == 2.0
+
+    def test_renew_and_release_use_bounded_http_timeout(self, qtbot, app_state, profile_service):
+        """F-3: renew and release also pass the bounded timeout (renew loops over
+        every held override, so an unbounded call there is the worst freeze)."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.models import OverrideRenewResult
+        from ventulus.ui.pages.controls_page import _OVERRIDE_HTTP_TIMEOUT_S
+
+        client = MagicMock()
+        client.override_take.return_value = self._grant(token=7)
+        client.override_renew.return_value = OverrideRenewResult(
+            control_id="lc1", override_token=8, ttl_secs=15, expires_in_secs=15
+        )
+        page = self._live_page(qtbot, app_state, profile_service, client)
+
+        page._take_override("lc1", 50)
+        page._renew_overrides()
+        page._release_override("lc1")
+
+        assert client.override_renew.call_args.kwargs["timeout"] == _OVERRIDE_HTTP_TIMEOUT_S
+        assert client.override_release.call_args.kwargs["timeout"] == _OVERRIDE_HTTP_TIMEOUT_S
+
+
+class TestCurveEditorSensorLabel:
+    """Curve-editor sensor-combo label formatting (`_sensor_combo_label`)."""
+
+    def test_renders_zero_celsius_and_hides_missing(self, qtbot, app_state, profile_service):
+        """B2: a real 0.0 °C reading must render in the combo label (regression —
+        a falsy `if s.value_c` dropped 0.0). A genuinely absent reading (None) stays
+        hidden, and a normal value is unaffected."""
+        from ventulus.api.models import SensorReading
+
+        page = ControlsPage(state=app_state, profile_service=profile_service)
+        qtbot.addWidget(page)
+        zero = SensorReading(
+            id="cpu", kind="cpu_temp", label="Tctl", value_c=0.0, chip_name="k10temp"
+        )
+        warm = SensorReading(
+            id="cpu", kind="cpu_temp", label="Tctl", value_c=42.5, chip_name="k10temp"
+        )
+        missing = SensorReading(
+            id="cpu", kind="cpu_temp", label="Tctl", value_c=None, chip_name="k10temp"
+        )  # type: ignore[arg-type]
+        assert "0.0" in page._sensor_combo_label(zero)  # was absent before the fix
+        assert "42.5" in page._sensor_combo_label(warm)  # format unchanged
+        assert "°C" not in page._sensor_combo_label(missing)  # None stays hidden
+
+
+_FFA_D_VIOLATION = {
+    "field": "curves[0].sync_control_id",
+    "reason": "UNKNOWN_CONTROL_REF",
+    "description": "sync references control '', which does not exist in this profile",
+}
+
+
+class TestOfflineDraftUX:
+    """Offline Save/Activate UX (slice 6) built on the 6b daemon-backed
+    persistence state (internal offline/unpublished tracking + is_published)."""
+
+    # DEC-214: the combo "(draft)" badge tests (test_draft_badge_for_unpublished_profile,
+    # test_no_draft_badge_in_local_mode) were deleted with the page profile combo —
+    # the draft state still lives in ProfileService but is no longer shown on this page.
+    # Their `_daemon_ps` helper went with them (no remaining caller).
+
+    def test_save_offline_marks_draft(self, qtbot, app_state):
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonTimeout
+        from ventulus.services.profile_service import ProfileService
+
+        client = MagicMock()
+        client.create_profile.side_effect = DaemonTimeout()
+        ps = ProfileService(client=client)
+        ps._profiles["p1"] = Profile(id="p1", name="P1")
+        ps.set_active("p1")
+        page = ControlsPage(state=app_state, profile_service=ps, client=client)
+        qtbot.addWidget(page)
+
+        page._on_save_profile()
+
+        assert "not published" in page._unsaved_label.text().lower()
+        assert "offline" in page._unsaved_label.text().lower()
+        assert "refused" not in page._unsaved_label.text().lower()
+        assert page._unsaved_label.property("class") == "WarningChip"
+
+    # FFA-d: a profile the daemon refused was reported as "daemon offline", its
+    # reasons only logged; a rename gave no feedback at all; soft warnings on an
+    # accepted save were dropped.
+
+    def _refusing_page(self, qtbot, app_state, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from PySide6.QtWidgets import QMessageBox
+
+        from ventulus.api.errors import DaemonError
+        from ventulus.services.profile_service import ProfileService
+
+        client = MagicMock()
+        client.create_profile.side_effect = DaemonError(
+            code="validation_error",
+            message="profile failed validation",
+            status=400,
+            details={"field_violations": [_FFA_D_VIOLATION]},
+        )
+        ps = ProfileService(client=client)
+        ps._profiles["p1"] = Profile(id="p1", name="P1")
+        ps.set_active("p1")
+        page = ControlsPage(state=app_state, profile_service=ps, client=client)
+        qtbot.addWidget(page)
+        # Held on the test instance, which pytest keeps until teardown ends: a
+        # page held only by the test's locals is cyclic garbage once the test
+        # returns, and a collection that fires during teardown destroyed its
+        # curve editor's ViewBox before the AxisItem painted over it (DEC-230's
+        # out-of-order destruction). This way qtbot's deleteLater takes it down.
+        self._page = page
+        shown: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            lambda _parent, title, text, *a, **k: shown.append((title, text)),
+        )
+        return page, client, shown
+
+    def test_a_refused_save_says_refused_and_shows_the_daemons_reasons(
+        self, qtbot, app_state, monkeypatch
+    ):
+        page, client, shown = self._refusing_page(qtbot, app_state, monkeypatch)
+
+        page._save_btn.click()
+
+        text = page._unsaved_label.text().lower()
+        assert "refused" in text and "not published" in text
+        assert "offline" not in text
+        assert page._unsaved_label.property("class") == "CriticalChip"
+        assert len(shown) == 1
+        assert _FFA_D_VIOLATION["description"] in shown[0][1]
+        assert _FFA_D_VIOLATION["description"] in page._unsaved_label.toolTip()
+        # Nothing the daemon refused is re-applied.
+        client.activate_profile.assert_not_called()
+
+    def test_the_reasons_do_not_outlive_the_next_edit(self, qtbot, app_state, monkeypatch):
+        page, _client, _shown = self._refusing_page(qtbot, app_state, monkeypatch)
+        page._save_btn.click()
+        assert page._unsaved_label.toolTip(), "precondition: the refusal set a detail"
+
+        page._set_unsaved(True)
+
+        assert page._unsaved_label.text() == "Unsaved changes"
+        assert page._unsaved_label.toolTip() == ""
+
+    def test_a_refused_rename_says_so(self, qtbot, app_state, monkeypatch):
+        from PySide6.QtWidgets import QInputDialog
+
+        page, _client, shown = self._refusing_page(qtbot, app_state, monkeypatch)
+        monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Renamed", True))
+
+        page._on_rename_profile()
+
+        assert "refused" in page._unsaved_label.text().lower()
+        assert len(shown) == 1 and _FFA_D_VIOLATION["description"] in shown[0][1]
+
+    def test_an_accepted_rename_raises_no_dialog(self, qtbot, app_state, monkeypatch):
+        from PySide6.QtWidgets import QInputDialog
+
+        page, client, shown = self._refusing_page(qtbot, app_state, monkeypatch)
+        client.create_profile.side_effect = None
+        client.create_profile.return_value = {"created": "p1"}
+        monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Renamed", True))
+
+        page._on_rename_profile()
+
+        assert shown == []
+        assert "refused" not in page._unsaved_label.text().lower()
+
+    def test_an_accepted_save_with_warnings_says_how_many(self, qtbot, app_state, monkeypatch):
+        page, client, shown = self._refusing_page(qtbot, app_state, monkeypatch)
+        client.create_profile.side_effect = None
+        client.create_profile.return_value = {
+            "created": "p1",
+            "warnings": [
+                {"field": "curves[0].sensor_id", "reason": "UNKNOWN_SENSOR", "description": "gone"}
+            ],
+        }
+        page._profile_service.set_active("")  # not the active profile: no re-apply
+
+        page._save_btn.click()
+
+        assert page._unsaved_label.text() == "Settings saved — 1 warning from the daemon"
+        assert page._unsaved_label.property("class") == "WarningChip"
+        assert "curves[0].sensor_id: gone" in page._unsaved_label.toolTip()
+        assert page._unsaved_label.accessibleDescription() == "curves[0].sensor_id: gone"
+        assert shown == []
+
+    def test_markup_in_a_name_or_a_reason_is_shown_as_written(self, qtbot, app_state, monkeypatch):
+        """The name is the user's and the reasons are the daemon's; Qt guesses at
+        markup in a tooltip or a message box, so both are escaped explicitly."""
+        from ventulus.api.errors import DaemonError
+
+        page, client, shown = self._refusing_page(qtbot, app_state, monkeypatch)
+        page._profile_service._profiles["p1"].name = "<b>Loud</b>"
+        client.create_profile.side_effect = DaemonError(
+            code="validation_error",
+            message="profile failed validation",
+            status=400,
+            details={"field_violations": [{"field": "name", "description": "<i>bad</i>"}]},
+        )
+
+        page._save_btn.click()
+
+        assert "&lt;b&gt;Loud&lt;/b&gt;" in shown[0][1]
+        assert "<b>Loud</b>" not in shown[0][1]
+        assert "name: &lt;i&gt;bad&lt;/i&gt;" in page._unsaved_label.toolTip()
+        assert page._unsaved_label.accessibleDescription() == "name: <i>bad</i>"
+
+    def test_save_active_published_reapplies(self, qtbot, app_state):
+        """DEC-188: saving the ACTIVE published profile re-applies it to the
+        daemon so the edited curve takes effect immediately, not on the next
+        manual Activate."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.models import ProfileActivateResult
+        from ventulus.services.profile_service import ProfileService
+
+        client = MagicMock()
+        client.create_profile.return_value = {"created": "p1"}
+        client.activate_profile.return_value = ProfileActivateResult(
+            activated=True, profile_id="p1", profile_name="P1"
+        )
+        ps = ProfileService(client=client)
+        ps._profiles["p1"] = Profile(id="p1", name="P1")
+        ps.set_active("p1")
+        page = ControlsPage(state=app_state, profile_service=ps, client=client)
+        qtbot.addWidget(page)
+
+        page._on_save_profile()
+
+        client.activate_profile.assert_called_once()
+        assert page._unsaved_label.text() == "Saved & reapplied to daemon"
+        assert page._unsaved_label.property("class") == "SuccessChip"
+
+    def test_save_inactive_published_does_not_reapply(self, qtbot, app_state):
+        """Saving a published but NON-active profile must not re-apply — that
+        would wrongly switch the daemon's running profile (DEC-188)."""
+        from unittest.mock import MagicMock
+
+        from ventulus.services.profile_service import ProfileService
+
+        client = MagicMock()
+        client.create_profile.return_value = {"created": "p1"}
+        ps = ProfileService(client=client)
+        ps._profiles["p1"] = Profile(id="p1", name="P1")
+        ps._profiles["p2"] = Profile(id="p2", name="P2")
+        ps.set_active("p2")  # p2 is active; we save the non-active p1
+        page = ControlsPage(state=app_state, profile_service=ps, client=client)
+        qtbot.addWidget(page)
+        page.select_profile("p1")  # DEC-214: view p1 (replaces the removed combo)
+
+        page._on_save_profile()
+
+        client.activate_profile.assert_not_called()
+        assert page._unsaved_label.text() == "Settings saved"
+        assert page._unsaved_label.property("class") == "SuccessChip"
+
+    def test_save_active_reapply_failure_warns(self, qtbot, app_state):
+        """DEC-188: a failed re-apply warns but the local save is preserved, so
+        the edit is never lost."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+        from ventulus.services.profile_service import ProfileService
+
+        client = MagicMock()
+        client.create_profile.return_value = {"created": "p1"}
+        client.activate_profile.side_effect = DaemonError(
+            code="validation_error",
+            message="boom",
+            retryable=False,
+            source="validation",
+            status=400,
+        )
+        ps = ProfileService(client=client)
+        ps._profiles["p1"] = Profile(id="p1", name="P1")
+        ps.set_active("p1")
+        page = ControlsPage(state=app_state, profile_service=ps, client=client)
+        qtbot.addWidget(page)
+
+        page._on_save_profile()
+
+        client.activate_profile.assert_called_once()
+        assert "reapply failed" in page._unsaved_label.text().lower()
+        assert page._unsaved_label.property("class") == "WarningChip"
+        # The local save still succeeded (published), so the edit is not lost.
+        assert ps.is_published("p1")
+
+    def test_save_active_reapply_soft_rejection_warns(self, qtbot, app_state):
+        """DEC-188: a daemon that returns ``activated=False`` (no exception) is
+        treated as a failed re-apply — warn, and keep the local save."""
+        from unittest.mock import MagicMock
+
+        from ventulus.api.models import ProfileActivateResult
+        from ventulus.services.profile_service import ProfileService
+
+        client = MagicMock()
+        client.create_profile.return_value = {"created": "p1"}
+        client.activate_profile.return_value = ProfileActivateResult(
+            activated=False, profile_id="p1", profile_name="P1"
+        )
+        ps = ProfileService(client=client)
+        ps._profiles["p1"] = Profile(id="p1", name="P1")
+        ps.set_active("p1")
+        page = ControlsPage(state=app_state, profile_service=ps, client=client)
+        qtbot.addWidget(page)
+
+        page._on_save_profile()
+
+        assert "reapply failed" in page._unsaved_label.text().lower()
+        assert page._unsaved_label.property("class") == "WarningChip"
+
+    # DEC-214: the Activate-button enable/disable tests (test_activate_disabled_when_offline_live,
+    # test_activate_stays_enabled_in_demo) were deleted with the page Activate button —
+    # activation moved to the sidebar Apply flow, and `_on_connection_changed` no longer
+    # gates any button (it only clears stale foreign-override chips on disconnect, DEC-169).

@@ -1,0 +1,561 @@
+"""Tests for the central AppState."""
+
+from __future__ import annotations
+
+from ventulus.api.models import (
+    ConnectionState,
+    HwmonHeader,
+    OperationMode,
+    SensorReading,
+)
+from ventulus.services.app_state import AppState
+
+
+def test_set_connection_emits_signal(qtbot):
+    state = AppState()
+    with qtbot.waitSignal(state.connection_changed, timeout=1000) as blocker:
+        state.set_connection(ConnectionState.CONNECTED)
+    assert blocker.args == [ConnectionState.CONNECTED]
+    assert state.connection == ConnectionState.CONNECTED
+
+
+def test_set_connection_no_duplicate_signal(qtbot):
+    state = AppState()
+    state.set_connection(ConnectionState.CONNECTED)
+    # Second call with same value should not emit
+    signals = []
+    state.connection_changed.connect(lambda s: signals.append(s))
+    state.set_connection(ConnectionState.CONNECTED)
+    assert len(signals) == 0
+
+
+def test_set_mode_emits_signal(qtbot):
+    state = AppState()
+    with qtbot.waitSignal(state.mode_changed, timeout=1000):
+        state.set_mode(OperationMode.DEMO)
+    assert state.mode == OperationMode.DEMO
+
+
+def test_fan_display_name_alias():
+    state = AppState()
+    state.fan_aliases = {"openfan:ch00": "Front Intake 1"}
+    assert state.fan_display_name("openfan:ch00") == "Front Intake 1"
+
+
+def test_fan_display_name_hwmon_label():
+    state = AppState()
+    state.set_hwmon_headers([HwmonHeader(id="hwmon:test:pwm1", label="CPU Fan")])
+    assert state.fan_display_name("hwmon:test:pwm1") == "CPU Fan"
+
+
+def test_fan_display_name_fallback_to_id():
+    """An id nothing can resolve still falls back to the raw id."""
+    state = AppState()
+    assert state.fan_display_name("mystery:fan9") == "mystery:fan9"
+
+
+def test_fan_display_name_openfan_channel_label():
+    """DEC-227: an unnamed OpenFan channel reads as a channel, not a daemon id.
+
+    OpenFan has no label source at all — no sysfs label, and the daemon reports
+    only a channel count — so before this every channel rendered as its raw id.
+    """
+    state = AppState()
+    assert state.fan_display_name("openfan:ch05") == "OpenFan CH5"
+    assert state.fan_display_name("openfan:ch00") == "OpenFan CH0"
+    assert state.fan_display_name("openfan:ch10") == "OpenFan CH10"
+
+
+def test_fan_display_name_openfan_malformed_channel_falls_back_to_id():
+    """Only a plain number is a channel — never invent one from junk."""
+    state = AppState()
+    assert state.fan_display_name("openfan:chXX") == "openfan:chXX"
+    assert state.fan_display_name("openfan:ch") == "openfan:ch"
+
+
+def test_fan_display_name_uses_label_resolver_when_sysfs_label_empty():
+    """A3: when the daemon's sysfs label is empty, fan_display_name
+    consults the in-repo fallback table (and /etc/sensors.d, but tests
+    inject an empty path list via the resolver's cache instead). On
+    the X870E AORUS MASTER, IT8696E pwm1 should resolve to CPU_FAN."""
+    from ventulus.api.models import BoardInfo
+    from ventulus.knowledge.hwmon_label_resolver import (
+        clear_libsensors_cache,
+        load_libsensors_configs,
+    )
+
+    # Force a deterministic libsensors result — no system files read.
+    clear_libsensors_cache()
+    load_libsensors_configs(paths=[])  # cache is set only when paths is None
+    try:
+        state = AppState()
+        state.board_info = BoardInfo(
+            vendor="Gigabyte Technology Co., Ltd.",
+            name="X870E AORUS MASTER",
+        )
+        state.set_hwmon_headers(
+            [
+                HwmonHeader(
+                    id="hwmon:it8696:it87.2624:pwm1:pwm1",
+                    label="",  # daemon couldn't read sysfs label
+                    chip_name="it8696",
+                    pwm_index=1,
+                ),
+            ]
+        )
+        assert state.fan_display_name("hwmon:it8696:it87.2624:pwm1:pwm1") == "CPU_FAN"
+    finally:
+        clear_libsensors_cache()
+
+
+def test_fan_display_name_for_secondary_chip():
+    """X870E AORUS MASTER IT87952E mappings (frankcrawford/it87 issue #103,
+    DEC-144) were settled on hardware by DEC-444 and carry no suffix."""
+    from ventulus.api.models import BoardInfo
+    from ventulus.knowledge.hwmon_label_resolver import clear_libsensors_cache
+
+    clear_libsensors_cache()
+    try:
+        state = AppState()
+        state.board_info = BoardInfo(
+            vendor="Gigabyte Technology Co., Ltd.",
+            name="X870E AORUS MASTER",
+        )
+        state.set_hwmon_headers(
+            [
+                HwmonHeader(
+                    id="hwmon:it87952:it87.2656:pwm1:pwm1",
+                    label="",
+                    chip_name="it87952",
+                    pwm_index=1,
+                ),
+            ]
+        )
+        label = state.fan_display_name("hwmon:it87952:it87.2656:pwm1:pwm1")
+        # DEC-144: pwm1 → SYS_FAN5_PUMP per the issue #103 owner config
+        # (previously a SYS_FAN4-first extrapolation).
+        assert label == "SYS_FAN5_PUMP"
+    finally:
+        clear_libsensors_cache()
+
+
+def test_fan_display_name_alias_overrides_resolver():
+    """User aliases take absolute precedence — they win even over a
+    high-confidence resolver match."""
+    from ventulus.api.models import BoardInfo
+    from ventulus.knowledge.hwmon_label_resolver import clear_libsensors_cache
+
+    clear_libsensors_cache()
+    try:
+        state = AppState()
+        state.fan_aliases = {"hwmon:it8696:it87.2624:pwm1:pwm1": "My CPU Cooler"}
+        state.board_info = BoardInfo(
+            vendor="Gigabyte Technology Co., Ltd.",
+            name="X870E AORUS MASTER",
+        )
+        state.set_hwmon_headers(
+            [
+                HwmonHeader(
+                    id="hwmon:it8696:it87.2624:pwm1:pwm1",
+                    label="",
+                    chip_name="it8696",
+                    pwm_index=1,
+                ),
+            ]
+        )
+        # Alias wins — CPU_FAN is what the resolver would return otherwise.
+        assert state.fan_display_name("hwmon:it8696:it87.2624:pwm1:pwm1") == "My CPU Cooler"
+    finally:
+        clear_libsensors_cache()
+
+
+def test_fan_display_name_sysfs_label_wins_over_resolver():
+    """Daemon-supplied sysfs label has priority over the resolver — if
+    the kernel driver exposes a fanN_label, the resolver does not run."""
+    from ventulus.api.models import BoardInfo
+    from ventulus.knowledge.hwmon_label_resolver import clear_libsensors_cache
+
+    clear_libsensors_cache()
+    try:
+        state = AppState()
+        state.board_info = BoardInfo(
+            vendor="Gigabyte Technology Co., Ltd.",
+            name="X870E AORUS MASTER",
+        )
+        state.set_hwmon_headers(
+            [
+                HwmonHeader(
+                    id="hwmon:it8696:it87.2624:pwm1:pwm1",
+                    label="DAEMON_LABEL",
+                    chip_name="it8696",
+                    pwm_index=1,
+                ),
+            ]
+        )
+        assert state.fan_display_name("hwmon:it8696:it87.2624:pwm1:pwm1") == "DAEMON_LABEL"
+    finally:
+        clear_libsensors_cache()
+
+
+def _x870e_state(label: str, *, pwm_index: int = 1, chip: str = "it8696") -> AppState:
+    """AppState primed with the reporter's live hardware (DEC-229).
+
+    Values taken verbatim from this host's daemon: `GET /hwmon/headers` returns
+    five `it8696` headers whose labels are `pwm1`…`pwm5`, and
+    `GET /diagnostics/hardware` reports the Gigabyte X870E AORUS MASTER — a
+    (vendor, board, chip) triple the in-repo fallback table has a *verified*
+    entry for.
+    """
+    from ventulus.api.models import BoardInfo
+
+    state = AppState()
+    state.board_info = BoardInfo(
+        vendor="Gigabyte Technology Co., Ltd.",
+        name="X870E AORUS MASTER",
+    )
+    state.set_hwmon_headers(
+        [
+            HwmonHeader(
+                id=f"hwmon:{chip}:it87.2624:pwm{pwm_index}:pwm{pwm_index}",
+                label=label,
+                chip_name=chip,
+                pwm_index=pwm_index,
+            ),
+        ]
+    )
+    return state
+
+
+def test_fan_display_name_synthesised_pwm_label_does_not_defeat_resolver():
+    """DEC-229 regression (gap #16 blocker 1): `pwm1` is not a real label.
+
+    The daemon's `read_label` *synthesises* `format!("pwm{N}")` when the chip
+    exposes neither `pwmN_label` nor `fanN_label`, so `HwmonHeader.label` is
+    never empty. Treating "non-empty" as "authoritative" short-circuited tiers
+    3-5 and the user saw five fans named pwm1…pwm5 on a board the fallback
+    table knows. Fails with 'pwm1' if the placeholder check is removed.
+    """
+    from ventulus.knowledge.hwmon_label_resolver import (
+        clear_libsensors_cache,
+    )
+
+    clear_libsensors_cache()
+    try:
+        state = _x870e_state("pwm1")
+        assert state.fan_display_name("hwmon:it8696:it87.2624:pwm1:pwm1") == "CPU_FAN"
+        # …and the mapping is per-header, not a blanket "any pwm → CPU_FAN".
+        state5 = _x870e_state("pwm5", pwm_index=5)
+        assert state5.fan_display_name("hwmon:it8696:it87.2624:pwm5:pwm5") == "CPU_OPT"
+    finally:
+        clear_libsensors_cache()
+
+
+def test_fan_display_name_real_label_still_outranks_fallback_table():
+    """The DEC-229 predicate must stay narrow — a real label always wins.
+
+    Guards against widening `is_placeholder_hwmon_label` into a "looks generic"
+    heuristic: a wrong name is worse than an unhelpful one. `CPU_OPT` on pwm1
+    is a real label (the table would say `CPU_FAN`); `pwm2` on pwm1 restates a
+    *different* header's id and so is information, not a placeholder.
+    """
+    from ventulus.knowledge.hwmon_label_resolver import clear_libsensors_cache
+
+    clear_libsensors_cache()
+    try:
+        assert _x870e_state("CPU_OPT").fan_display_name("hwmon:it8696:it87.2624:pwm1:pwm1") == (
+            "CPU_OPT"
+        )
+        assert _x870e_state("pwm2").fan_display_name("hwmon:it8696:it87.2624:pwm1:pwm1") == "pwm2"
+    finally:
+        clear_libsensors_cache()
+
+
+def test_fan_display_name_placeholder_falls_back_to_pwm_when_board_unknown():
+    """No board identity ⇒ the table cannot match ⇒ `pwmN` is still the answer.
+
+    This is the *degraded* path, and it is why gap #16 had a second blocker:
+    with `AppState.board_info` unwritten (its state from GUI v2.22.0 to v2.29.0)
+    the placeholder fix alone changes nothing on screen.
+    """
+    from ventulus.knowledge.hwmon_label_resolver import clear_libsensors_cache
+
+    clear_libsensors_cache()
+    try:
+        state = AppState()  # board_info left at its empty default
+        state.set_hwmon_headers(
+            [
+                HwmonHeader(
+                    id="hwmon:it8696:it87.2624:pwm1:pwm1",
+                    label="pwm1",
+                    chip_name="it8696",
+                    pwm_index=1,
+                ),
+            ]
+        )
+        assert state.fan_display_name("hwmon:it8696:it87.2624:pwm1:pwm1") == "pwm1"
+    finally:
+        clear_libsensors_cache()
+
+
+def test_warning_count_updates(qtbot):
+    state = AppState()
+    signals = []
+    state.warning_count_changed.connect(lambda c: signals.append(c))
+    state.set_sensors(
+        [
+            SensorReading(id="fresh", age_ms=500),
+            SensorReading(id="stale", age_ms=5000),
+        ]
+    )
+    assert state.warning_count == 1
+    assert signals == [1]
+
+
+def test_add_warning_emits_signal_immediately(qtbot):
+    """Audit P2.4 regression: ad-hoc warnings must update the count and emit
+    ``warning_count_changed`` synchronously. Previously, ``add_warning`` only
+    mutated ``_external_warnings`` and the UI had to wait up to 1 s for the
+    next ``set_sensors``/``set_fans`` cycle to call ``_update_warnings`` and
+    emit the signal — control-loop failures appeared "delayed".
+    """
+    state = AppState()
+    signals: list[int] = []
+    state.warning_count_changed.connect(lambda c: signals.append(c))
+
+    state.add_warning("error", "control_loop", "fan write failed")
+
+    # Active list must already contain the warning, count must be 1.
+    assert state.warning_count == 1
+    assert len(state.unacknowledged_warnings) == 1
+    assert state.unacknowledged_warnings[0]["source"] == "control_loop"
+    # And the signal must already have fired — no waiting for the next tick.
+    assert signals == [1]
+
+
+def test_remove_warning_emits_signal_immediately(qtbot):
+    """Audit P2.4 regression: ``remove_warning`` must also recompute the
+    count synchronously so the UI badge clears without a polling-tick delay.
+    """
+    state = AppState()
+    state.add_warning("error", "control_loop", "fan write failed", key="fan_write")
+    assert state.warning_count == 1
+
+    signals: list[int] = []
+    state.warning_count_changed.connect(lambda c: signals.append(c))
+
+    state.remove_warning("fan_write")
+
+    assert state.warning_count == 0
+    assert signals == [0]
+    # DEC-282: the health count drops immediately (the condition is gone), but the
+    # alert does NOT vanish — it was never acknowledged, so it stays listed as
+    # recovered until someone looks at it. Before DEC-282 this row was deleted
+    # outright, which is precisely how a warning could flash past and leave the user
+    # with no way to find out what it had been.
+    assert len(state.unacknowledged_warnings) == 1
+    row = state.unacknowledged_warnings[0]
+    assert row["_key"] == "fan_write"
+    assert row["recovered"] is True
+    assert row["recovered_at"] is not None
+    assert state.unacknowledged_count == 1
+
+    state.acknowledge_all()
+    assert state.unacknowledged_warnings == [], "acknowledged — now it may leave the list"
+
+
+def test_re_adding_a_continuously_present_warning_is_silent(qtbot):
+    """Re-adding a key whose condition never cleared must not re-emit.
+
+    This replaces ``test_add_warning_no_signal_when_acknowledged``, which asserted
+    the same silence for the wrong reason. Its docstring said "an acknowledged
+    warning must not re-emit when added again", and the implementation delivered that
+    by putting the key in a set that was never pruned — so the silence extended to
+    every *future* occurrence of the condition too, for the whole session (DEC-282
+    RC-3). See ``test_acknowledged_warning_re_alerts_after_recovery`` for the case
+    that silence used to swallow.
+
+    The idempotency contract underneath was real and is kept: while the condition is
+    continuously present it is one occurrence, so re-observing it is a no-op.
+    """
+    state = AppState()
+    state.add_warning("error", "control_loop", "fan write failed", key="fan_write")
+    state.acknowledge_all()
+    assert state.unacknowledged_count == 0
+    assert state.warning_count == 1, "acknowledged, but the condition is still present"
+
+    signals: list[int] = []
+    state.warning_count_changed.connect(lambda c: signals.append(c))
+    changes: list[int] = []
+    state.warnings_changed.connect(lambda: changes.append(1))
+
+    # Same key, condition never cleared → still the same occurrence.
+    state.add_warning("error", "control_loop", "fan write failed", key="fan_write")
+
+    assert state.warning_count == 1
+    assert state.unacknowledged_count == 0
+    assert signals == [], "no count change"
+    assert changes == [], "and no content change either"
+
+
+def test_acknowledged_warning_re_alerts_after_recovery(qtbot):
+    """DEC-282 RC-3: acknowledgement must never permanently suppress a condition.
+
+    Fails against the pre-DEC-282 code, where ``fan_write`` was added to
+    ``_acknowledged`` and every later occurrence was discarded at the door.
+    """
+    state = AppState()
+    state.add_warning("error", "control_loop", "fan write failed", key="fan_write")
+    assert state.unacknowledged_count == 1, "presence first — an absence test needs one"
+    state.acknowledge_all()
+    state.remove_warning("fan_write")  # the condition clears
+    assert state.warning_count == 0
+
+    state.add_warning("error", "control_loop", "fan write failed", key="fan_write")
+
+    assert state.warning_count == 1
+    assert state.unacknowledged_count == 1, "a new occurrence must alert again"
+
+
+def test_set_active_profile(qtbot):
+    state = AppState()
+    with qtbot.waitSignal(state.active_profile_changed, timeout=1000):
+        state.set_active_profile("Balanced")
+    assert state.active_profile_name == "Balanced"
+
+
+def test_set_status_reflects_active_profile_fast_path(qtbot):
+    """DEC-194: a poll status carrying the active profile updates it that cycle
+    (edge-triggered), so an external activation shows within ~1 s instead of the
+    slow /profile/active refresh."""
+    from ventulus.api.models import DaemonStatus
+
+    state = AppState()
+    status = DaemonStatus(active_profile_id="silent", active_profile_name="Silent")
+    with qtbot.waitSignal(state.active_profile_changed, timeout=1000) as blocker:
+        state.set_status(status)
+    assert blocker.args == ["Silent"]
+    assert state.active_profile_name == "Silent"
+
+
+def test_set_status_absent_active_profile_does_not_clobber(qtbot):
+    """DEC-194: a status WITHOUT the active-profile field (older daemon, or no
+    active profile) must not overwrite a name already set via the /profile/active
+    fallback — active_profile_name defaults to None, so the fast-path is skipped."""
+    from ventulus.api.models import DaemonStatus
+
+    state = AppState()
+    state.set_active_profile("Balanced")  # e.g. established by the fallback fetch
+    state.set_status(DaemonStatus())  # poll status omits the field → default None
+    assert state.active_profile_name == "Balanced"
+
+
+def test_set_active_profile_id_edge_triggered(qtbot):
+    """DEC-194 (C1): the id setter mirrors set_active_profile — it stores the id
+    and emits only when the value actually changes (edge-triggered)."""
+    state = AppState()
+    fired: list[str] = []
+    state.active_profile_id_changed.connect(fired.append)
+    with qtbot.waitSignal(state.active_profile_id_changed, timeout=1000):
+        state.set_active_profile_id("quiet")
+    assert state.active_profile_id == "quiet"
+    # A repeat of the same id is a silent no-op.
+    state.set_active_profile_id("quiet")
+    assert fired == ["quiet"]
+
+
+def test_set_status_reflects_active_profile_id_fast_path(qtbot):
+    """DEC-194 (C1): a poll status carrying active_profile_id updates
+    AppState.active_profile_id and fires active_profile_id_changed once
+    (edge-triggered) — a repeat id does NOT re-fire, a new id fires again."""
+    from ventulus.api.models import DaemonStatus
+
+    state = AppState()
+    fired: list[str] = []
+    state.active_profile_id_changed.connect(fired.append)
+
+    with qtbot.waitSignal(state.active_profile_id_changed, timeout=1000) as blocker:
+        state.set_status(DaemonStatus(active_profile_id="silent", active_profile_name="Silent"))
+    assert blocker.args == ["silent"]
+    assert state.active_profile_id == "silent"
+    assert fired == ["silent"]
+
+    # Repeat id → no re-fire.
+    state.set_status(DaemonStatus(active_profile_id="silent", active_profile_name="Silent"))
+    assert fired == ["silent"]
+
+    # New id → fires again.
+    state.set_status(DaemonStatus(active_profile_id="loud", active_profile_name="Loud"))
+    assert fired == ["silent", "loud"]
+    assert state.active_profile_id == "loud"
+
+
+def test_set_status_absent_active_profile_id_does_not_clobber(qtbot):
+    """DEC-194 (C1): a status WITHOUT active_profile_id (older daemon, or no active
+    profile) must not overwrite an id already established — the field defaults to
+    None, so the id fast-path is skipped."""
+    from ventulus.api.models import DaemonStatus
+
+    state = AppState()
+    state.set_active_profile_id("balanced")
+    state.set_status(DaemonStatus())  # poll status omits the field → default None
+    assert state.active_profile_id == "balanced"
+
+
+def test_external_activation_moves_id_based_ui(qtbot, app_state, profile_service, settings_service):
+    """DEC-194 (C1) wiring: an external activation surfaced on /poll (active_profile_id
+    changes) routes AppState → ProfileService.set_active, moving both the service's
+    active_id and the dashboard combo selection — reusing the existing active_changed
+    consumers, with no new page wiring."""
+    from ventulus.api.models import DaemonStatus
+    from ventulus.ui.main_window import MainWindow
+
+    win = MainWindow(
+        state=app_state,
+        profile_service=profile_service,
+        settings_service=settings_service,
+        demo_mode=False,
+    )
+    qtbot.addWidget(win)
+
+    combo = win.dashboard_page._profile_combo
+    # Precondition: the seeded default set is present and 'balanced' is not active.
+    assert profile_service.active_id != "balanced"
+    assert combo.findData("balanced") >= 0
+
+    # External activation (CLI --profile / another client) surfaced on the poll status.
+    app_state.set_status(DaemonStatus(active_profile_id="balanced", active_profile_name="Balanced"))
+
+    assert profile_service.active_id == "balanced"
+    assert combo.currentData() == "balanced"
+
+
+def test_external_activation_unknown_id_clears_the_held_active_profile(
+    qtbot, app_state, profile_service, settings_service
+):
+    """`WUI-d` (narrows DEC-194's old no-op): the daemon switching to a profile
+    the GUI does not hold clears the local active id instead of leaving a held
+    profile marked active. Nothing crashes, the dashboard combo leaves the held
+    profile, and AppState still mirrors the daemon's id."""
+    from ventulus.api.models import DaemonStatus
+    from ventulus.ui.main_window import MainWindow
+
+    win = MainWindow(
+        state=app_state,
+        profile_service=profile_service,
+        settings_service=settings_service,
+        demo_mode=False,
+    )
+    qtbot.addWidget(win)
+
+    combo = win.dashboard_page._profile_combo
+    held = profile_service.active_id
+    assert held, "precondition: the GUI marks a held profile active"
+    assert combo.currentData() == held, "precondition: the combo shows it"
+
+    app_state.set_status(
+        DaemonStatus(active_profile_id="ghost_profile", active_profile_name="Ghost")
+    )
+
+    assert profile_service.active_id == ""
+    assert combo.currentIndex() == -1
+    assert app_state.active_profile_id == "ghost_profile"

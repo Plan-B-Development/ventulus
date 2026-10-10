@@ -1,0 +1,1695 @@
+"""System State page — migrated Diagnostics ▸ Troubleshooting (DEC-211).
+
+A thin renderer over the Qt-free ``services.system_state_view`` view-models,
+styled with the Stage-1 components. Presents the health issues (unified,
+severity-sorted cards with doc-link buttons), the BIOS-reclaim Interference
+Monitor (a static custom-paint radial gauge), the Safety & GPU limits, and the
+Hardware Registry table. The preserved PWM/GPU verification actions live behind
+an "Advanced actions" collapsible.
+
+Fed by the shared ``DiagnosticsService.last_hw_diagnostics`` cache (``GET
+/diagnostics/hardware``, fetched on first show if nothing warmed it). Owns three
+QThread workers (PWM verify single+all, GPU verify/restore, hw-diag fetch) — the
+same ``_SocketWorker`` classes the old tab uses, which take only a socket path.
+Presentation-only: no daemon/API/schema/control/safety change.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtWidgets import (
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ventulus.knowledge.hwmon_label_resolver import clear_libsensors_cache
+from ventulus.services.app_settings_service import AppSettingsService
+from ventulus.services.daemon_features import daemon_supports
+from ventulus.services.diagnostics_service import DiagnosticsService
+from ventulus.services.duty_drift import NO_DRIFT, DutyDriftState, duty_drift_state
+from ventulus.services.health_ack import clear_key, prune, silence_key
+from ventulus.services.pump_protection import header_is_pump_protected
+from ventulus.services.pwm_report.runner import RUN_ACTIVE_REASON
+from ventulus.services.pwm_verification import pwm_verification_tristate
+from ventulus.services.system_state_view import (
+    THERMAL_STATE_NO_CONNECTION,
+    SilenceState,
+    build_system_state_vm,
+    build_verify_headers,
+    daemon_version_at_least,
+)
+from ventulus.services.verify_view import (
+    SWEEP_NOT_RESTORED,
+    build_gpu_verify_result_view,
+    build_verify_result_view,
+    outcome_for,
+    sweep_restore_failed_note,
+    verify_sweep_chip_class,
+    verify_sweep_outcome,
+)
+from ventulus.ui.components.a11y import name_value_control
+from ventulus.ui.components.buttons import make_button
+from ventulus.ui.pages.diagnostics_workers import (
+    _CharacterizationWorker,
+    _GpuVerifyWorker,
+    _HwDiagWorker,
+    _VerifyWorker,
+)
+from ventulus.ui.qt_util import set_chip_class, style_splitter
+from ventulus.ui.widgets.collapsible_section import CollapsibleSection
+from ventulus.ui.widgets.pwm_characterization_dialog import PwmCharacterizationDialog
+from ventulus.ui.widgets.readiness_report import (
+    ReadinessReportDialog,
+    build_readiness_report_html,
+    gpu_verify_problems,
+)
+from ventulus.ui.widgets.system_state_cards import (
+    HealthCard,
+    InterferenceCard,
+    RegistryCard,
+    SafetyCard,
+)
+from ventulus.ui.widgets.verify_evidence_panel import VerifyEvidencePanel
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ventulus.api.client import DaemonClient
+    from ventulus.api.models import (
+        GpuFanResetResult,
+        GpuVerifyResult,
+        HardwareDiagnosticsResult,
+        HwmonHeader,
+        HwmonVerifyResult,
+    )
+    from ventulus.services.app_state import AppState
+    from ventulus.services.profile_service import ProfileService
+
+log = logging.getLogger(__name__)
+
+# DEC-147 GPU restore tooltips (copied — the old page is untouched this stage).
+_GPU_RESTORE_TOOLTIP_READY = (
+    "Hand the GPU fan back to the firmware's automatic curve (PMFW default) — "
+    "undoes a static speed set this session."
+)
+_GPU_RESTORE_TOOLTIP_GATED = (
+    "The active profile is driving the GPU fan — remove it from its fan role "
+    "or deactivate the profile first."
+)
+
+
+def _live_silence_keys(vm) -> set[str]:
+    """Every key the CURRENT hardware can raise, for pruning (`ACK-g`).
+
+    Derived from the rendered view-model rather than re-walked from `diag`, so
+    it cannot drift from what the page actually offers a button for — the
+    DEC-115 rule, and the reason this is not a second enumeration of the
+    condition set.
+    """
+    keys = {silence_key(c.silence.token) for c in vm.issue_cards if c.silence.token}
+    keys |= {n.key for n in vm.board_notes.notes}
+    keys |= {"interference", "thermal"}
+    # By ROW PRESENCE, not by token presence. A GPU row that is currently `ok`
+    # carries no token — and reading the key off the token would therefore drop
+    # it from the live set the moment the problem was fixed, so the next prune
+    # deleted a dismissal the user was entitled to keep. `Overdrive` and
+    # `Fan Control` stay on screen through that transition; `amdgpu binding` and
+    # the `AMD <bdf>` rows genuinely vanish, and pruning those is the intended,
+    # pre-existing behaviour for an item this hardware can no longer raise.
+    keys |= {r.key for r in vm.safety_gpu.gpu_rows if r.key}
+    return keys
+
+
+def _verified_tristate(recorded: str) -> bool | None:
+    """Persisted verify outcome → the tri-state the note builder wants.
+
+    ``None`` means "never tested", and it is a real answer, not a missing one:
+    a board note whose mechanism is "PWM writes are accepted and silently
+    ignored" cannot be confirmed OR refuted by anything on
+    ``GET /diagnostics/hardware``, so claiming either would be a guess.
+    """
+    if recorded == "effective":
+        return True
+    if recorded == "ineffective":
+        return False
+    return None
+
+
+class SystemStatePage(QWidget):
+    """The migrated Troubleshooting content as a standalone page."""
+
+    # Main-thread → worker-thread requests (queued).
+    _verify_request = Signal(str)
+    _gpu_verify_request = Signal(str)
+    _gpu_reset_request = Signal(str)
+    _hw_diag_request = Signal()
+    _rescan_request = Signal()  # DEC-216: footer Rescan Hardware (relocated from Diagnostics)
+    # AIO-MB Phase 3 — the deeper PWM/RPM sweep.
+    _char_start_request = Signal(str, object, object, object, object)
+    #: AIO Phase 8 Batch 1 §6.1, wired by DEC-334 (header_id, diagnostic).
+    _char_preflight_request = Signal(str, str)
+    _char_poll_request = Signal()
+    _char_cancel_request = Signal()
+
+    def __init__(
+        self,
+        state: AppState | None = None,
+        diagnostics_service: DiagnosticsService | None = None,
+        client: DaemonClient | None = None,
+        profile_service: ProfileService | None = None,
+        settings_service: AppSettingsService | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("SystemState_Root")
+        self._state = state
+        self._diag = diagnostics_service or DiagnosticsService(state)
+        self._client = client
+        self._profile_service = profile_service
+        # DEC-357: board-note acknowledgement/dismissal and the recorded
+        # fan-control test outcome. Optional so the page stays constructible in
+        # a test without one; it then falls back to its own service, which is
+        # what every other settings consumer here does.
+        self._settings_svc = settings_service or AppSettingsService()
+
+        # Worker/thread pairs (lazy).
+        self._verify_thread: QThread | None = None
+        self._verify_worker: _VerifyWorker | None = None
+        self._hw_diag_thread: QThread | None = None
+        self._hw_diag_worker: _HwDiagWorker | None = None
+        self._gpu_verify_thread: QThread | None = None
+        self._gpu_verify_worker: _GpuVerifyWorker | None = None
+
+        # Action state.
+        self._verify_active_header: str | None = None
+        #: DEC-404 S4-13: a PWM Test Report run holds the daemon's one diagnostic
+        #: slot. While it does, the three hwmon tests here stand down — a verify
+        #: pressed in the run's hand-back gap would write to a header between the
+        #: report's measurements. Set by `set_pwm_report_active` (MainWindow
+        #: routes it from the Hardware page, which owns the run).
+        self._pwm_report_active = False
+        self._verify_all_queue: list[str] = []
+        self._verify_all_results: list[tuple[str, str]] = []
+        #: Headers in this sweep the daemon could not put back (`PTA-s`). Kept
+        #: beside the results, not in them: `_record_verify_outcome` reads the
+        #: tokens as evidence, and a failed restore is none either way.
+        self._verify_all_restore_failed: set[str] = set()
+        self._verify_all_total = 0
+        #: The header the SWEEP is waiting on, distinct from
+        #: `_verify_active_header`, which is whatever was last requested by any
+        #: path. A result is the sweep's only when it matches this (row
+        #: `ACK-n`); see `_on_verify_ok`.
+        self._verify_all_pending: str | None = None
+        self._gpu_verify_bdf: str | None = None
+        self._report_dialog: ReadinessReportDialog | None = None
+        self._char_worker: _CharacterizationWorker | None = None
+        self._char_thread: QThread | None = None
+        self._char_dialog: PwmCharacterizationDialog | None = None
+        self._hw_diag_fetched = False
+        self._hw_diag_in_flight = False  # guards the header Refresh (DEC-358)
+        self._pruned_for = None  # payload identity the silences were last pruned against
+        #: Live `DaemonStatus.thermal_state`, pushed at 1 Hz — see
+        #: :meth:`set_thermal_state`. ``""`` until the first poll arrives, which
+        #: is what makes the Safety card fall back to the fetched snapshot, and
+        #: ``THERMAL_STATE_NO_CONNECTION`` while the daemon is unreachable
+        #: (:meth:`set_live`, `TS-g`), which falls back to neither.
+        self._live_thermal_state = ""
+        #: Live `DaemonStatus.emergency_causes`, beside the state it explains:
+        #: it picks which limit the Safety row names (CPU or coolant, DEC-443).
+        self._live_emergency_causes: tuple[str, ...] = ()
+        #: Acknowledgements, SESSION-ONLY (DEC-359, the user's "one rule
+        #: everywhere"). Deliberately not persisted: an acknowledgement means
+        #: "I have read this now", and one that outlives the session is a
+        #: dismissal wearing the wrong label — which is exactly what
+        #: `acknowledged_board_notes` had become. Dismissal is the persistent
+        #: form, and it is the one with a Settings restore behind it.
+        self._session_acks: set[str] = set()
+        self._rescan_in_flight = False  # DEC-216: guards the footer Rescan action
+        self._last_rendered_diag: HardwareDiagnosticsResult | None = None
+        #: DEC-404 S4-12: the daemon's duty-drift report from the LIVE poll,
+        #: read through `_duty_drift()` by every builder on this page.
+        self._duty_drift_state: DutyDriftState = NO_DRIFT
+        #: DEC-456: the tri-state the last render showed, so a headers update
+        #: that leaves it unchanged costs no re-render
+        #: (`_on_headers_for_verification`).
+        self._pwm_verified_rendered: bool | None = None
+
+        self._build_ui()
+
+        if state is not None:
+            # Re-gate the GPU restore button when the active profile changes.
+            state.active_profile_changed.connect(self._update_gpu_restore_gate)
+            state.fans_updated.connect(self._on_fans_for_drift)
+            state.headers_updated.connect(self._on_headers_for_verification)
+
+    # ── UI construction ──────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        outer.addWidget(scroll)
+
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        scroll.setWidget(body)
+
+        # Header.
+        title = QLabel("System State")
+        title.setObjectName("SystemState_Label_title")
+        title.setProperty("class", "PageTitle")
+        layout.addWidget(title)
+        subtitle = QLabel("Health overview, hardware registry, and system interference")
+        subtitle.setObjectName("SystemState_Label_subtitle")
+        subtitle.setProperty("class", "PageSubtitle")
+        layout.addWidget(subtitle)
+
+        # DEC-216: outcome line for the global footer's Rescan Hardware action,
+        # relocated here from the retired Diagnostics page. Hidden until a rescan
+        # runs; the footer surfaces this page first so the result is always seen.
+        self._rescan_result_label = QLabel("")
+        self._rescan_result_label.setObjectName("SystemState_Label_rescanResult")
+        self._rescan_result_label.setProperty("class", "CardMeta")
+        self._rescan_result_label.setWordWrap(True)
+        # This label renders daemon-supplied text — an adopted serial port path,
+        # and on the error path a daemon error message. AutoText would run
+        # `mightBeRichText()` over it and switch to HTML rendering on anything
+        # bracket-shaped, so pin it to plain (DEC-266).
+        self._rescan_result_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._rescan_result_label.setVisible(False)
+        layout.addWidget(self._rescan_result_label)
+
+        # Row 1: System Health Overview, spanning the full content width.
+        # DEC-219: the display cards are their own widgets now
+        # (system_state_cards); the page routes the VM to them and keeps the
+        # workers + actions below.
+        #
+        # Health carries the page's densest content — each issue is a severity
+        # caption, a title, a description, an HTML detail box and a doc button —
+        # and it used to sit at stretch 2 of 3 with the two status cards beside
+        # it. At two thirds of the width every one of those lines wrapped, so the
+        # issue cards grew tall inside a band a QSplitter sizes by PROPORTION
+        # rather than by content, and the detail boxes were what got clipped.
+        # Full width attacks both halves at once: the same issues wrap less, so
+        # they need less height in the same band.
+        self._health_card = HealthCard()
+        self._health_card.note_acknowledged.connect(self._on_note_acknowledged)
+        self._health_card.note_dismissed.connect(self._on_note_dismissed)
+        # The notes section's "Test fan control" runs the same sweep as the
+        # Advanced actions button — one write path, not a second one.
+        self._health_card.verify_requested.connect(self._run_pwm_verify_all)
+        self._build_health_header_actions()
+        self._interference_card = InterferenceCard()
+        self._safety_card = SafetyCard()
+        # Every silenceable surface routes to ONE pair of handlers (DEC-359).
+        # `ACK-h` existed because a silencing decision was owned by the widget
+        # that happened to show the item first; one destination is the fix.
+        for card in (self._interference_card, self._safety_card):
+            card.note_acknowledged.connect(self._on_note_acknowledged)
+            card.note_dismissed.connect(self._on_note_dismissed)
+        overview_pane = QWidget()
+        overview_pane.setObjectName("SystemState_Pane_healthOverview")
+        # No explicit height floor, and removing the old literal 190 is the
+        # single biggest part of this fix. An explicit `minimumSize` OVERRIDES
+        # Qt's `minimumSizeHint`, so that literal was not a safety net under the
+        # pane's real minimum — it was a cap on it. Measured with three issues at
+        # the default window: the card's own minimumSizeHint is 508px, the pane
+        # was pinned to 231, and the issue cards were handed ~40px each against a
+        # 118-202px need, clipping every description and detail box. That is the
+        # squash in the screenshot, and no amount of extra WIDTH fixes it.
+        #
+        # Dropping the literal restores what DEC-234 already said it wanted --
+        # "a taller health card grows the band past its floor and the page
+        # scrolls". The floor is now the card's content, which is what a floor
+        # should be. Consequence, accepted: once the band is at its content
+        # height the page scrolls and the handle has no surplus left to trade,
+        # so it stops moving. That is the honest state of affairs — both panes
+        # already have exactly the height they need — and the handle resumes
+        # working as soon as the window has room to spare.
+        row1 = QVBoxLayout(overview_pane)
+        row1.setContentsMargins(0, 0, 0, 0)
+        row1.setSpacing(12)
+        row1.addWidget(self._health_card)
+
+        # Row 2: hardware registry | status sidebar (interference over safety),
+        # sharing width through the horizontal-splitter convention the Controls
+        # page already uses (`controls_page._build_ui`, DEC-234 handles).
+        self._registry_card = RegistryCard()
+        self._registry_card.setMinimumHeight(150)
+
+        self._status_sidebar = QWidget()
+        self._status_sidebar.setObjectName("SystemState_Pane_statusSidebar")
+        side = QVBoxLayout(self._status_sidebar)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(12)
+        side.addWidget(self._interference_card)
+        side.addWidget(self._safety_card)
+        side.addStretch(1)
+
+        # No explicit minimum width on the sidebar — deliberately. Qt already
+        # propagates one from its own content (the RadialGauge's 140px floor plus
+        # card padding: measured 205 idle, 252 with a contended header id), and
+        # that number re-derives itself when the gauge, the padding or the theme
+        # font moves. A literal here would be both redundant and stale on the day
+        # any of those changes, which is the DEC-258 failure exactly.
+        registry_min = self._registry_card.content_min_width()
+        self._registry_card.setMinimumWidth(registry_min)
+        self._row2_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._row2_splitter.setObjectName("SystemState_Splitter_row2")
+        self._row2_splitter.setChildrenCollapsible(False)
+        self._row2_splitter.addWidget(self._registry_card)
+        self._row2_splitter.addWidget(self._status_sidebar)
+        # Registry dominant at 3:1 (the 75/25 end of the asked-for 70-75 : 25-30),
+        # stated as a ratio over the sidebar's OWN natural width rather than as
+        # pixel widths — the same idiom as
+        # `controls_page.setSizes([pane_min, pane_min * 3])`. Seeding the ratio
+        # from the registry floor instead looks equivalent and is not: it asks
+        # for a 582px sidebar, which Qt then honours in full while shrinking the
+        # registry to its floor, and the row lands at 57:43 at the default window
+        # size. The sidebar's sizeHint is what it actually wants (~324px).
+        sidebar_natural = self._status_sidebar.sizeHint().width()
+        self._row2_splitter.setSizes([sidebar_natural * 3, sidebar_natural])
+        self._row2_splitter.setStretchFactor(0, 3)
+        self._row2_splitter.setStretchFactor(1, 1)
+        style_splitter(self._row2_splitter)
+
+        # Health overview ↕ row 2 share height through a drag handle (DEC-234).
+        # The handle is inside the scroll area, so the page keeps its whole-page
+        # scroll: when the content needs more height than the viewport has, the
+        # band grows past the viewport and the PAGE scrolls rather than either
+        # pane clipping. The registry table scrolls inside its own pane;
+        # advanced actions stay fixed below.
+        #
+        # Caveat, unchanged: a QSplitter divides its total by proportion, not by
+        # child sizeHint, so a pathologically long issue list can still clip.
+        # The initial share is now taken from each pane's own sizeHint instead of
+        # the literal [280, 200] the two-column row was tuned for — [280, 200]
+        # gave row 2 42% of the band, and row 2 now has to open a ~500px-tall
+        # sidebar unclipped. Deriving it means the ratio tracks the panes.
+        self._sections_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._sections_splitter.setObjectName("SystemState_Splitter_sections")
+        self._sections_splitter.setChildrenCollapsible(False)
+        self._sections_splitter.addWidget(overview_pane)
+        self._sections_splitter.addWidget(self._row2_splitter)
+        self._sections_splitter.setSizes(
+            [
+                overview_pane.minimumSizeHint().height(),
+                self._row2_splitter.minimumSizeHint().height(),
+            ]
+        )
+        # Surplus height belongs to row 2, not to the health pane (DEC-284).
+        # Row 2's registry table scrolls internally, so every extra pixel there
+        # is another visible chip row; the health card ends its own layout with
+        # a stretch, so anything handed to the top pane past its content becomes
+        # whitespace inside the card. Without this, Qt shares the surplus in
+        # proportion to the current sizes (neither child is vertically
+        # expansive) and the health pane took 65 → 196px of a 1400px window it
+        # could not use. Only the index-1 call does anything: the pane's
+        # vertical stretch is already 0, and `setStretchFactor(0, 0)` measured
+        # byte-identical to omitting it — a no-op beside a real fix is exactly
+        # what DEC-281 warns about, so it is not written here.
+        self._sections_splitter.setStretchFactor(1, 1)
+        style_splitter(self._sections_splitter)
+        # Deleting the trailing `addStretch(1)` that used to close this method is
+        # the whole fix HERE (DEC-284) — a QBoxLayout gives surplus to any
+        # non-zero stretch factor, so that spacer froze the band at 430px at
+        # every window height above ~600.
+        #
+        # The `, 1` below is, measured, *currently redundant on this page*: the
+        # splitter is the only vertically expansive item in this body layout
+        # (labels and the collapsible section are not), so Qt hands it the whole
+        # surplus regardless — identical 771 / 971 / 1371px at 900 / 1100 /
+        # 1500px with the stretch dropped. It is written anyway, and that is not
+        # the no-op DEC-281 warns against: it stops being redundant the instant
+        # anything expansive is added below, which is exactly how the spacer
+        # broke this page. On `overview_page` the same argument is load-bearing
+        # *today* — dropping it there costs 531px at a 1500px window, because
+        # the cards row above expands too.
+        #
+        # None of this changes the constrained case: measured with three health
+        # issues, the band is 911px and the page scrolls at 400-1000px page
+        # heights exactly as before, so DEC-281's content floor is untouched.
+        # It only spends height the page had spare.
+        layout.addWidget(self._sections_splitter, 1)
+
+        # Advanced actions (preserved PWM/GPU verify + open report).
+        layout.addWidget(self._build_advanced_section())
+
+    def _build_advanced_section(self) -> QWidget:
+        section = CollapsibleSection(
+            "Advanced actions", "SystemState_Section_advanced", expanded=False
+        )
+        # PWM verify.
+        pwm_row = QHBoxLayout()
+        self._verify_combo = QComboBox()
+        self._verify_combo.setObjectName("SystemState_Combo_verifyHeader")
+        # Only the button beside it says what this picks (273-g).
+        name_value_control(self._verify_combo, "Fan header to test")
+        pwm_row.addWidget(self._verify_combo, 1)
+        self._verify_btn = make_button(
+            "Test PWM Control", "secondary", object_name="SystemState_Btn_verifyPwm"
+        )
+        self._verify_btn.clicked.connect(self._run_pwm_verify)
+        pwm_row.addWidget(self._verify_btn)
+        self._verify_all_btn = make_button(
+            "Verify All Writable", "secondary", object_name="SystemState_Btn_verifyAll"
+        )
+        self._verify_all_btn.clicked.connect(self._run_pwm_verify_all)
+        pwm_row.addWidget(self._verify_all_btn)
+        # AIO-MB Phase 3. A SIBLING of "Test PWM Control", never a replacement —
+        # the quick verify answers "does a write do anything?" in ~6 s; this walks
+        # the header across several duties and takes minutes. Hidden entirely
+        # against a daemon without the capability: that daemon 404s the route, and
+        # probing to find out would couple feature detection to which error.code
+        # came back.
+        self._characterize_btn = make_button(
+            "Characterise PWM Response",
+            "secondary",
+            object_name="SystemState_Btn_characterize",
+        )
+        self._characterize_btn.clicked.connect(self._open_characterization)
+        self._characterize_btn.setVisible(False)
+        pwm_row.addWidget(self._characterize_btn)
+        section.add_layout(pwm_row)
+
+        self._verify_result_label = QLabel("")
+        self._verify_result_label.setObjectName("SystemState_Label_verifyResult")
+        self._verify_result_label.setWordWrap(True)
+        self._verify_result_label.setVisible(False)
+        section.add_widget(self._verify_result_label)
+        # WIRE-f: the before/after table behind the one-line summary above.
+        self._verify_evidence = VerifyEvidencePanel("SystemState_Section_verifyEvidence")
+        section.add_widget(self._verify_evidence)
+        self._verify_all_progress_label = QLabel("")
+        self._verify_all_progress_label.setObjectName("SystemState_Label_verifyAllProgress")
+        self._verify_all_progress_label.setWordWrap(True)
+        self._verify_all_progress_label.setVisible(False)
+        section.add_widget(self._verify_all_progress_label)
+
+        # GPU verify + restore.
+        gpu_row = QHBoxLayout()
+        self._gpu_verify_btn = make_button(
+            "Test GPU Fan Control", "secondary", object_name="SystemState_Btn_verifyGpu"
+        )
+        self._gpu_verify_btn.clicked.connect(self._run_gpu_verify)
+        self._gpu_verify_btn.setVisible(False)
+        gpu_row.addWidget(self._gpu_verify_btn)
+        self._gpu_restore_btn = make_button(
+            "Restore GPU Fan to Automatic", "secondary", object_name="SystemState_Btn_restoreGpu"
+        )
+        self._gpu_restore_btn.clicked.connect(self._run_gpu_restore)
+        self._gpu_restore_btn.setVisible(False)
+        gpu_row.addWidget(self._gpu_restore_btn)
+        gpu_row.addStretch(1)
+        section.add_layout(gpu_row)
+
+        self._gpu_verify_result_label = QLabel("")
+        self._gpu_verify_result_label.setObjectName("SystemState_Label_verifyGpuResult")
+        self._gpu_verify_result_label.setWordWrap(True)
+        self._gpu_verify_result_label.setVisible(False)
+        section.add_widget(self._gpu_verify_result_label)
+        self._gpu_verify_evidence = VerifyEvidencePanel("SystemState_Section_verifyGpuEvidence")
+        section.add_widget(self._gpu_verify_evidence)
+        self._gpu_restore_result_label = QLabel("")
+        self._gpu_restore_result_label.setObjectName("SystemState_Label_restoreGpuResult")
+        self._gpu_restore_result_label.setWordWrap(True)
+        self._gpu_restore_result_label.setVisible(False)
+        section.add_widget(self._gpu_restore_result_label)
+
+        return section
+
+    def _build_health_header_actions(self) -> None:
+        """Refresh + Open Full Report, on the always-visible health card.
+
+        Both used to live at the foot of the collapsed *Advanced actions*
+        section, which is built ``expanded=False`` — so the report, the only
+        entry to ``ReadinessReportDialog`` anywhere in the app, was genuinely
+        off-screen until you went looking for it, and the page had no refresh
+        affordance at all (DEC-358). A page whose whole content is a cached
+        hardware snapshot needs a way to retake it.
+        """
+        self._refresh_btn = make_button("Refresh", "ghost", object_name="SystemState_Btn_refresh")
+        self._refresh_btn.setToolTip("Re-read hardware diagnostics from the daemon")
+        self._refresh_btn.clicked.connect(self._force_refresh_diagnostics)
+        self._health_card.add_header_action(self._refresh_btn)
+
+        self._open_report_btn = make_button(
+            "Open Full Report", "ghost", object_name="SystemState_Btn_openReport"
+        )
+        self._open_report_btn.clicked.connect(self._open_readiness_report)
+        self._open_report_btn.setEnabled(False)
+        self._health_card.add_header_action(self._open_report_btn)
+
+    def _force_refresh_diagnostics(self) -> None:
+        """Refetch ``/diagnostics/hardware`` even though the cache is warm.
+
+        Calls the fetch **directly** rather than going near ``showEvent``, whose
+        first branch renders the cache whenever one exists — routing a refresh
+        through it would re-render the same stale payload, which is the bug this
+        button exists to fix, wearing a button.
+
+        ``_hw_diag_fetched`` is latched rather than cleared. Clearing it would
+        arm ``showEvent`` to fetch *again* on the next visit to the page, so a
+        refresh would cost two round trips to the daemon's most expensive
+        endpoint for one press.
+        """
+        if self._hw_diag_in_flight:
+            return
+        self._hw_diag_fetched = True
+        self._hw_diag_in_flight = True
+        self._refresh_btn.setEnabled(False)
+        self._health_card.set_summary("Refreshing hardware diagnostics…")
+        self._fetch_hardware_diagnostics()
+
+    def _end_refresh(self) -> None:
+        """Release the in-flight guard, whichever way the fetch ended."""
+        self._hw_diag_in_flight = False
+        self._refresh_btn.setEnabled(True)
+
+    # ── Fetch + render ───────────────────────────────────────────────
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        cached = self._diag.last_hw_diagnostics
+        if cached is not None:
+            self._render(cached)  # old tab already fetched → render from cache
+        elif not self._hw_diag_fetched:
+            self._hw_diag_fetched = True  # latch BEFORE emit → a re-show never double-fetches
+            # Arm the same guard the header Refresh uses. Without this, a click
+            # landing while this first fetch is still outstanding is not deduped
+            # — the guard would be narrower than its own docstring claims.
+            self._hw_diag_in_flight = True
+            self._refresh_btn.setEnabled(False)
+            self._fetch_hardware_diagnostics()
+
+    def _fetch_hardware_diagnostics(self) -> None:
+        if not self._client:
+            self._health_card.set_summary("Cannot fetch: no daemon connection")
+            self._end_refresh()  # no worker will ever answer → release here
+            return
+        if not self._ensure_hw_diag_worker():
+            self._health_card.set_summary("Cannot fetch: no daemon socket path")
+            self._end_refresh()
+            return
+        self._hw_diag_request.emit()
+
+    @Slot(object)
+    def _on_hw_diag_ok(self, result: HardwareDiagnosticsResult) -> None:
+        self._end_refresh()
+        # Warm the shared cache (Overview/Sensors read board vendor from it on
+        # their next poll) *and* AppState.board_info, which the hwmon label
+        # fallback table keys on — set_hw_diagnostics owns both (DEC-229).
+        self._diag.set_hw_diagnostics(result)
+        self._render(result)
+
+    @Slot(str, str)
+    def _on_hw_diag_error(self, category: str, message: str) -> None:
+        self._end_refresh()
+        if category == "unavailable":
+            self._health_card.set_summary(
+                message or "Daemon unavailable — cannot fetch diagnostics"
+            )
+        else:
+            self._health_card.set_summary(f"Diagnostics error: {message}")
+
+    def _render(self, diag: HardwareDiagnosticsResult) -> None:
+        # Keep the payload this page last rendered. A board-note acknowledgement
+        # changes only GUI state, so it must re-render without refetching
+        # `/diagnostics/hardware` — the expensive call on this page. Held here
+        # rather than read back from DiagnosticsService so the re-render cannot
+        # silently become a no-op if that cache is warmed by a different path.
+        self._last_rendered_diag = diag
+        if diag is not self._pruned_for:
+            # Once per FETCHED payload, not once per render. What the hardware
+            # can raise only changes when the payload does, and a re-render is
+            # now triggered by a 1 Hz thermal change, an ack toggle or a
+            # dismissal — none of which alters the live key set, and all of
+            # which would otherwise pay for a second full view-model build.
+            self._pruned_for = diag
+            self._prune_silences(diag)
+        settings = self._settings_svc.settings
+        # DEC-456: every render is the baseline the headers handler compares to,
+        # so a value this render already showed never costs a second one.
+        self._pwm_verified_rendered = self._pwm_verified()
+        vm = build_system_state_vm(
+            diag,
+            duty_drift=self._duty_drift(),
+            pwm_control_verified=self._pwm_verified_rendered,
+            live_thermal_state=self._live_thermal_state,
+            live_emergency_causes=self._live_emergency_causes,
+            silence=SilenceState(
+                acknowledged=frozenset(self._session_acks),
+                dismissed=frozenset(settings.dismissed_health_items),
+                kernel_warnings=frozenset(settings.acknowledged_kernel_warnings),
+                allow_acknowledge=settings.board_notes_allow_acknowledge,
+                allow_dismiss=settings.board_notes_allow_dismiss,
+            ),
+        )
+        self._health_card.render(vm)
+        self._registry_card.set_summary(vm.summary_line)
+        self._interference_card.render(vm.interference)
+        self._safety_card.render(vm.safety_gpu)
+        self._registry_card.render(vm.registry_rows)
+        self._populate_verify_combo()
+        self._update_gpu_verify_availability(diag)
+        self._open_report_btn.setEnabled(True)
+        if self._report_dialog is not None and self._report_dialog.isVisible():
+            self._report_dialog.set_html(
+                build_readiness_report_html(
+                    diag, pwm_control_verified=self._pwm_verified(), duty_drift=self._duty_drift()
+                )
+            )
+
+    @Slot(str, bool)
+    def _on_note_acknowledged(self, token: str, acknowledged: bool) -> None:
+        """(Un)acknowledge one item, for the session only (DEC-359).
+
+        Every silenceable surface routes here — conditions, board notes, the
+        Interference Monitor, the thermal row, the GPU advisories and the
+        Safety & GPU constraint rows (DEC-380) — because a silencing decision
+        belongs to the item, not to the widget that happened to show it
+        (`ACK-h` is that rule being broken by the previous design).
+        """
+        key = silence_key(token)
+        before = len(self._session_acks)
+        if acknowledged:
+            self._session_acks.add(token)
+        else:
+            # Clear EVERY token for this key, not the one matching right now:
+            # under occurrence matching the row's current token may never have
+            # been stored, and removing only it would leave an older silence
+            # standing (DEC-358 found the same trap one dimension down).
+            self._session_acks = set(clear_key(self._session_acks, key))
+        if len(self._session_acks) == before and acknowledged:
+            return
+        self._rerender_last_diagnostics()
+
+    @Slot(str)
+    def _on_note_dismissed(self, token: str) -> None:
+        """Dismiss one item, persistently, until Settings restore or escalation."""
+        stored = list(self._settings_svc.settings.dismissed_health_items)
+        if token in stored:
+            return
+        self._settings_svc.update(dismissed_health_items=[*stored, token])
+        self._rerender_last_diagnostics()
+
+    @Slot(str)
+    def set_thermal_state(self, state: str, emergency_causes: Sequence[str] = ()) -> None:
+        """Take the live daemon thermal state (1 Hz, DEC-358).
+
+        Re-renders only when the value actually *changes*. The Safety card read
+        its thermal state from ``/diagnostics/hardware``, which this page
+        fetches once, so the row could sit on an hours-old "Normal" — or an
+        hours-old "Emergency" — for as long as the app stayed open. The daemon
+        is the sole writer and acts on thermal safety regardless (DEC-165); what
+        was wrong was this page *reporting* a snapshot as if it were current.
+
+        Guarding on change keeps it off the 1 Hz path: a steady state costs one
+        string comparison per poll and re-renders nothing. It is also what makes
+        DEC-359's thermal-row dismissal safe — an escalation re-ranks the row
+        within a second and outranks any silence taken at a quieter state.
+
+        ``emergency_causes`` rides along so the row's limit names the rung that
+        tripped — the coolant limit, not the CPU's, for a coolant emergency.
+        """
+        state = state or "normal"
+        causes = tuple(emergency_causes)
+        if state == self._live_thermal_state and causes == self._live_emergency_causes:
+            return
+        self._live_thermal_state = state
+        self._live_emergency_causes = causes
+        self._rerender_last_diagnostics()
+
+    @Slot(bool)
+    def set_live(self, live: bool) -> None:
+        """Stop reporting the last thermal state as current while disconnected (`TS-g`).
+
+        :meth:`set_thermal_state` is driven only by a successful poll, so after a
+        disconnect the Safety row kept its last value — "Normal" over a daemon
+        nobody could reach. Clearing it is not the answer: ``""`` falls back to
+        the ``/diagnostics/hardware`` snapshot, the other stale copy. So the
+        disconnect edge swaps in ``THERMAL_STATE_NO_CONNECTION``, which the view
+        model renders as an unknown state with no silence to offer. The connect
+        edge does nothing: the poll that reconnects also calls
+        :meth:`set_thermal_state`, which replaces the marker within the same
+        cycle. The same shape as ``StatusFooter.set_live`` and the ribbon's.
+        """
+        if live or self._live_thermal_state == THERMAL_STATE_NO_CONNECTION:
+            return
+        self._live_thermal_state = THERMAL_STATE_NO_CONNECTION
+        self._live_emergency_causes = ()
+        # A drift card is live poll state too: with no daemon to ask, "this header
+        # is not holding" is no longer a current fact (S4-12).
+        self._duty_drift_state = NO_DRIFT
+        self._rerender_last_diagnostics()
+
+    def _prune_silences(self, diag) -> None:
+        """Drop persisted dismissals this hardware can no longer raise (`ACK-g`).
+
+        Two reasons it runs on render rather than on load. The live key set is
+        only knowable once `/diagnostics/hardware` has been fetched — pruning at
+        load would have nothing to compare against and would delete everything.
+        And the Settings restore counter is the one place the user sees this
+        list, so a stale entry there is not merely untidy: it promises to
+        restore something that can never come back.
+
+        A HIDDEN dismissal is still live: it is pruned against the keys the
+        hardware can *raise*, which `_live_silence_keys` takes from the rendered
+        VM including the notes and rows currently being silenced. Pruning
+        against what is *visible* would delete every dismissal the moment it
+        took effect, which is the bug this guard would otherwise introduce.
+        """
+        stored = list(self._settings_svc.settings.dismissed_health_items)
+        if not stored:
+            return
+        # NEVER prune off an incomplete snapshot. `/diagnostics/hardware` returns
+        # 200 with an empty `chips_detected` when no hwmon chip enumerated — the
+        # GUI models that as its own `no_chips` condition, so it is a normal
+        # payload, not an error. Every board-note and chip-scoped key vanishes
+        # from the live set in that state, and this method PERSISTS its result,
+        # so a transient one (a daemon restart mid-session) would delete the
+        # user's dismissals irreversibly. Pruning is an optimisation; losing a
+        # preference is not, so when in doubt do nothing.
+        if not diag.hwmon.chips_detected:
+            return
+        probe = build_system_state_vm(
+            diag,
+            duty_drift=self._duty_drift(),
+            pwm_control_verified=self._pwm_verified(),
+            live_thermal_state=self._live_thermal_state,
+        )
+        kept = prune(stored, _live_silence_keys(probe))
+        if kept != stored:
+            self._settings_svc.update(dismissed_health_items=kept)
+
+    def _rerender_last_diagnostics(self) -> None:
+        """Re-render from the cached payload after a settings-only change.
+
+        Deliberately not a refetch: nothing about the hardware changed, and
+        `/diagnostics/hardware` is the expensive one on this page.
+        """
+        diag = self._last_rendered_diag or self._diag.last_hw_diagnostics
+        if diag is not None:
+            self._render(diag)
+
+    def _record_verify_outcome(self, results: list[tuple[str, str]]) -> None:
+        """Persist what a fan-control test found, for the board-note evidence.
+
+        The verdict is `verify_view.verify_sweep_outcome` and nothing else, so
+        what is persisted here and the chip shown by
+        :meth:`_show_verify_all_summary` cannot disagree — they did, and that
+        divergence is DEC-358: a sweep of two good headers and one without a
+        tach showed a green "complete" chip while recording `ineffective`,
+        which promoted every triggerless board note to a condition card that
+        re-testing could never clear.
+        """
+        outcome = verify_sweep_outcome([result for _, result in results])
+        if outcome is None:
+            return  # nothing was settled — leave the recorded result alone
+        self._settings_svc.update(last_pwm_verify_effective=outcome)
+        self._rerender_last_diagnostics()
+
+    def _verify_in_flight(self) -> bool:
+        """Is a single verify or a full sweep currently running?"""
+        return bool(self._verify_all_total) or self._verify_active_header is not None
+
+    def pwm_verify_running(self) -> bool:
+        """The PWM Test Report's view of :meth:`_verify_in_flight` (`PTA-d`).
+
+        MainWindow hands this to the Hardware page, so the report refuses to
+        start while a verify or sweep started here is still running.
+        """
+        return self._verify_in_flight()
+
+    def _sync_verify_button_enabled(self) -> None:
+        """The ONE gating shape for *Test PWM Control* (row `ACK-z`).
+
+        There used to be four expressions for one button: this rule guarded by
+        `_verify_in_flight` in `_populate_verify_combo`, a bare
+        ``setEnabled(True)`` in each result handler, and an ungated
+        ``count() > 0`` in `_finish_verify_all`. The handlers had never heard of
+        the sweep, so they re-enabled the button the sweep had deliberately
+        disabled — DEC-334's lesson, that a second gating shape for one flag
+        hides the broken one for as long as the working one keeps agreeing.
+
+        **Every caller settles its own state first.** `_on_verify_ok` clears
+        `_verify_active_header` *before* calling this; gating the re-enable
+        while that field still names the header that has just reported would
+        leave the button disabled forever after an ordinary single verify,
+        because `_verify_in_flight` would still be true.
+        """
+        self._verify_btn.setEnabled(
+            not self._verify_in_flight()
+            and self._verify_combo.count() > 0
+            and not self._pwm_report_active
+        )
+        self._verify_btn.setToolTip(RUN_ACTIVE_REASON if self._pwm_report_active else "")
+
+    def _sync_verify_all_enabled(self) -> None:
+        """The one gating shape for *Verify All Writable* (DEC-404 S4-13).
+
+        `_finish_verify_all` used to re-enable it with a bare ``setEnabled(True)``
+        — the `ACK-z` shape this file already retired for the single-verify
+        button — which would have re-enabled it in the middle of a report run.
+
+        `ACK-ab`: it reads `_verify_in_flight`, not just the sweep's own total,
+        so a single verify greys it too. Otherwise a sweep started over it would
+        queue one hardware probe more than the user asked for. `ACK-z`'s trap
+        applies here too: every caller clears `_verify_active_header` first.
+        """
+        self._verify_all_btn.setEnabled(
+            not self._verify_in_flight() and not self._pwm_report_active
+        )
+        self._verify_all_btn.setToolTip(RUN_ACTIVE_REASON if self._pwm_report_active else "")
+
+    def _sync_verify_buttons(self) -> None:
+        """All three hwmon test buttons from the page's current state.
+
+        Called wherever that state changes: a result, the end of a sweep, and a
+        report run starting or ending. So a verify greys every button, not just
+        the one it was started from (`ACK-ab`, `ACK-ac`).
+        """
+        self._sync_verify_button_enabled()
+        self._sync_verify_all_enabled()
+        self._update_characterize_availability()
+
+    @Slot(bool)
+    def set_pwm_report_active(self, active: bool) -> None:
+        """Stand the hwmon diagnostics down while a PWM Test Report runs (S4-13).
+
+        The GPU fan buttons are deliberately untouched: the report never tests a
+        GPU fan and GPU verify does not share the hwmon slot.
+        """
+        if active == self._pwm_report_active:
+            return
+        self._pwm_report_active = active
+        self._sync_verify_buttons()
+
+    def _populate_verify_combo(self) -> None:
+        """Rebuild the header dropdown, preserving the user's pick.
+
+        Two things here are load-bearing, and DEC-358 is what made them matter:
+        before it, every re-render followed a **user action**, so a rebuild could
+        only land at a moment the user had chosen. The live thermal push gives
+        this page an autonomous 1 Hz trigger, which can land at any moment —
+        including in the middle of a sweep.
+
+        * The selection is restored **by id**. ``clear()`` resets
+          ``currentIndex`` to 0, so a re-render between picking a header and
+          pressing *Test PWM Control* would silently test a different one.
+        * ``_verify_btn``'s enabled state comes from
+          :meth:`_sync_verify_button_enabled` — one gating shape, shared with
+          both result handlers and ``_finish_verify_all`` (row `ACK-z`).
+          ``_run_pwm_verify``/``_run_pwm_verify_all`` disable it deliberately,
+          and a rebuild that re-enabled it mid-sweep would let a second
+          concurrent verify start. DEC-364 made that survivable rather than
+          corrupting — a foreign result is now shown and then ignored, because
+          the sweep matches on the header it actually asked for — so what
+          remains is a button offering an action the page will not honour, plus
+          a needless hardware probe.
+        """
+        previous = self._verify_combo.currentData()
+        self._verify_combo.clear()
+        headers = self._state.hwmon_headers if self._state else []
+        resolve = self._state.fan_display_name if self._state else None
+        for text, hid in build_verify_headers(headers, resolve):
+            self._verify_combo.addItem(text, hid)
+        if previous is not None:
+            restored = self._verify_combo.findData(previous)
+            if restored >= 0:
+                self._verify_combo.setCurrentIndex(restored)
+        self._sync_verify_button_enabled()
+        self._update_characterize_availability()
+
+    def _supports_characterization(self) -> bool:
+        caps = getattr(self._state, "capabilities", None) if self._state else None
+        return daemon_supports("pwm_characterization", caps) is True
+
+    def _update_characterize_availability(self) -> None:
+        """Visibility follows support; enablement also follows what is running.
+
+        `ACK-ac`: characterisation claims the daemon's one diagnostic slot, the
+        same as verify, and the daemon refuses it (`409`) while a verify holds
+        that slot. So it greys while a verify or sweep started here is in
+        flight. It stays visible, because a button that vanishes mid-sweep is
+        worse than one that greys.
+        """
+        show = self._supports_characterization() and self._verify_combo.count() > 0
+        self._characterize_btn.setVisible(show)
+        self._characterize_btn.setEnabled(
+            show and not self._verify_in_flight() and not self._pwm_report_active
+        )
+        self._characterize_btn.setToolTip(RUN_ACTIVE_REASON if self._pwm_report_active else "")
+
+    # ── Worker lifecycle (ported) ────────────────────────────────────
+
+    def _ensure_worker(self, worker, thread, worker_cls, connect: Callable) -> tuple:
+        if worker is not None:
+            return worker, thread, True
+        socket_path = self._client.socket_path if self._client else None
+        if not socket_path:
+            return None, None, False
+        thread = QThread(self)
+        worker = worker_cls(socket_path)
+        worker.moveToThread(thread)
+        connect(worker)
+        thread.start()
+        return worker, thread, True
+
+    def _ensure_verify_worker(self) -> bool:
+        def connect(w: _VerifyWorker) -> None:
+            self._verify_request.connect(w.do_verify, Qt.ConnectionType.QueuedConnection)
+            w.verify_ok.connect(self._on_verify_ok, Qt.ConnectionType.QueuedConnection)
+            w.verify_error.connect(self._on_verify_error, Qt.ConnectionType.QueuedConnection)
+
+        self._verify_worker, self._verify_thread, ok = self._ensure_worker(
+            self._verify_worker, self._verify_thread, _VerifyWorker, connect
+        )
+        return ok
+
+    def _ensure_hw_diag_worker(self) -> bool:
+        def connect(w: _HwDiagWorker) -> None:
+            self._hw_diag_request.connect(w.do_fetch, Qt.ConnectionType.QueuedConnection)
+            w.fetch_ok.connect(self._on_hw_diag_ok, Qt.ConnectionType.QueuedConnection)
+            w.fetch_error.connect(self._on_hw_diag_error, Qt.ConnectionType.QueuedConnection)
+            # DEC-216: this page now owns the footer's Rescan Hardware action
+            # (relocated from the retired Diagnostics page).
+            self._rescan_request.connect(w.do_rescan, Qt.ConnectionType.QueuedConnection)
+            w.rescan_ok.connect(self._on_rescan_ok, Qt.ConnectionType.QueuedConnection)
+            w.rescan_error.connect(self._on_rescan_error, Qt.ConnectionType.QueuedConnection)
+
+        self._hw_diag_worker, self._hw_diag_thread, ok = self._ensure_worker(
+            self._hw_diag_worker, self._hw_diag_thread, _HwDiagWorker, connect
+        )
+        return ok
+
+    # ── hwmon rescan (footer action, relocated from Diagnostics — DEC-216) ──
+
+    def run_hwmon_rescan(self) -> None:
+        """Ask the daemon to re-enumerate hwmon devices (DEC-147), triggered by
+        the global footer's Rescan Hardware action. main_window surfaces this
+        page first so the outcome line is visible (fixing the retired nav-dead
+        Diagnostics page's invisible feedback)."""
+        if self._rescan_in_flight:
+            return
+        if not self._client:
+            self._show_rescan_message("Cannot rescan: no daemon connection", "CriticalChip")
+            return
+        if not self._ensure_hw_diag_worker():
+            # Unreachable in production (DaemonClient always has a socket path).
+            self._show_rescan_message("Rescan unavailable: no daemon socket path", "CriticalChip")
+            return
+        self._rescan_in_flight = True
+        self._show_rescan_message("Rescanning hardware…", "InfoChip")
+        self._rescan_request.emit()
+
+    def _show_rescan_message(self, text: str, css_class: str = "CardMeta") -> None:
+        self._rescan_result_label.setText(text)
+        set_chip_class(self._rescan_result_label, css_class)
+        self._rescan_result_label.setVisible(True)
+
+    @Slot(object, str)
+    def _on_rescan_ok(self, headers: list[HwmonHeader], adopted_port: str = "") -> None:
+        """Apply a successful rescan: push the fresh header list through AppState
+        (feeding the member picker, profile sanitization, and every other
+        ``headers_updated`` consumer), drop the cached libsensors label config
+        (so an ``/etc/sensors.d`` relabel surfaces without a GUI restart), then
+        chain a hardware-diagnostics refetch so readiness reflects reality.
+
+        ``adopted_port`` is the serial port an OpenFanController was adopted on
+        by the same action's best-effort DEC-265 leg, or ``""`` for every other
+        outcome — including "looked and found nothing", which is the normal
+        result on a machine without one. It selects which caveat the result line
+        carries. The default exists only so the three pre-DEC-266 direct-call
+        tests stay valid; Qt always delivers both arguments.
+        """
+        clear_libsensors_cache()
+        if self._state is not None:
+            self._state.set_hwmon_headers(headers)
+        n = len(headers)
+        # DEC-266: the restart advice is about *hwmon* hardware, and saying it
+        # unconditionally was wrong in exactly the case DEC-265 exists for — the
+        # daemon had just adopted an OpenFan controller without a restart while
+        # the UI told the user to perform one. An adoption is also the one
+        # outcome of this leg worth reporting; anything else stays silent.
+        if adopted_port:
+            message = (
+                f"Rescan complete — {n} PWM header(s) found, and an OpenFan "
+                f"controller was adopted on {adopted_port}. Sensors and fans "
+                "refresh on the next poll cycle."
+            )
+        else:
+            message = (
+                f"Rescan complete — {n} PWM header(s) found. Sensors refresh on "
+                "the next poll cycle. New motherboard fan-control hardware still "
+                "requires a daemon restart."
+            )
+        self._show_rescan_message(message, "SuccessChip")
+        self._diag.log_event(
+            "info",
+            "hwmon",
+            f"Hardware rescan: {n} PWM header(s) found",
+            fields={"headers_found": str(n)},
+        )
+        if adopted_port:
+            self._diag.log_event(
+                "info",
+                "openfan",
+                f"OpenFanController adopted on {adopted_port} via rescan",
+                fields={"component": adopted_port},
+            )
+        self._rescan_in_flight = False
+        self._fetch_hardware_diagnostics()
+
+    @Slot(str, str)
+    def _on_rescan_error(self, category: str, message: str) -> None:
+        """Surface a rescan failure. The previously known header set is kept — a
+        failed re-enumeration says nothing about the existing hardware."""
+        if category == "unavailable":
+            self._show_rescan_message(
+                message or "Daemon unavailable — cannot rescan hardware", "CriticalChip"
+            )
+        else:
+            self._show_rescan_message(f"Rescan error: {message}", "CriticalChip")
+        self._diag.log_event("error", "hwmon", f"Hardware rescan failed: {message}")
+        self._rescan_in_flight = False
+
+    def _ensure_gpu_verify_worker(self) -> bool:
+        def connect(w: _GpuVerifyWorker) -> None:
+            self._gpu_verify_request.connect(w.do_verify, Qt.ConnectionType.QueuedConnection)
+            self._gpu_reset_request.connect(w.do_reset, Qt.ConnectionType.QueuedConnection)
+            w.verify_ok.connect(self._on_gpu_verify_ok, Qt.ConnectionType.QueuedConnection)
+            w.verify_error.connect(self._on_gpu_verify_error, Qt.ConnectionType.QueuedConnection)
+            w.reset_ok.connect(self._on_gpu_restore_ok, Qt.ConnectionType.QueuedConnection)
+            w.reset_error.connect(self._on_gpu_restore_error, Qt.ConnectionType.QueuedConnection)
+
+        self._gpu_verify_worker, self._gpu_verify_thread, ok = self._ensure_worker(
+            self._gpu_verify_worker, self._gpu_verify_thread, _GpuVerifyWorker, connect
+        )
+        return ok
+
+    def _teardown_worker(self, worker: QObject | None, thread: QThread | None, label: str) -> None:
+        # Close the client (worker.shutdown) BEFORE joining the thread: the verify
+        # worker blocks synchronously in POST /hwmon/{id}/verify, and closing the
+        # client is the only way to interrupt it so quit()/wait() can join (the
+        # do_verify slot absorbs the resulting connection error). Audit F-1
+        # proposed close-after-join to match ControlsPage, but that hangs the join
+        # for a blocking call — proven by test_v1_2_diagnostics' in-flight test.
+        #
+        # `ROLE-g`: this page's requests to the worker go first, so no new call
+        # is queued against a client about to close. A call already in flight
+        # is the worker's backstop to absorb.
+        if worker is not None:
+            QObject.disconnect(self, None, worker, None)
+            QObject.disconnect(worker, None, None, None)
+            worker.shutdown()
+        if thread is not None:
+            thread.quit()
+            if not thread.wait(2000):
+                log.warning("%s thread did not stop within 2s, terminating", label)
+                thread.terminate()
+                thread.wait(1000)
+
+    # ── PWM/RPM characterisation (AIO-MB Phase 3) ────────────────────
+
+    def _ensure_char_worker(self) -> bool:
+        def connect(w: _CharacterizationWorker) -> None:
+            self._char_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
+            self._char_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
+            self._char_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
+            self._char_preflight_request.connect(w.do_preflight, Qt.ConnectionType.QueuedConnection)
+            w.run_updated.connect(self._on_char_update, Qt.ConnectionType.QueuedConnection)
+            w.run_error.connect(self._on_char_error, Qt.ConnectionType.QueuedConnection)
+            w.preflight_ready.connect(
+                self._on_char_preflight_ready, Qt.ConnectionType.QueuedConnection
+            )
+            w.preflight_error.connect(
+                self._on_char_preflight_error, Qt.ConnectionType.QueuedConnection
+            )
+
+        self._char_worker, self._char_thread, ok = self._ensure_worker(
+            self._char_worker, self._char_thread, _CharacterizationWorker, connect
+        )
+        return ok
+
+    def _open_characterization(self) -> None:
+        header_id = self._verify_combo.currentData()
+        if not header_id or not self._supports_characterization():
+            return
+        if not self._ensure_char_worker():
+            return
+        headers = self._state.hwmon_headers if self._state else []
+        header = next((h for h in headers if h.id == header_id), None)
+        resolve = self._state.fan_display_name if self._state else None
+        label = resolve(header_id) if resolve else header_id
+        # The UNION predicate, never the wire `role` (DEC-312): a user who
+        # relabelled a PUMP header `chassis_fan` still gets the pump copy,
+        # because the daemon still protects it.
+        dialog = PwmCharacterizationDialog(
+            header_id,
+            label,
+            is_pump=header_is_pump_protected(header, getattr(self._state, "capabilities", None)),
+            header=header,
+            capabilities=getattr(self._state, "capabilities", None),
+            parent=self,
+        )
+        dialog.start_requested.connect(self._char_start_request.emit)
+        dialog.poll_requested.connect(self._char_poll_request.emit)
+        dialog.cancel_requested.connect(self._char_cancel_request.emit)
+        dialog.preflight_requested.connect(self._char_preflight_request.emit)
+        self._char_dialog = dialog
+        # BEFORE `exec()`, so the daemon's safety statement is the first thing
+        # rendered rather than something that arrives after the user has reached
+        # for Start (Batch 1 §6.1).
+        dialog.request_preflight()
+        try:
+            dialog.exec()
+        finally:
+            dialog.stop_polling()
+            self._char_dialog = None
+
+    @Slot(object)
+    def _on_char_preflight_ready(self, report: object) -> None:
+        if self._char_dialog is not None:
+            self._char_dialog.apply_preflight(report)
+
+    @Slot(str, str)
+    def _on_char_preflight_error(self, category: str, message: str) -> None:
+        # Advisory only, never `apply_error`: a missing safety advisory must not
+        # disable Start for a run the daemon would accept.
+        if self._char_dialog is not None:
+            self._char_dialog.apply_preflight_error(category, message)
+
+    @Slot(object)
+    def _on_char_update(self, run: object) -> None:
+        if self._char_dialog is not None:
+            self._char_dialog.apply_run(run)
+
+    @Slot(str, str)
+    def _on_char_error(self, category: str, message: str) -> None:
+        if self._char_dialog is not None:
+            self._char_dialog.apply_error(category, message)
+
+    def cleanup(self) -> None:
+        if self._char_dialog is not None:
+            self._char_dialog.stop_polling()
+            self._char_dialog.close()
+            self._char_dialog = None
+        self._teardown_worker(self._char_worker, self._char_thread, "Characterization")
+        self._char_worker = self._char_thread = None
+        self._teardown_worker(self._verify_worker, self._verify_thread, "Verify")
+        self._verify_worker = self._verify_thread = None
+        self._teardown_worker(self._hw_diag_worker, self._hw_diag_thread, "HW diagnostics")
+        self._hw_diag_worker = self._hw_diag_thread = None
+        self._teardown_worker(self._gpu_verify_worker, self._gpu_verify_thread, "GPU verify")
+        self._gpu_verify_worker = self._gpu_verify_thread = None
+        if self._report_dialog is not None:
+            self._report_dialog.close()
+            self._report_dialog = None
+
+    # ── PWM verify (ported) ──────────────────────────────────────────
+
+    def _run_pwm_verify(self) -> None:
+        # Every message this path can show replaces the last result, so its
+        # evidence goes too — a table under a verdict it does not describe.
+        self._verify_evidence.set_evidence(None)
+        header_id = self._verify_combo.currentData()
+        if not header_id:
+            self._show_verify_message(self._verify_result_label, "No writable header selected")
+            return
+        if not self._client:
+            self._show_verify_message(
+                self._verify_result_label, "Cannot verify: no daemon connection"
+            )
+            return
+        self._verify_btn.setEnabled(False)
+        self._verify_btn.setText("Testing...")
+        self._verify_result_label.setVisible(False)
+        if not self._ensure_verify_worker():
+            self._verify_btn.setText("Test PWM Control")
+            self._sync_verify_button_enabled()
+            self._show_verify_message(
+                self._verify_result_label, "Verify unavailable: no socket path"
+            )
+            return
+        self._verify_active_header = header_id
+        self._sync_verify_all_enabled()  # `ACK-ab`: after the header is recorded
+        self._update_characterize_availability()  # `ACK-ac`
+        self._verify_request.emit(header_id)
+
+    @Slot(object, str)
+    def _on_verify_ok(self, result: HwmonVerifyResult, header_id: str) -> None:
+        """A verify finished. ``header_id`` is the header it was REQUESTED for.
+
+        The sweep accepts a result only when that header is the one it is
+        waiting on (row `ACK-n`). Attributing by "is a sweep open" instead meant
+        a verify started by any other path both injected a foreign result into
+        `_verify_all_results` and popped an extra header off the queue — so the
+        sweep skipped a header and `verify_sweep_outcome` persisted a verdict
+        over a set it had not produced, onto the board-note evidence.
+
+        There were TWO routes to that foreign verify and `ACK-n` accounted for
+        one: DEC-358 stopped a background re-render re-enabling the button. The
+        second was *this handler*, which re-enabled ``_verify_btn``
+        unconditionally on every result while ``_step_pwm_verify_all`` never
+        disabled it again — so the button was live from the first result to the
+        last (row `ACK-z`, closed by :meth:`_sync_verify_button_enabled`). With
+        both closed, the attribution guard below is a convenience again rather
+        than the only thing standing between a click and a corrupted verdict.
+
+        A non-matching result is shown and then ignored, and the sweep keeps
+        waiting. It cannot wedge on one: every request the sweep emits produces
+        exactly one `verify_ok` or `verify_error` carrying that same requested
+        header, so its own answer always arrives.
+        """
+        self._show_verify_result(result)
+        # Settle the state BEFORE the gate reads it: `_verify_in_flight` is
+        # still true here until this field is cleared.
+        self._verify_active_header = None
+        self._verify_btn.setText("Test PWM Control")
+        self._sync_verify_buttons()
+        if self._verify_all_total > 0 and header_id == self._verify_all_pending:
+            self._verify_all_pending = None
+            self._verify_all_results.append((header_id, result.result))
+            if result.restore_failed:
+                self._verify_all_restore_failed.add(header_id)
+            self._step_pwm_verify_all()
+
+    @Slot(str, str, str)
+    def _on_verify_error(self, category: str, message: str, header_id: str) -> None:
+        """A verify failed. ``header_id`` is the header it was REQUESTED for.
+
+        Same attribution rule as :meth:`_on_verify_ok`, and it needs the same
+        evidence: the header used to come from `_verify_active_header`, which is
+        overwritten by whichever path requested last, so a foreign failure was
+        recorded against whatever the sweep happened to be testing.
+        """
+        if category == "unavailable":
+            self._show_verify_message(
+                self._verify_result_label, message or "Daemon unavailable during verify"
+            )
+        else:
+            self._show_verify_message(
+                self._verify_result_label, f"Verify error: {message}", "CriticalChip"
+            )
+        self._verify_evidence.set_evidence(None)
+        self._verify_active_header = None  # before the gate reads it — see `_on_verify_ok`
+        self._verify_btn.setText("Test PWM Control")
+        self._sync_verify_buttons()
+        if self._verify_all_total > 0 and header_id == self._verify_all_pending:
+            self._verify_all_pending = None
+            self._verify_all_results.append((header_id, f"error:{category}"))
+            self._step_pwm_verify_all()
+
+    @staticmethod
+    def _show_verify_message(label: QLabel, text: str, chip_class: str = "") -> None:
+        """Show a message that is not a verify result on a verify result label.
+
+        `PTA-r`: the class is set on every message, so a message with none
+        resets it rather than inheriting the colour of the result before it —
+        a "Verify error" after a passing test was painted green. The Hardware
+        page's `_show_diag_message` has followed the same rule since W-DIAGG
+        Run A. ``"unavailable"`` (a timeout, a daemon gone, a safety refusal)
+        stays neutral; only a hard ``"error"`` is critical, as a sweep paints it.
+        """
+        set_chip_class(label, chip_class, skip_if_unchanged=True)
+        label.setText(text)
+        label.setVisible(True)
+
+    def _show_verify_result(self, result: HwmonVerifyResult) -> None:
+        # Wording and assembly live in `services/verify_view` since AIO-MB
+        # Phase 6, so this page and the Hardware page render one object rather
+        # than two copies that drift (DEC-318).
+        header = None
+        if self._state:
+            header = next((h for h in self._state.hwmon_headers if h.id == result.header_id), None)
+        view = build_verify_result_view(
+            result, header=header, diagnostics=self._diag.last_hw_diagnostics
+        )
+        self._verify_result_label.setText(view.text)
+        set_chip_class(self._verify_result_label, view.chip_class)
+        self._verify_result_label.setVisible(True)
+        self._verify_evidence.set_evidence(view.evidence)
+
+    def _run_pwm_verify_all(self) -> None:
+        if not self._state:
+            self._show_verify_message(
+                self._verify_all_progress_label, "Cannot verify: no app state"
+            )
+            return
+        if not self._client:
+            self._show_verify_message(
+                self._verify_all_progress_label, "Cannot verify: no daemon connection"
+            )
+            return
+        if self._verify_all_total > 0:
+            return  # already running
+        writable = [h.id for h in self._state.hwmon_headers if h.is_writable]
+        if not writable:
+            self._show_verify_message(
+                self._verify_all_progress_label, "No writable headers to test."
+            )
+            return
+        if not self._ensure_verify_worker():
+            self._show_verify_message(
+                self._verify_all_progress_label, "Verify unavailable: no socket path"
+            )
+            return
+        self._verify_all_queue = list(writable)
+        self._verify_all_results = []
+        self._verify_all_restore_failed = set()
+        self._verify_all_pending = None
+        self._verify_all_total = len(writable)
+        # The predicates, not bare `setEnabled(False)`: with the total set, all
+        # three read "in flight" and grey (one gating shape per button, `ACK-z`).
+        self._sync_verify_buttons()
+        self._verify_all_btn.setText("Testing...")
+        set_chip_class(self._verify_all_progress_label, "CardMeta")
+        self._verify_all_progress_label.setVisible(True)
+        self._step_pwm_verify_all()
+
+    def _finish_verify_all(self) -> None:
+        self._verify_all_total = 0
+        self._verify_all_pending = None
+        self._sync_verify_buttons()
+        self._verify_all_btn.setText("Verify All Writable")
+
+    def _step_pwm_verify_all(self) -> None:
+        if not self._verify_all_queue:
+            self._show_verify_all_summary()
+            self._finish_verify_all()
+            return
+        header_id = self._verify_all_queue.pop(0)
+        index = self._verify_all_total - len(self._verify_all_queue)
+        self._verify_all_progress_label.setText(
+            f"Testing {index}/{self._verify_all_total}: {header_id}"
+        )
+        self._verify_active_header = header_id
+        self._verify_all_pending = header_id
+        self._verify_request.emit(header_id)
+
+    def _show_verify_all_summary(self) -> None:
+        if not self._verify_all_results:
+            self._show_verify_message(self._verify_all_progress_label, "Verify all: no results.")
+            return
+        self._record_verify_outcome(self._verify_all_results)
+        # Chip class and per-header wording both come from `verify_view`, which
+        # is the same table `_record_verify_outcome` reads. Three inlined copies
+        # of this vocabulary lived here before DEC-358 and one of them disagreed.
+        results = [result for _, result in self._verify_all_results]
+        n_done = len(self._verify_all_results)
+        not_restored = self._verify_all_restore_failed
+        lines = [f"Verify all complete ({n_done}/{self._verify_all_total} tested):"]
+        for header_id, result_str in self._verify_all_results:
+            line = f"  • {header_id}: {outcome_for(result_str).short}"
+            if header_id in not_restored:
+                line += f" — {SWEEP_NOT_RESTORED}"
+            lines.append(line)
+        note = sweep_restore_failed_note(len(not_restored))
+        if note:
+            lines.extend(("", note))
+        self._verify_all_progress_label.setText("\n".join(lines))
+        set_chip_class(
+            self._verify_all_progress_label,
+            verify_sweep_chip_class(results, restore_failed=bool(not_restored)),
+        )
+
+    # ── GPU verify + restore (ported) ────────────────────────────────
+
+    def _update_gpu_verify_availability(self, diag: HardwareDiagnosticsResult) -> None:
+        gpu = diag.gpu
+        writable = bool(gpu and gpu.fan_control_method not in ("read_only", "none", ""))
+        caps = getattr(self._state, "capabilities", None) if self._state else None
+        # `WIRE-k`: capability first, version only as the fallback. The flag says
+        # whether THIS build serves `POST /gpu/{id}/fan/verify`; the version
+        # string only says when the route first appeared, which is why this was a
+        # gate on a number for so long. `daemon_supports` returns None on any
+        # daemon before 2.36.0 — every one of which may still serve the route —
+        # so the comparison stays for exactly that window rather than being
+        # deleted and hiding a working button on a supported daemon.
+        supported = daemon_supports("gpu_fan_verify", caps)
+        if supported is None:
+            supported = daemon_version_at_least(caps.daemon_version if caps else "", (1, 11, 0))
+        self._gpu_verify_bdf = gpu.pci_bdf if (gpu and writable) else None
+        show = bool(self._gpu_verify_bdf) and supported
+        self._gpu_verify_btn.setVisible(show)
+        if not show:
+            self._gpu_verify_result_label.setVisible(False)
+            self._gpu_verify_evidence.set_evidence(None)
+        show_restore = bool(self._gpu_verify_bdf)
+        self._gpu_restore_btn.setVisible(show_restore)
+        if show_restore:
+            self._update_gpu_restore_gate()
+        else:
+            self._gpu_restore_result_label.setVisible(False)
+
+    def _run_gpu_verify(self) -> None:
+        self._gpu_verify_evidence.set_evidence(None)
+        bdf = self._gpu_verify_bdf
+        if not bdf:
+            self._show_verify_message(
+                self._gpu_verify_result_label, "No GPU with a writable fan-control path."
+            )
+            return
+        if not self._client:
+            self._show_verify_message(
+                self._gpu_verify_result_label, "Cannot verify: no daemon connection"
+            )
+            return
+        self._gpu_verify_btn.setEnabled(False)
+        self._gpu_verify_btn.setText("Testing...")
+        self._gpu_verify_result_label.setVisible(False)
+        if not self._ensure_gpu_verify_worker():
+            self._show_verify_message(
+                self._gpu_verify_result_label, "GPU verify unavailable: no daemon socket path"
+            )
+            self._gpu_verify_btn.setEnabled(True)
+            self._gpu_verify_btn.setText("Test GPU Fan Control")
+            return
+        self._gpu_verify_request.emit(bdf)
+
+    @Slot(object)
+    def _on_gpu_verify_ok(self, result: GpuVerifyResult) -> None:
+        self._show_gpu_verify_result(result)
+        self._gpu_verify_btn.setEnabled(True)
+        self._gpu_verify_btn.setText("Test GPU Fan Control")
+
+    @Slot(str, str)
+    def _on_gpu_verify_error(self, category: str, message: str) -> None:
+        self._gpu_verify_evidence.set_evidence(None)
+        if category == "unavailable":
+            self._show_verify_message(
+                self._gpu_verify_result_label, message or "Daemon unavailable during GPU verify"
+            )
+        else:
+            self._show_verify_message(
+                self._gpu_verify_result_label, f"GPU verify error: {message}", "CriticalChip"
+            )
+        self._gpu_verify_btn.setEnabled(True)
+        self._gpu_verify_btn.setText("Test GPU Fan Control")
+
+    def _show_gpu_verify_result(self, result: GpuVerifyResult) -> None:
+        # REWRITE (W-DIAGG Run C, `WIRE-f`): the line assembly moved to
+        # `verify_view.build_gpu_verify_result_view`, joining the vocabulary that
+        # moved there for `ACK-k`. It had one consumer, but its RPM line was a
+        # second copy of what the shared evidence summary now says, and the
+        # `zero_rpm_suppressed` verdict needs the card's zero-RPM state, which
+        # only the view reads. The fixes stay page-supplied: `gpu_verify_problems`
+        # lives beside the readiness report that also renders them.
+        view = build_gpu_verify_result_view(
+            result, fix_lines=[prob["fix"] for prob in gpu_verify_problems(result)]
+        )
+        self._gpu_verify_result_label.setText(view.text)
+        set_chip_class(self._gpu_verify_result_label, view.chip_class)
+        self._gpu_verify_result_label.setVisible(True)
+        self._gpu_verify_evidence.set_evidence(view.evidence)
+
+    def _active_profile_controls_gpu(self) -> bool:
+        ps = self._profile_service
+        profile = ps.active_profile if ps is not None else None
+        if profile is None:
+            return False
+        return any(
+            member.target_id.startswith("amd_gpu:")
+            for control in profile.controls
+            for member in control.members
+        )
+
+    def _update_gpu_restore_gate(self, _profile_name: str | None = None) -> None:
+        managed = self._active_profile_controls_gpu()
+        self._gpu_restore_btn.setEnabled(not managed)
+        self._gpu_restore_btn.setToolTip(
+            _GPU_RESTORE_TOOLTIP_GATED if managed else _GPU_RESTORE_TOOLTIP_READY
+        )
+
+    def _run_gpu_restore(self) -> None:
+        bdf = self._gpu_verify_bdf
+        if not bdf:
+            self._show_gpu_restore_message("No GPU with a writable fan-control path.")
+            return
+        if not self._client:
+            self._show_gpu_restore_message("Cannot restore: no daemon connection")
+            return
+        if self._active_profile_controls_gpu():
+            self._update_gpu_restore_gate()
+            self._show_gpu_restore_message(f"Not restored: {_GPU_RESTORE_TOOLTIP_GATED}")
+            return
+        self._gpu_restore_btn.setEnabled(False)
+        self._gpu_restore_btn.setText("Restoring...")
+        self._gpu_restore_result_label.setVisible(False)
+        if not self._ensure_gpu_verify_worker():
+            self._show_gpu_restore_message("GPU restore unavailable: no daemon socket path")
+            self._finish_gpu_restore()
+            return
+        self._gpu_reset_request.emit(bdf)
+
+    def _show_gpu_restore_message(self, text: str, css_class: str = "CardMeta") -> None:
+        self._gpu_restore_result_label.setText(text)
+        set_chip_class(self._gpu_restore_result_label, css_class)
+        self._gpu_restore_result_label.setVisible(True)
+
+    def _finish_gpu_restore(self) -> None:
+        self._gpu_restore_btn.setEnabled(True)
+        self._gpu_restore_btn.setText("Restore GPU Fan to Automatic")
+        self._update_gpu_restore_gate()
+
+    @Slot(object)
+    def _on_gpu_restore_ok(self, result: GpuFanResetResult) -> None:
+        if result.reset:
+            self._show_gpu_restore_message(
+                "GPU fan restored to automatic — the firmware's default curve is back in control.",
+                "SuccessChip",
+            )
+            self._diag.log_event("info", "gpu", "GPU fan restored to automatic (user action)")
+        else:
+            self._show_gpu_restore_message(
+                "The daemon reported no restore was performed.", "WarningChip"
+            )
+            self._diag.log_event("warning", "gpu", "GPU fan restore: daemon reported no-op")
+        self._finish_gpu_restore()
+
+    @Slot(str, str)
+    def _on_gpu_restore_error(self, category: str, message: str) -> None:
+        if category == "unavailable":
+            self._show_gpu_restore_message(
+                message or "Daemon unavailable during GPU restore", "CriticalChip"
+            )
+        else:
+            self._show_gpu_restore_message(f"GPU restore error: {message}", "CriticalChip")
+        self._diag.log_event("error", "gpu", f"GPU fan restore failed: {message}")
+        self._finish_gpu_restore()
+
+    # ── Open Full Report + theme ─────────────────────────────────────
+
+    def _pwm_verified(self) -> bool | None:
+        """The recorded PWM-verify tri-state, for every derivation on this page.
+
+        One flag, one gating shape (the project rulebook § Hard-won lessons, DEC-334).
+        Four things on this page need the value; before DEC-379 **two** of them
+        had it, as literal copies of
+        ``_verified_tristate(settings.last_pwm_verify_effective)``, and the other
+        two — the pop-out report's banner and its "To fix" block — did not, so
+        both ran as though PWM control had never been tested and the report
+        opened "✓ System ready" on a machine whose own pill above it read
+        "1 ACTION REQUIRED" (`SSN-l`). Threading the argument fixes those two;
+        this accessor is what stops a fifth consumer repeating the omission,
+        because it is the only way to obtain the value.
+
+        DEC-456: a daemon advertising ``control.pwm_verification_records`` keeps
+        each header's latest verdict itself — including verifies run from
+        elsewhere and characterisation sweeps — so the value is derived from
+        those records, and the GUI-owned setting is read only on an older daemon.
+        """
+        caps = getattr(self._state, "capabilities", None) if self._state else None
+        if self._state is not None and daemon_supports("pwm_verification_records", caps) is True:
+            return pwm_verification_tristate(self._state.hwmon_headers)
+        return _verified_tristate(self._settings_svc.settings.last_pwm_verify_effective)
+
+    @Slot(list)
+    def _on_headers_for_verification(self, headers: list) -> None:
+        """Re-render when fresh headers change the verification tri-state (DEC-456).
+
+        A new record reaches the GUI on ``/hwmon/headers`` — re-read one poll
+        after a verify or sweep ends (the poll worker's ``verify_active`` edge) — and
+        nothing else re-renders this page's cards, so without this a result
+        would wait for the next diagnostics fetch. Same compare-then-render
+        shape as :meth:`_on_fans_for_drift`: a steady value costs one compare.
+        """
+        del headers  # `_pwm_verified` reads AppState, so both paths agree
+        if self._pwm_verified() == self._pwm_verified_rendered:
+            return
+        self._rerender_last_diagnostics()
+
+    def _duty_drift(self) -> DutyDriftState:
+        """The live duty-drift state, for every derivation on this page (S4-12).
+
+        The `_pwm_verified` shape, for the same reason: the page's pill, its
+        cards, the silence prune and the pop-out's verdict and "To fix" must all
+        see the same conditions. The builders take it as a required keyword, and
+        this accessor is the only way to obtain it.
+        """
+        return self._duty_drift_state
+
+    @Slot(list)
+    def _on_fans_for_drift(self, fans: list) -> None:
+        """Take the 1 Hz fan list; re-render only when the drift state changes.
+
+        A steady state costs one comparison per poll, like `set_thermal_state`.
+        A header entering `duty_not_holding` raises its card within a second; one
+        leaving it drops the card, and a fresh give-up — a new episode, with a
+        higher correction count — is a new occurrence that a dismissal of the
+        last one cannot hide.
+        """
+        name_of = self._state.fan_display_name if self._state is not None else str
+        state = duty_drift_state(fans, name_of)
+        if state == self._duty_drift_state:
+            return
+        self._duty_drift_state = state
+        self._rerender_last_diagnostics()
+
+    def _open_readiness_report(self) -> None:
+        diag = self._diag.last_hw_diagnostics
+        if diag is None:
+            return
+        html = build_readiness_report_html(
+            diag, pwm_control_verified=self._pwm_verified(), duty_drift=self._duty_drift()
+        )
+        if self._report_dialog is None:
+            self._report_dialog = ReadinessReportDialog(html, self)
+        else:
+            self._report_dialog.set_html(html)
+        self._report_dialog.show()
+        self._report_dialog.raise_()
+        self._report_dialog.activateWindow()
+
+    def set_theme(self, tokens) -> None:
+        # The registry floor must track the table. It is derived from the column
+        # headers' own size hints, and those scale with the theme's base font —
+        # so a floor derived once at construction pins the pane to whatever was
+        # in effect at startup while the columns inside it keep growing — a width
+        # that was stated once and stopped being true, which is the DEC-258
+        # failure class. `controls_page.set_theme` re-derives its own pane minimum
+        # here for the same reason; `widgets/card_metrics.card_pane_min_width`
+        # carries the worked example (a pane literal that fell behind its card and
+        # left a permanent horizontal scrollbar).
+        self._registry_card.setMinimumWidth(self._registry_card.content_min_width())
+        cached = self._diag.last_hw_diagnostics
+        if cached is not None:
+            self._render(cached)
+        # `P8-bx`: this page opens the characterization dialog too, so it carries
+        # the last hop for its chart exactly as `hardware_page` does. Latent while
+        # that dialog is `exec()`-modal — see the dialog's own `set_theme`.
+        if self._char_dialog is not None:
+            self._char_dialog.set_theme(tokens)

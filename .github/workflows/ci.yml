@@ -1,0 +1,218 @@
+name: CI
+
+# Push/PR quality gates: the canonical "Standard gates" run on every
+# change to main, so a broken gate (e.g. the missing pytest-cov that slipped into
+# v2.2.0 and made the coverage gate inert) cannot reach a release unnoticed.
+# release.yml stays publish-only; this workflow is the correctness net.
+#
+# NOTE: the decision log and its parity check are local-only and never reach
+# the runner, so ADR parity is a local gate, not a CI job.
+
+# paths-ignore: these trees contain nothing any test reads (verified: no test in
+# tests/ references docs/ or manual/). README.md, CHANGELOG.md, packaging/ and
+# .github/ are deliberately NOT ignored — tests/test_packaging_dependencies.py
+# parses packaging/PKGBUILD, .github/workflows/release.yml, the CHANGELOG and the
+# README, so filtering those would make the suite unable to fail on its own inputs.
+#
+# TRAP, documented because it is not obvious: release.yml's ci-green job fails
+# CLOSED when no ci.yml run exists for the tagged SHA. A commit whose paths are
+# ALL ignored here produces no run, so tagging it directly would stall the release
+# for ci-green's full 45-minute budget and then fail. In practice every real
+# release bumps pyproject.toml, so the tagged commit always has a run — but if you
+# ever tag a docs-only commit, dispatch this workflow on that SHA first.
+#
+# `paths-ignore` is on `push` ONLY, deliberately. The same filter on
+# `pull_request` carries GitHub's well-known required-checks footgun: a skipped
+# path filter does not report a *skipped* check, it reports *no check at all*, so
+# a docs-only PR leaves every required status permanently "Expected — waiting for
+# status to be reported" and the PR cannot be merged without an admin override.
+# It is latent rather than live today (main has no branch protection), which is
+# precisely why it would land as a mystery the day protection is switched on.
+# The saving it bought was nil either way: docs-only PRs are rare here, and the
+# merge commit's own push event is still filtered, so the CI minutes were already
+# saved on the push side.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'manual/**'
+      - 'assets/branding/**'
+  pull_request:
+    branches: [main]
+  # Nightly full-strength run: the canary at its original x5 loop count and the
+  # py3.14 leg, both of which are trimmed off the per-push path below (DEC-230
+  # guard economics — see the canary job). 06:00 UTC keeps clear of the
+  # pacman-repo staleness cron at 07:00.
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      # DEC-258: install from the manifest, not a bare `pip install ruff`. The
+      # bare form was a second source of truth — it ignored the ruff constraint
+      # in pyproject.toml, so changing that constraint would never have reached
+      # this job and lint could silently run a different version from
+      # `test`/`canary`. The constraint is deliberately not restated here: it is
+      # now a floor AND a ceiling, and the previous wording still cited the old
+      # floor-only `>=0.4` long after it had been replaced.
+      - name: Install lint tooling
+        run: pip install -e ".[dev]"
+      - name: ruff format --check
+        run: ruff format --check src/ tests/
+      - name: ruff check
+        run: ruff check src/ tests/
+      - name: compileall
+        run: python -m compileall -q src/
+
+  test:
+    name: Tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # >=3.12 is the supported floor; 3.13 guards one version ahead. Both are
+        # BLOCKING on every push.
+        #
+        # 3.14 (the local dev version) now runs on the nightly/dispatch path only,
+        # and is BLOCKING there. It used to ride every push as a
+        # `continue-on-error: true` leg, which meant a full instrumented suite run
+        # — the most expensive thing in this workflow after the canary — that could
+        # never fail the build and so gated nothing at all. Nightly-and-blocking is
+        # strictly more signal for strictly less compute: a genuine cp314 breakage
+        # now reddens something, instead of being a paid no-op nobody reads.
+        # Promote it back into the push matrix once cp314 has been green for a
+        # good while and the wheels are no longer the variable.
+        #
+        # NOTE: the PySide6/shiboken widget-teardown SIGSEGV that used to
+        # intermittently redden the py3.12 leg was root-caused and FIXED in
+        # DEC-230 — a conftest DeferredDelete flush (tests/conftest.py) that
+        # destroys each test's widget tree deterministically instead of leaving it
+        # for the cyclic GC to finalize in an unsafe order. The dedicated `canary`
+        # job below (hostile allocator) is the standing regression guard.
+        python: ${{ fromJSON( (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["3.12","3.13","3.14"]' || '["3.12","3.13"]' ) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install headless Qt runtime libs
+        # PySide6 dlopens libEGL/libGL even under the offscreen platform. These
+        # package names are stable across Ubuntu 22.04/24.04. If a future PySide6
+        # bump needs another lib this is the one CI-specific bit that can't be
+        # verified locally — add it here.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3
+      - name: Install package + dev deps
+        run: pip install -e ".[dev]"
+      - name: pytest + branch coverage
+        # The floor is enforced by fail_under in pyproject [tool.coverage.report];
+        # --cov with no target reads source = ["ventulus"] from the same config.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest --cov --cov-branch --cov-report=term-missing -q
+      - name: Assert no test wrote to the real user config (DEC-244)
+        # always(): a run that both fails AND leaks is the most likely one to
+        # have leaked, and the default if:success() would skip precisely that
+        # case. The job is already red for the other reason; this adds the
+        # diagnosis rather than hiding it.
+        if: always()
+        # The suite must never touch $HOME. Three tests did — two built
+        # MainWindow(demo_mode=True) with no settings_service (which
+        # default-constructs one aimed at the real file) and one drove a real
+        # ProfileService — so running this very gate before a release is what
+        # wiped the author's live chart config. The conftest
+        # _isolate_user_config fixture is what keeps this green; this step is
+        # what proves it, and it catches the whole class rather than those three
+        # sites. No env is perturbed: the runner's $HOME is already disposable,
+        # so a leak lands here exactly as it would on a developer's machine.
+        # Scoped to the two ventulus dirs — a bare $HOME diff would redden on
+        # pip/pytest cache noise. A test exporting straight into $HOME (the
+        # export_default_dir default) would slip past; nothing does today.
+        run: |
+          set -e
+          leaked=0
+          for d in "$HOME/.config/ventulus" "$HOME/.cache/ventulus"; do
+            if [ -e "$d" ]; then
+              echo "::error::test suite wrote to $d — user config is not isolated"
+              find "$d" | head -50
+              leaked=1
+            fi
+          done
+          exit $leaked
+
+  canary:
+    name: Teardown UAF canary (py3.12, hostile allocator)
+    runs-on: ubuntu-latest
+    # DEC-230 regression guard. MALLOC_PERTURB_=165 turns the shiboken
+    # releaseWrapper use-after-free at widget teardown into a hard crash; the
+    # conftest DeferredDelete flush is what keeps this green (measured 0/12 with
+    # it, ~5/8 without). A single run is a coin flip, so we loop — if that fixture
+    # is ever removed or regresses, this leg reddens reliably. Blocking on purpose:
+    # a silent regression here is the whole point of the job. Coverage
+    # instrumentation stays ON (it widens the crash window) but its floor is
+    # neutralised with --cov-fail-under=0 — the `test` job owns the coverage gate;
+    # this job only detects the teardown crash.
+    #
+    # LOOP COUNT: 2 on push/PR, 5 nightly and on dispatch.
+    #
+    # The x5 loop was 51% of this workflow's ~19.5 runner-minutes per push, and it
+    # sets the wall clock — which release.yml's ci-green then waits on, which in
+    # turn delays notify-repo. So it was not just CI cost; it was release latency,
+    # and it was what skewed the two notify-repo dispatches far enough apart to let
+    # a coordinated release publish a mismatched pair.
+    #
+    # The arithmetic on dropping to 2: against the measured ~5/8 (0.625) per-run
+    # crash rate of an unguarded tree, P(a regression escapes one push) goes from
+    # 0.375^5 ≈ 0.7% to 0.375^2 ≈ 14%, and ≈ 2% over two consecutive pushes. That
+    # is acceptable ONLY because this failure is persistent, not flaky: a removed
+    # or regressed fixture reddens every subsequent push and the nightly x5, so it
+    # cannot quietly reach a tag. Do not drop this to 1 — a single run genuinely is
+    # a coin flip, and the loop is the whole mechanism.
+    env:
+      CANARY_RUNS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '5' || '2' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install headless Qt runtime libs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3
+      - name: Install package + dev deps
+        run: pip install -e ".[dev]"
+      - name: pytest under hostile allocator (x${{ env.CANARY_RUNS }})
+        env:
+          QT_QPA_PLATFORM: offscreen
+          MALLOC_PERTURB_: '165'
+        run: |
+          set -e  # do not rely on the runner's implicit bash -e: a swallowed
+                  # SIGSEGV would turn this guard into silent theatre
+          echo "canary loop count: ${CANARY_RUNS} (event: ${GITHUB_EVENT_NAME})"
+          for i in $(seq 1 "${CANARY_RUNS}"); do
+            echo "::group::canary run $i of ${CANARY_RUNS}"
+            pytest --cov --cov-branch --cov-fail-under=0 -q
+            echo "::endgroup::"
+          done

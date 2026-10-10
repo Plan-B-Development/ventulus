@@ -1,0 +1,134 @@
+"""Tests for MemberEditorDialog — exclusive membership enforcement."""
+
+from __future__ import annotations
+
+import pytest
+from PySide6.QtCore import Qt
+
+from ventulus.services.profile_service import ControlMember
+from ventulus.ui.widgets.member_editor import MemberEditorDialog
+
+
+@pytest.fixture()
+def available():
+    return [
+        {"id": "openfan:ch00", "source": "openfan", "label": "Front Intake 1"},
+        {"id": "openfan:ch01", "source": "openfan", "label": "Front Intake 2"},
+        {"id": "hwmon:cpu_fan", "source": "hwmon", "label": "CPU Fan"},
+    ]
+
+
+class TestExclusiveMembership:
+    def test_assigned_fan_is_disabled(self, qtbot, available):
+        """Fan assigned to another role is shown but disabled."""
+        assigned_elsewhere = {"openfan:ch00": "Intake"}
+        dlg = MemberEditorDialog([], available, assigned_elsewhere)
+        qtbot.addWidget(dlg)
+
+        # Find the item for ch00
+        for i in range(dlg._available_list.count()):
+            item = dlg._available_list.item(i)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data["id"] == "openfan:ch00":
+                assert not item.flags() & Qt.ItemFlag.ItemIsEnabled
+                assert "Intake" in item.text()
+                break
+        else:
+            pytest.fail("openfan:ch00 not found in available list")
+
+    def test_unassigned_fan_is_enabled(self, qtbot, available):
+        """Fan not assigned elsewhere remains selectable."""
+        assigned_elsewhere = {"openfan:ch00": "Intake"}
+        dlg = MemberEditorDialog([], available, assigned_elsewhere)
+        qtbot.addWidget(dlg)
+
+        for i in range(dlg._available_list.count()):
+            item = dlg._available_list.item(i)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data["id"] == "openfan:ch01":
+                assert item.flags() & Qt.ItemFlag.ItemIsEnabled
+                break
+
+    def test_no_assigned_all_enabled(self, qtbot, available):
+        """Without assigned_elsewhere, all fans are enabled."""
+        dlg = MemberEditorDialog([], available)
+        qtbot.addWidget(dlg)
+
+        for i in range(dlg._available_list.count()):
+            item = dlg._available_list.item(i)
+            assert item.flags() & Qt.ItemFlag.ItemIsEnabled
+
+
+class TestMemberEditorBasics:
+    def test_get_members_returns_selected(self, qtbot, available):
+        """Selected list maps to ControlMember objects."""
+        existing = [ControlMember(source="openfan", member_id="openfan:ch00", member_label="Fan 0")]
+        dlg = MemberEditorDialog(existing, available)
+        qtbot.addWidget(dlg)
+
+        result = dlg.get_members()
+        assert len(result) == 1
+        assert result[0].member_id == "openfan:ch00"
+
+
+class TestMemberEditorRestyle:
+    """DEC-214: source prefix + live RPM (only when supplied), and live counts."""
+
+    def test_rpm_shown_when_supplied_and_no_fan_when_none(self, qtbot):
+        outputs = [
+            {"id": "hwmon:sys1", "source": "hwmon", "label": "SYS_FAN1", "rpm": 1050},
+            {"id": "hwmon:cpu_opt", "source": "hwmon", "label": "CPU_OPT", "rpm": None},
+            {"id": "openfan:ch00", "source": "openfan", "label": "Front"},  # no rpm key
+        ]
+        dlg = MemberEditorDialog([], outputs)
+        qtbot.addWidget(dlg)
+        texts = [dlg._available_list.item(i).text() for i in range(dlg._available_list.count())]
+        joined = " || ".join(texts)
+        assert "1050 RPM" in joined  # known reading
+        assert "no fan" in joined  # present but no fan
+        assert "[openfan] Front" in joined and "RPM" not in texts[2]  # unknown → nothing invented
+
+    def test_counts_update_on_transfer(self, qtbot, available):
+        dlg = MemberEditorDialog([], available)
+        qtbot.addWidget(dlg)
+        assert dlg._available_count.text() == "3 found"
+        assert dlg._selected_count.text() == "0 assigned"
+        dlg._available_list.item(0).setSelected(True)
+        dlg._on_add()
+        assert dlg._available_count.text() == "2 found"
+        assert dlg._selected_count.text() == "1 assigned"
+
+
+class TestUnselectableRows:
+    """DEC-445: a row the builder marks ``selectable: False`` (a GPU fan no
+    profile can drive) is shown, disabled, with its reason as the tooltip —
+    and cannot be moved across by selecting everything and pressing Add."""
+
+    def test_an_unselectable_row_is_disabled_and_cannot_be_added(self, qtbot):
+        available = [
+            {"id": "openfan:ch00", "source": "openfan", "label": "Front Intake 1"},
+            {
+                "id": "amd_gpu:0000:0a:00.0",
+                "source": "amd_gpu",
+                "label": "RX 6800 XT Fan (verify only)",
+                "selectable": False,
+                "tooltip": "no profile drives it",
+            },
+        ]
+        dlg = MemberEditorDialog([], available)
+        qtbot.addWidget(dlg)
+        items = {
+            dlg._available_list.item(i).data(Qt.ItemDataRole.UserRole)["id"]: (
+                dlg._available_list.item(i)
+            )
+            for i in range(dlg._available_list.count())
+        }
+        gpu = items["amd_gpu:0000:0a:00.0"]
+        assert not gpu.flags() & Qt.ItemFlag.ItemIsEnabled
+        assert gpu.toolTip() == "no profile drives it"
+        # The opposite arm: an ordinary row stays enabled.
+        assert items["openfan:ch00"].flags() & Qt.ItemFlag.ItemIsEnabled
+
+        dlg._available_list.selectAll()
+        dlg._on_add()
+        assert [m.member_id for m in dlg.get_members()] == ["openfan:ch00"]

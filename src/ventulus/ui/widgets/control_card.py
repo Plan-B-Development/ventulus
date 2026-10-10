@@ -1,0 +1,954 @@
+"""Fan Role card — compact, information-dense card for the controls grid.
+
+Shows: role name, members, assigned curve, output + sensor context, apply status.
+Editing members/curve/overrides happens in a dialog, not on the card.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ventulus.services.controls_view import (
+    MISSING_HEADER_BADGE,
+    MISSING_HEADER_TOOLTIP,
+    manual_applied_text,
+    min_pwm_badge,
+    missing_header_member_ids,
+    skipped_control_feedback,
+)
+from ventulus.services.profile_service import (
+    CONTROL_ROLE_GPU,
+    ControlMode,
+    CurveConfig,
+    LogicalControl,
+    control_minimum_pct,
+    infer_control_role,
+    infer_member_role,
+)
+from ventulus.ui.components.a11y import name_value_control
+from ventulus.ui.components.badges import StatusPill
+from ventulus.ui.components.labels import ElidedLabel
+from ventulus.ui.qt_util import repolish, set_chip_class
+from ventulus.ui.theme import active_theme
+from ventulus.ui.widgets.card_metrics import DEFAULT_CARD_SIZE
+from ventulus.ui.widgets.resizable_grid_card import ResizableGridCard
+
+_MANUAL_TOOLTIP = (
+    "Temporarily set this role's fans to a fixed speed.\n"
+    "Not saved to the profile; clears on profile change."
+)
+
+
+class ControlCard(ResizableGridCard):
+    """Compact fan role card — dense rows, no dead space."""
+
+    selected = Signal(str)
+    delete_requested = Signal(str)
+    edit_role_requested = Signal(str)
+    # Transient per-card manual override (Decision 1A): toggled carries the
+    # active flag + the slider value at toggle time; value_changed fires while
+    # dragging. Neither mutates the saved profile.
+    manual_toggled = Signal(str, bool, int)  # control_id, active, pct
+    manual_value_changed = Signal(str, int)  # control_id, pct
+    # resized / size_reset (per-card user resize, DEC-129) are inherited from
+    # ResizableGridCard.
+
+    def __init__(
+        self,
+        control: LogicalControl,
+        curves: list[CurveConfig],
+        card_size: str = DEFAULT_CARD_SIZE,
+        user_size: tuple[int, int] | None = None,
+        parent=None,
+        display_name: Callable[[str, str], str] | None = None,
+        floor_roles: Callable[[], Mapping[str, str]] | None = None,
+        detected_hwmon_ids: Callable[[], frozenset[str] | None] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        # DEC-228: resolves (member_id, cached member_label) -> the name to show,
+        # so a rename made anywhere reaches these rows. Defaults to the old
+        # cached-label behaviour when no resolver is supplied (tests, previews).
+        self._display_name = display_name or (lambda mid, label: label or mid)
+        # DEC-417 / `ROLE-a`: the live id → role of headers whose pump or CPU-fan
+        # role the daemon floors, read by the Min badge. A resolver rather than a
+        # snapshot, like `display_name`, so a role assigned after the card was
+        # built still reaches it on the next repaint
+        # (`refresh_min_pwm_badge`). No resolver (tests, previews) means no roles.
+        self._floor_roles = floor_roles or dict
+        # DEC-461: the canonical ids of the hwmon headers the daemon reports, or
+        # None when that is not known (no headers yet, demo). A resolver for the
+        # same reason as `floor_roles`; `refresh_member_presence` repaints.
+        # No resolver (tests, previews) means nothing is judged missing.
+        self._detected_hwmon_ids = detected_hwmon_ids or (lambda: None)
+        self._control = control
+        self._last_output_pct: float | None = None
+        # The highest per-fan duty the poll reports for this role while Manual is
+        # held — how the card learns that a member floor lifts the request.
+        self._manual_peak_pct: float | None = None
+        # DEC-169: a daemon-held override this GUI session does NOT own (no
+        # fencing token — only displayable, never renewable/releasable). Set by
+        # the Controls page's /status reconcile; shows a read-only "External"
+        # chip. `None` when no foreign override is pinning this control.
+        self._external_pct: int | None = None
+        # 273-i: the daemon reports this control as one it cannot resolve, so it
+        # is commanding nothing and these fans hold their last speed. `None` when
+        # the control is being commanded normally. Set by the Controls page's
+        # /status reconcile, exactly like `_external_pct` above.
+        self._skipped_reason: str | None = None
+        # Kept alongside the reason so `_restore_daemon_chip` repaints the SAME
+        # chip it suppressed — without these it would silently drop the duration
+        # and the daemon's own control name every time a manual hold ended
+        # (`WIRE-q`).
+        self._skipped_for_ms: int = 0
+        self._skipped_control_name: str = ""
+        # `WIRE-n`: the daemon is EVALUATING but not WRITING — a hardware verify,
+        # PWM characterisation, OpenFan calibration or validation sweep owns its
+        # engine write pause. Distinct from `_skipped_reason`, which means the
+        # daemon did not evaluate this control at all: here the figure below is
+        # real and current, it is simply not being applied. False in demo mode
+        # and against any daemon before 2.36.0, which is what this card rendered
+        # before the field existed.
+        self._write_paused: bool = False
+        # Sizing (DEC-128 floor) + the DEC-129 resize grip live in the base.
+        self._init_grid_card(control.id, f"ControlCard_Grip_{control.id}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
+
+        # Row 1: role icon + name + "N Fans" pill + status chip
+        row1 = QHBoxLayout()
+        row1.setSpacing(4)
+        self._role_icon = QLabel("●")  # a role-coloured dot (mockup icon stand-in)
+        self._role_icon.setObjectName(f"ControlCard_Icon_role_{control.id}")
+        self._role_icon.setStyleSheet(
+            f"color: {self._role_color(control)}; background: transparent;"
+        )
+        row1.addWidget(self._role_icon)
+        self._name_label = QLabel(control.name or "Unnamed")
+        # DEC-231: control names come from the profile (untrusted) — render
+        # verbatim so stray markup can never be reinterpreted as rich text
+        # (matches fan_control_card + warnings_view).
+        self._name_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._name_label.setStyleSheet("font-weight: bold; background: transparent;")
+        self._name_label.setObjectName(f"ControlCard_Label_{control.id}")
+        row1.addWidget(self._name_label)
+        row1.addStretch()
+        self._fan_count_label = QLabel("")
+        self._fan_count_label.setObjectName(f"ControlCard_Label_fanCount_{control.id}")
+        self._fan_count_label.setProperty("class", "Pill_neutral")
+        row1.addWidget(self._fan_count_label)
+        self._status_chip = QLabel("")
+        self._status_chip.setObjectName(f"ControlCard_Label_status_{control.id}")
+        self._status_chip.setStyleSheet("background: transparent;")
+        row1.addWidget(self._status_chip)
+        layout.addLayout(row1)
+
+        # Compact members summary (kept for callers/tests) hidden behind the
+        # per-member RPM rows (the mockup treatment); set_member_rpms fills the
+        # live RPM column, never fabricating an unknown reading.
+        self._members_label = QLabel(self._members_text(control))
+        self._members_label.setProperty("class", "CardMeta")
+        self._members_label.setStyleSheet("background: transparent;")
+        self._members_label.setObjectName(f"ControlCard_Label_members_{control.id}")
+        self._members_label.setVisible(False)
+        layout.addWidget(self._members_label)
+
+        self._member_rows = QWidget()
+        self._member_rows.setObjectName(f"ControlCard_Rows_members_{control.id}")
+        self._member_rows_layout = QVBoxLayout(self._member_rows)
+        self._member_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._member_rows_layout.setSpacing(1)
+        self._member_row_rpm: dict[str, QLabel] = {}
+        self._member_row_name: dict[str, ElidedLabel] = {}
+        self._member_row_missing: dict[str, StatusPill] = {}
+        layout.addWidget(self._member_rows)
+        self._rebuild_member_rows(control)
+
+        # Details (revealed on select, DEC-214): assigned curve + min-PWM badge,
+        # and the auto output / inline manual-slider row. Default-expanded so a
+        # standalone card shows every widget (the card tests need no selection);
+        # the page collapses non-selected cards to the compact mockup form.
+        self._expanded = True
+        self._details = QWidget()
+        self._details.setObjectName(f"ControlCard_Details_{control.id}")
+        details_layout = QVBoxLayout(self._details)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.setSpacing(2)
+
+        # Curve assignment + minimum-PWM badge
+        curve_row = QHBoxLayout()
+        curve_row.setSpacing(4)
+        curve_name = self._curve_name(curves, control.curve_id)
+        mode_text = "Manual" if control.mode == ControlMode.MANUAL else curve_name
+        # DEC-258: an ElidedLabel, not a QLabel. The curve name is
+        # profile-authored and arbitrary-length, so this row's width demand is
+        # unbounded — it alone wanted 286px of a 304px content area at 16pt, and
+        # a longer name clips at ANY font size or card tier. Widening the card
+        # (see `card_metrics._WIDTH_PER_PT`) fixes the typical case; only elision
+        # bounds the worst one.
+        #
+        # DEC-231 still holds: ElidedLabel renders plain text unconditionally, so
+        # stray markup in a profile-authored name cannot become formatting.
+        self._curve_label = ElidedLabel(f"Curve: {mode_text}")
+        self._curve_label.setProperty("class", "CardMeta")
+        self._curve_label.setStyleSheet("background: transparent;")
+        self._curve_label.setObjectName(f"ControlCard_Label_curve_{control.id}")
+        curve_row.addWidget(self._curve_label)
+        curve_row.addStretch()
+        # Minimum-PWM badge: surfaces the role-derived safety floor so the
+        # user can see at a glance why a curve appears clamped at the bottom.
+        # See profile_service.role_minimum_pct + DEC-095.
+        self._min_pwm_label = QLabel("")
+        self._min_pwm_label.setProperty("class", "CardMeta")
+        self._min_pwm_label.setStyleSheet("background: transparent;")
+        self._min_pwm_label.setObjectName(f"ControlCard_Label_minPwm_{control.id}")
+        curve_row.addWidget(self._min_pwm_label)
+        details_layout.addLayout(curve_row)
+
+        # Output + sensor context (auto) — morphs into an inline manual slider
+        # when the Manual toggle is on. The two share the row; exactly one is
+        # visible, so the row height stays constant.
+        row4 = QHBoxLayout()
+        row4.setSpacing(4)
+        self._output_label = QLabel("—")
+        self._output_label.setObjectName(f"ControlCard_Label_output_{control.id}")
+        self._output_label.setStyleSheet("background: transparent;")
+        self._output_label.setProperty("class", "CardMeta")
+        row4.addWidget(self._output_label)
+        self._manual_slider = QSlider(Qt.Orientation.Horizontal)
+        self._manual_slider.setObjectName(f"ControlCard_Slider_manual_{control.id}")
+        # 273-g phase 2: one slider per card, so the name must come from THIS
+        # control — a shared "manual output" would announce identically on every
+        # card in the grid and tell a screen-reader user nothing about which fan
+        # they are about to move.
+        name_value_control(self._manual_slider, f"{control.name} manual output")
+        self._manual_slider.setRange(0, 100)
+        self._manual_slider.setValue(50)
+        self._manual_slider.setVisible(False)
+        self._manual_slider.valueChanged.connect(self._on_manual_slider_changed)
+        row4.addWidget(self._manual_slider, 1)
+        self._manual_pct_label = QLabel("50%")
+        self._manual_pct_label.setObjectName(f"ControlCard_Label_manualPct_{control.id}")
+        self._manual_pct_label.setStyleSheet("background: transparent;")
+        self._manual_pct_label.setProperty("class", "CardMeta")
+        self._manual_pct_label.setVisible(False)
+        row4.addWidget(self._manual_pct_label)
+        details_layout.addLayout(row4)
+        layout.addWidget(self._details)
+
+        # Surplus vertical space (card taller than its rows — e.g. the DEC-128
+        # floor or a DEC-129 user resize) pools here instead of being
+        # distributed between the text rows, which read as bloated line
+        # spacing. Rows stay tight at the top; actions stay pinned at the
+        # bottom.
+        layout.addStretch(1)
+
+        # Row 5: Bottom row — RPM left, Delete + Edit right
+        actions = QHBoxLayout()
+        actions.setSpacing(4)
+
+        self._rpm_label = QLabel("")
+        self._rpm_label.setProperty("class", "CardMeta")
+        self._rpm_label.setStyleSheet("background: transparent;")
+        self._rpm_label.setObjectName(f"ControlCard_Label_rpm_{control.id}")
+        actions.addWidget(self._rpm_label)
+
+        actions.addStretch()
+
+        # Whether this card's profile is the one the daemon runs; an override
+        # names a control of the RUNNING profile (`set_manual_allowed`).
+        self._manual_allowed = True
+        self._manual_btn = QPushButton("Manual")
+        self._manual_btn.setObjectName(f"ControlCard_Btn_manual_{control.id}")
+        self._manual_btn.setCheckable(True)
+        self._manual_btn.setToolTip(_MANUAL_TOOLTIP)
+        self._manual_btn.toggled.connect(self._on_manual_toggled)
+        actions.addWidget(self._manual_btn)
+
+        del_btn = QPushButton("Delete")
+        del_btn.setObjectName(f"ControlCard_Btn_delete_{control.id}")
+        del_btn.setToolTip("Delete this fan role")
+        del_btn.clicked.connect(lambda: self.delete_requested.emit(self._control.id))
+        actions.addWidget(del_btn)
+
+        edit_btn = QPushButton("Edit…")
+        edit_btn.setObjectName(f"ControlCard_Btn_edit_{control.id}")
+        edit_btn.setToolTip("Edit fan role: members, curve, overrides")
+        edit_btn.clicked.connect(lambda: self.edit_role_requested.emit(self._control.id))
+        actions.addWidget(edit_btn)
+
+        layout.addLayout(actions)
+
+        # Link-indicator nub (DEC-214): a small accent stub on the right edge,
+        # shown for the selected card — the visual wire toward the curve column.
+        self._link_nub = QFrame(self)
+        self._link_nub.setObjectName(f"ControlCard_Nub_link_{control.id}")
+        self._link_nub.setFixedSize(3, 18)
+        self._link_nub.setStyleSheet(
+            f"background: {active_theme().accent_primary}; border-radius: 1px;"
+        )
+        self._link_nub.setVisible(False)
+
+        self._update_no_members_state(control)
+        self._update_min_pwm_badge(control)
+        self._update_fan_count(control)
+        self.apply_card_size(active_theme().base_font_size_pt, card_size, user_size)
+
+    # ─── Public API ──────────────────────────────────────────────────
+
+    @property
+    def control(self) -> LogicalControl:
+        return self._control
+
+    # Sizing + grip API (apply_card_size / set_user_size / clear_user_size /
+    # user_size / _on_grip_* / grip positioning) is inherited from
+    # ResizableGridCard.
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)  # base pins the resize grip
+        # Pin the link nub to the right-edge centre (DEC-214).
+        self._link_nub.move(
+            self.width() - self._link_nub.width(),
+            (self.height() - self._link_nub.height()) // 2,
+        )
+        self._link_nub.raise_()
+
+    def mousePressEvent(self, event) -> None:
+        self.selected.emit(self._control.id)
+        super().mousePressEvent(event)
+
+    def set_output(
+        self,
+        output_pct: float,
+        sensor_name: str = "",
+        sensor_value: float | None = None,
+        gpu_output_pct: float | None = None,
+        member_peak_pct: float | None = None,
+    ) -> None:
+        if not self._control.members:
+            return
+        self._last_output_pct = output_pct
+        if self._manual_btn.isChecked():
+            # Transient manual mode owns the row (slider) and the status chip;
+            # the figure beside the slider says what the fans really run at.
+            self._manual_peak_pct = member_peak_pct
+            self._paint_manual_pct()
+            return
+        # DEC-119: in a mixed control the GPU member can sit below the
+        # control-wide value, so surface its real output rather than letting the
+        # headline misreport it.
+        gpu_suffix = f" (GPU {gpu_output_pct:.0f}%)" if gpu_output_pct is not None else ""
+        if self._control.mode == ControlMode.MANUAL:
+            self._output_label.setText(f"Now: {output_pct:.0f}% (Manual){gpu_suffix}")
+        elif sensor_name and sensor_value is not None:
+            self._output_label.setText(
+                f"Now: {output_pct:.0f}%{gpu_suffix} • {sensor_name} {sensor_value:.1f}°C"
+            )
+        else:
+            self._output_label.setText(f"Now: {output_pct:.0f}%{gpu_suffix}")
+        if self._skipped_reason is not None:
+            # 273-i: nothing is commanding these fans. Painting "Applied" over
+            # that would be the lie this row exists to stop; the output label set
+            # above still carries the last value this card was given.
+            #
+            # LIVE since 277-k, and this comment used to say the opposite.
+            # It read "dead in BOTH modes … do not cite this branch as protecting
+            # live users", which was true only while `set_output`'s sole caller
+            # was wired to `DemoController.outputs_changed`. The live page now
+            # feeds it from the 1 Hz poll (`ControlsPage._apply_live_outputs`),
+            # and `_skipped_reason` is set from `_on_status_reconcile` on that
+            # same path — so both are live together and this guard is exactly
+            # what stops "Applied" being painted over a control the daemon has
+            # told us it is not commanding.
+            return
+        if self._external_pct is not None:
+            # DEC-169: a foreign daemon override owns the chip — keep the
+            # read-only "External" badge instead of repainting "Applied" each
+            # tick. The output label above still tracks the live value.
+            return
+        if self._write_paused:
+            # `WIRE-n`: "Applied" is the false half of this card during a
+            # diagnostic session. The daemon really did evaluate the figure in
+            # the label — that is why the label is kept — but its write phase is
+            # paused, so the fans are holding their last duty and nothing has
+            # applied it. Replacing exactly the claim that is wrong is the
+            # minimum correction; blanking the figure would discard a true one.
+            self._apply_chip(
+                "Not writing",
+                "CautionChip",
+                "A hardware diagnostic is running, so the daemon is evaluating this "
+                "control but not applying it. The fans hold their last duty.",
+            )
+            return
+        self._apply_chip("Applied", "SuccessChip")
+
+    def clear_output(self) -> None:
+        """Say "no live value" — the daemon is not reporting one for this control.
+
+        The contract (`docs/08`) is explicit that absence from `control_outputs[]`
+        is MEANINGFUL and that a client "must not carry a previous value forward
+        ... Render absence as 'unknown' (the reference GUI's '—'), never as 0".
+        A control is absent whenever the daemon did not evaluate it: no profile,
+        a listed skip, or the whole of a thermal event, where the daemon
+        publishes no per-control output at all.
+
+        Carrying the last figure was the bug this method exists to fix. It left a
+        card reading "Now: 42%" for the duration of a thermal emergency while the fans
+        were actually at 100% — confidently displaying a duty nothing was
+        applying, on the page whose job is "what are the fans doing?". Zero would
+        be a different lie; "—" is the honest answer.
+
+        Suppressed in exactly the states `set_output` is suppressed in, so this
+        cannot blank something another authority owns.
+        """
+        if not self._control.members:
+            # Same guard `set_output` carries, and the docstring above promised it
+            # while the code omitted it. A member-less card shows
+            # "Assign outputs to enable" from `_update_no_members_state`; blanking
+            # that to an em dash on every poll would replace actionable guidance
+            # with nothing, and nothing would ever put it back for the session.
+            return
+        if self._manual_btn.isChecked():
+            # No live figure, so nothing to say the fans run at beyond the request.
+            self._manual_peak_pct = None
+            self._paint_manual_pct()
+            return
+        self._last_output_pct = None
+        self._output_label.setText("\u2014")
+
+    def set_rpm(self, rpm_text: str) -> None:
+        self._rpm_label.setText(rpm_text)
+
+    def set_member_rpms(self, rpms: dict[str, int | None]) -> None:
+        """Update each member row's live RPM column (DEC-214).
+
+        ``rpms`` maps member/fan id → measured RPM (``None`` when unknown). No
+        value is fabricated — an unknown reading leaves the column blank.
+        """
+        for member_id, label in self._member_row_rpm.items():
+            rpm = rpms.get(member_id)
+            label.setText(f"{rpm} RPM" if rpm is not None else "")
+
+    def set_selected(self, selected: bool) -> None:
+        """Expand (select) or collapse this card (DEC-214).
+
+        The selected card reveals its detail rows (assigned curve, min-PWM, the
+        auto output / manual slider) and takes an accent border + link nub; the
+        others collapse to the compact mockup form (icon, name, N-Fans, members).
+        Default-expanded so a standalone card shows everything (the card tests
+        need no selection).
+        """
+        self._expanded = selected
+        self._details.setVisible(selected)
+        self._link_nub.setVisible(selected)
+        self.setProperty("selected", selected)
+        repolish(self)
+
+    def set_theme(self, tokens) -> None:
+        """Re-apply the inline-styled accents after a live theme switch.
+
+        The link nub (accent) and the role dot are painted with inline
+        stylesheets (not QSS ``.class`` rules), so an ``apply_theme`` palette
+        swap does not repaint them — the Controls page's theme fan-out calls
+        this to refresh both. Card sizing is re-applied separately by the page
+        (``apply_card_size``); the P2-1 manual-floor slider state is untouched.
+        """
+        self._role_icon.setStyleSheet(
+            f"color: {self._role_color(self._control)}; background: transparent;"
+        )
+        self._link_nub.setStyleSheet(f"background: {tokens.accent_primary}; border-radius: 1px;")
+
+    def _role_color(self, control: LogicalControl) -> str:
+        """A role-derived accent colour for the card's icon dot (mockup uses a
+        distinct icon per role; we colour-code instead of depending on an icon
+        font). CPU/pump = brand accent, GPU-bearing = info, else muted."""
+        t = active_theme()
+        if infer_control_role(control.members) == "cpu_or_pump":
+            return t.accent_primary
+        if any(infer_member_role(m) == CONTROL_ROLE_GPU for m in control.members):
+            return t.status_info
+        return t.text_secondary
+
+    def _update_fan_count(self, control: LogicalControl) -> None:
+        n = len(control.members)
+        self._fan_count_label.setText(f"{n} Fan{'s' if n != 1 else ''}")
+        self._fan_count_label.setVisible(n > 0)
+
+    def _rebuild_member_rows(self, control: LogicalControl) -> None:
+        """(Re)build one ``name · RPM`` row per member (DEC-214)."""
+        while self._member_rows_layout.count():
+            item = self._member_rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)  # detach now so a rebuild can't reuse a stale row
+                widget.deleteLater()
+        self._member_row_rpm = {}
+        self._member_row_name = {}
+        self._member_row_missing = {}
+        for member in control.members:
+            # Unique per-member objectNames (control id + member id) so tests and
+            # tooling can address an individual member row / name / RPM cell
+            # (the project rulebook's objectName-uniqueness rule).
+            mid = member.member_id
+            row = QWidget()
+            row.setObjectName(f"ControlCard_MemberRow_{control.id}_{mid}")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
+            # DEC-461: elided, with the full name as its tooltip while shortened,
+            # so the "header missing" pill beside it cannot cut a long name off
+            # mid-glyph on a compact or narrowed card. ElidedLabel renders plain
+            # text unconditionally (DEC-231: untrusted alias/label).
+            name = ElidedLabel(
+                self._display_name(mid, member.member_label),
+                object_name=f"ControlCard_MemberName_{control.id}_{mid}",
+                tooltip_when_elided=True,
+            )
+            self._member_row_name[mid] = name
+            name.setProperty("class", "CardMeta")
+            name.setStyleSheet("background: transparent;")
+            row_layout.addWidget(name, 1)
+            # DEC-461: shown only while the daemon does not report this member's
+            # header; the member is kept, so the user must be able to see it is idle.
+            missing = StatusPill(
+                MISSING_HEADER_BADGE,
+                "warn",
+                object_name=f"ControlCard_MemberMissing_{control.id}_{mid}",
+            )
+            missing.setToolTip(MISSING_HEADER_TOOLTIP)
+            row_layout.addWidget(missing)
+            self._member_row_missing[mid] = missing
+            rpm = QLabel("")
+            rpm.setObjectName(f"ControlCard_MemberRpm_{control.id}_{mid}")
+            rpm.setProperty("class", "CardMeta")
+            rpm.setStyleSheet("background: transparent;")
+            row_layout.addWidget(rpm)
+            self._member_rows_layout.addWidget(row)
+            self._member_row_rpm[mid] = rpm
+        self._member_rows.setVisible(bool(control.members))
+        self.refresh_member_presence()
+
+    def refresh_member_presence(self) -> None:
+        """Show the "header missing" badge on each member whose header is absent.
+
+        The Controls page calls this when the headers or the mode change, so a
+        header that returns (or goes) mid-session reaches the card (DEC-461).
+        """
+        missing = missing_header_member_ids(self._control.members, self._detected_hwmon_ids())
+        for mid, pill in self._member_row_missing.items():
+            pill.setVisible(mid in missing)
+
+    def _apply_chip(self, text: str, cls: str, tooltip: str = "") -> None:
+        """Set the status chip text + style class + tooltip, and repolish.
+
+        The tooltip is owned HERE, not by callers. When `set_skipped` wrote it
+        directly onto `_status_chip`, every later transition inherited it — a
+        card showing "Manual" carried "the daemon is not commanding these fans",
+        which is the opposite of true while the user is commanding them. Qt maps
+        `toolTip` to `QAccessible::Text::Description`, so a stale one is not
+        merely cosmetic.
+        """
+        self._status_chip.setText(text)
+        self._status_chip.setToolTip(tooltip)
+        # 277-n: mirror it onto the CARD. Qt maps `toolTip` to
+        # `QAccessible::Text::Description`, which is what the tooltip above
+        # relies on — but `_status_chip` is a non-focusable QLabel, so a user who
+        # is not pointing a mouse at it gets "Not controlled" with no cause.
+        #
+        # Scope this honestly: the card has no focus policy either, so this does
+        # NOT put the reason in the keyboard-Tab path. What it does is publish it
+        # on the card's own accessible object, which screen-reader OBJECT
+        # navigation reaches — a real improvement over a description hanging off
+        # an unreachable child label, and strictly less than making the card
+        # focusable. Giving the card a focus policy would also oblige it to carry
+        # a visible `:focus` ring (DEC-251), which is a larger change than this.
+        self.setAccessibleDescription(tooltip)
+        set_chip_class(self._status_chip, cls)
+
+    def _restore_daemon_chip(self) -> None:
+        """Repaint whatever the daemon still says about this control.
+
+        EVERY exit from a chip-suppressing state must end here — leaving Manual,
+        and equally the external override lapsing. `set_skipped` deliberately
+        SUPPRESSES its chip while Manual is held *or* an external override is
+        displayed, rather than discarding the reason, so whichever of those ends
+        first has to put the chip back. (Suppression is the skip's property, not
+        the override's: taking Manual *discards* `_external_pct` outright,
+        DEC-169.) Blanking instead left the card with no
+        chip at all until something else repainted it, and on this page nothing
+        does: the reconcile acts only on a *delta*, so a state that is still true
+        is never re-sent.
+
+        **Order matters and is not arbitrary.** External is checked BEFORE
+        skipped, matching `set_skipped`'s own suppression order and the
+        precedence `docs/08` states for a client: an override is actively pinning
+        those fans, so painting "Not controlled" over one is wrong in the unsafe
+        direction. The two really can be set at once — `/status` composes
+        `overrides[]` live but `skipped_controls[]` from the last COMPLETED tick
+        — so this is a reachable ordering question, not a theoretical one. The
+        first version of this method ranked them the other way round and
+        contradicted both the contract and the sibling method.
+        """
+        if self._external_pct is not None:
+            self._apply_chip(f"External {self._external_pct}%", "InfoChip")
+        elif self._skipped_reason is not None:
+            text, tooltip = skipped_control_feedback(
+                self._skipped_reason, self._skipped_for_ms, self._skipped_control_name
+            )
+            self._apply_chip(text, "WarningChip", tooltip)
+        elif not self._control.members:
+            # "No members" is a TERMINAL state of the card, not a transient chip.
+            # Falling through to a blank here left a member-less control with no
+            # chip until something else repainted it, and nothing on this page
+            # does: the reconcile acts only on a *delta*. Reachable because the
+            # daemon records a skip BEFORE its own member-less short-circuit, so a
+            # role with no outputs and an unresolvable curve really is listed in
+            # `skipped_controls[]` — and clearing that skip landed here.
+            self._apply_chip("No members", "PageSubtitle")
+        else:
+            self._apply_chip("", "")
+
+    def _on_manual_toggled(self, checked: bool) -> None:
+        """Reveal/hide the inline slider and signal the transient manual state."""
+        if checked:
+            # DEC-169: taking manual ownership supersedes any foreign-override
+            # display — the user's own (fenced, renewable) override now wins.
+            self._external_pct = None
+            # P2-1: clamp the slider to the daemon-enforced floor so the user can
+            # neither request nor see a value the daemon would floor-clamp away
+            # (a 10% request on a 30%-floor pump ran at 30% but displayed "10%").
+            self._manual_slider.setMinimum(round(self._effective_floor()))
+            self._manual_peak_pct = None
+        if checked and self._last_output_pct is not None:
+            # Start manual at the current speed so the fan doesn't jump (clamped
+            # up to the floor by the setMinimum above).
+            self._manual_slider.blockSignals(True)
+            self._manual_slider.setValue(round(self._last_output_pct))
+            self._manual_slider.blockSignals(False)
+            self._paint_manual_pct()
+        self._manual_slider.setVisible(checked)
+        self._manual_pct_label.setVisible(checked)
+        self._output_label.setVisible(not checked)
+        if checked:
+            self._apply_chip("Manual", "WarningChip")
+        else:
+            # 277-o round 3: recompute the enable rule HERE too. It is
+            # `members OR checked`, and round 2 restored it only in
+            # `clear_manual` — the programmatic exit taken when an override
+            # lapses or is rejected. This is the INTERACTIVE exit, and it is the
+            # one a user actually takes: without it, un-toggling on a card whose
+            # members were stripped in place left an enabled button on a 0-member
+            # control, so the very next click took a fresh override that commands
+            # nothing and then renews it every ~5 s.
+            #
+            # Both exits now converge on the same recomputation. The round-2 fix
+            # was itself incomplete, and its tests could not see it because they
+            # called `clear_manual()` and `_update_no_members_state()` directly —
+            # `.click()`, not `_handler()` (the project rulebook § Hard-won lessons).
+            self._update_no_members_state(self._control)
+            self._restore_daemon_chip()
+        self.manual_toggled.emit(self._control.id, checked, self._manual_slider.value())
+
+    def _on_manual_slider_changed(self, value: int) -> None:
+        self._paint_manual_pct()
+        if self._manual_btn.isChecked():
+            self.manual_value_changed.emit(self._control.id, value)
+
+    def reflect_manual_applied(self, pct: int) -> None:
+        """Show the value the daemon actually applied to the manual override.
+
+        The daemon floor-clamps (and may thermal-clamp) the requested value; this
+        makes the slider + label reflect the *granted* value rather than the raw
+        request, so the card can never claim a speed the fan isn't running (P2-1).
+        No-op unless manual is active; blocks signals so it doesn't re-emit an
+        override, and setValue clamps into the slider's [floor, 100] range."""
+        if not self._manual_btn.isChecked():
+            return
+        self._manual_slider.blockSignals(True)
+        self._manual_slider.setValue(int(pct))  # coerce: a non-conforming daemon
+        self._manual_slider.blockSignals(False)  # could send a non-int (security P3)
+        self._paint_manual_pct()
+
+    def _paint_manual_pct(self) -> None:
+        """The Manual figure: the request, plus the duty a member floor holds the
+        fans at (``controls_view.manual_applied_text``)."""
+        text, tooltip = manual_applied_text(
+            self._manual_slider.value(), self._last_output_pct, self._manual_peak_pct
+        )
+        self._manual_pct_label.setText(text)
+        self._manual_pct_label.setToolTip(tooltip)
+
+    def clear_manual(self) -> None:
+        """Programmatically exit Manual without emitting ``manual_toggled``.
+
+        Used when a daemon override lapses or is rejected (DEC-163): the card
+        must stop showing Manual without re-triggering a release of the
+        already-gone override. Mirrors the unchecked branch of
+        ``_on_manual_toggled``.
+        """
+        if not self._manual_btn.isChecked():
+            return
+        self._manual_btn.blockSignals(True)
+        self._manual_btn.setChecked(False)
+        self._manual_btn.blockSignals(False)
+        self._manual_slider.setVisible(False)
+        self._manual_pct_label.setVisible(False)
+        self._output_label.setVisible(True)
+        # 277-o round 2: the enable state is `members OR checked`, and nothing
+        # else recomputes it on the way out. Releasing an override on a card whose
+        # members were stripped in place therefore left the button ENABLED on a
+        # 0-member control, so the user could take a FRESH override with no fans —
+        # the very invariant the exemption was scoped to preserve.
+        self._update_no_members_state(self._control)
+        self._restore_daemon_chip()
+
+    def set_external_override(self, pct: int) -> None:
+        """Show a read-only "External" chip for a daemon-held override this GUI
+        session does not own (DEC-169).
+
+        Such an override carries no fencing token on the `/status` surface, so it
+        can only be *displayed* — never renewed or released. The Manual button is
+        left unchecked: clicking it is an explicit *take-over* (a fresh
+        ``override_take`` that supersedes via monotonic fencing). Manual state, if
+        the user already owns one, wins over this display.
+        """
+        self._external_pct = pct
+        if self._manual_btn.isChecked():
+            return
+        self._apply_chip(f"External {pct}%", "InfoChip")
+
+    def clear_external_override(self) -> None:
+        """Drop the read-only external-override chip (DEC-169) once the daemon no
+        longer reports it. Leaves a user-owned Manual state untouched; otherwise
+        clears the chip.
+
+        It does NOT hand off to ``set_output``: that runs in demo mode only, so
+        on a live page this method's own repaint is the last word. An earlier
+        docstring promised the handoff (register row 277-k)."""
+        if self._external_pct is None:
+            return
+        self._external_pct = None
+        if self._manual_btn.isChecked():
+            return
+        # NOT `_apply_chip("", "")`. `set_skipped` suppresses its chip while an
+        # external override is displayed rather than discarding the reason, so
+        # blanking here leaves a still-skipped control with no chip at all, and
+        # nothing on this page will repaint it: the reconcile acts only on a
+        # reason *delta*, so a skip that is still true is never re-sent. The card
+        # goes quiet about a fan nothing is driving — the silence 273-i exists to
+        # end, one interleaving over. Reachable rather than theoretical:
+        # `/status` reads `overrides[]` live but `skipped_controls[]` from the
+        # last COMPLETED tick, so the two genuinely co-occur for up to a tick.
+        self._restore_daemon_chip()
+
+    def set_write_paused(self, paused: bool) -> None:
+        """Record whether the daemon's engine write phase is paused (`WIRE-n`).
+
+        State only — the chip is repainted by the next :meth:`set_output`, which
+        the Controls page drives from the same 1 Hz poll this flag arrives on, so
+        the two can never disagree by more than one tick. Setting it here rather
+        than passing it through `set_output` keeps it out of the demo path, whose
+        evaluator has no daemon and no write pause.
+
+        It deliberately does **not** repaint on its own. A card the daemon did
+        not report is reset to "—" by the page and has no output claim to
+        qualify; repainting here would put a "Not writing" chip on a control
+        that is not being evaluated either, which `set_skipped` already describes
+        more precisely.
+        """
+        self._write_paused = paused
+
+    def set_skipped(self, reason: str, skipped_for_ms: int = 0, control_name: str = "") -> None:
+        """Show a "Not controlled" chip for a control the daemon cannot resolve
+        (273-i).
+
+        The daemon short-circuits an overridden control before curve resolution,
+        so a skip and an override cannot co-occur **within one evaluation tick**
+        — but that guarantee does NOT extend to one `/status` response, which
+        composes `overrides[]` live and `skipped_controls[]` from the last
+        COMPLETED tick. The pair is therefore reachable on the wire for up to a
+        tick, and `docs/08` states the precedence: the override wins. A
+        user-owned Manual state wins over both, because that is a local intent
+        the next poll has yet to confirm and flickering it would be worse than
+        delaying this.
+        """
+        self._skipped_reason = reason
+        self._skipped_for_ms = skipped_for_ms
+        self._skipped_control_name = control_name
+        if self._manual_btn.isChecked() or self._external_pct is not None:
+            # Suppressed, not discarded — `_restore_daemon_chip` repaints it when
+            # whichever state is suppressing it ends. The `_external_pct` arm is
+            # NOT a guard against a hypothetical future daemon: per the docstring
+            # above, the pair arrives from the shipping daemon for up to a tick,
+            # and an override actively pins these fans, so "Not controlled" over
+            # one would be a lie in the unsafe direction. Two tests pin both
+            # directions of this; do not simplify the arm away.
+            return
+        text, tooltip = skipped_control_feedback(reason, skipped_for_ms, control_name)
+        self._apply_chip(text, "WarningChip", tooltip)
+
+    def clear_skipped(self) -> None:
+        """Drop the "Not controlled" chip (273-i) once the daemon stops reporting
+        the control as skipped. Leaves a user-owned Manual state untouched;
+        otherwise clears the chip. No ``set_output`` handoff — that runs in demo
+        mode only (register row 277-k), so this repaint is the last word."""
+        if self._skipped_reason is None:
+            return
+        self._skipped_reason = None
+        if self._manual_btn.isChecked():
+            return
+        self._restore_daemon_chip()
+
+    def update_control(self, control: LogicalControl, curves: list[CurveConfig]) -> None:
+        self._control = control
+        # Keep the base's item id live (DEC-235): callers always update a card
+        # with a same-id control, but re-setting keeps resized/size_reset correct
+        # even if a card were ever recycled across ids (the pre-refactor code read
+        # self._control.id live at emit time).
+        self._item_id = control.id
+        self._name_label.setText(control.name or "Unnamed")
+        self._members_label.setText(self._members_text(control))
+        self._role_icon.setStyleSheet(
+            f"color: {self._role_color(control)}; background: transparent;"
+        )
+        self._rebuild_member_rows(control)
+        self._update_fan_count(control)
+        curve_name = self._curve_name(curves, control.curve_id)
+        mode_text = "Manual" if control.mode == ControlMode.MANUAL else curve_name
+        self._curve_label.setText(f"Curve: {mode_text}")
+        self._update_no_members_state(control)
+        self._update_min_pwm_badge(control)
+        # P2-1 belt-and-suspenders (gui-finesse P3): if a floor change ever arrived
+        # in place rather than via a card rebuild, keep the manual slider's minimum
+        # in step so it can't request/show a now-sub-floor value.
+        if self._manual_btn.isChecked():
+            self._manual_slider.setMinimum(round(self._effective_floor()))
+        if self._user_size is not None:
+            # Content may have grown (e.g. more members): re-clamp the user
+            # override so a previously-valid size can't start clipping rows.
+            self.apply_card_size(active_theme().base_font_size_pt, self._card_size_tier)
+
+    def update_output_preview(
+        self, curve_name: str, sensor_name: str, sensor_value: float, output_pct: float
+    ) -> None:
+        """Update the output line from a curve edit without a full control loop cycle."""
+        self._output_label.setText(
+            f"Preview: {output_pct:.0f}% • {sensor_name} {sensor_value:.1f}°C"
+        )
+
+    # ─── Internals ───────────────────────────────────────────────────
+
+    def refresh_member_names(self) -> None:
+        """Re-resolve member row names in place after a rename (DEC-228).
+
+        Deliberately *not* a card rebuild: ``ControlsPage._refresh_controls_grid``
+        releases every live manual override before destroying cards (DEC-163), so
+        routing a rename through it would silently drop the user's override.
+        """
+        for member in self._control.members:
+            row_label = self._member_row_name.get(member.member_id)
+            if row_label is not None:
+                row_label.setText(self._display_name(member.member_id, member.member_label))
+        self._members_label.setText(self._members_text(self._control))
+
+    def _members_text(self, control: LogicalControl) -> str:
+        if not control.members:
+            return "No outputs assigned"
+        labels = [self._display_name(m.member_id, m.member_label) for m in control.members]
+        text = ", ".join(labels[:3])
+        if len(labels) > 3:
+            text += f" +{len(labels) - 3} more"
+        return f"Members: {text}"
+
+    def _curve_name(self, curves: list[CurveConfig], curve_id: str) -> str:
+        for c in curves:
+            if c.id == curve_id:
+                return f"{c.name} ({c.type.value})"
+        return "None"
+
+    def set_manual_allowed(self, allowed: bool, reason: str = "") -> None:
+        """Offer Manual only on a card of the profile the daemon is running.
+
+        The daemon resolves ``POST /control/{id}/override`` against its ACTIVE
+        profile by control id alone. From a profile the user is only browsing
+        it pinned the running profile's control of the same id — a duplicated
+        profile keeps its ids, so different fans moved than the card showed,
+        with a slider floor computed from the wrong members — or answered
+        ``404`` and the card silently snapped back. ``reason`` is the tooltip
+        that says why while it is withheld. A held override keeps its exit
+        (the enable rule below), as for a member-less control (277-o).
+        """
+        self._manual_allowed = allowed
+        self._manual_btn.setToolTip(_MANUAL_TOOLTIP if allowed else reason)
+        self._update_no_members_state(self._control)
+
+    def _update_no_members_state(self, control: LogicalControl) -> None:
+        # No fans assigned -> nothing to drive manually.
+        #
+        # 277-o: except while an override is actually held. Disabling a CHECKED
+        # button leaves the user unable to un-toggle it, so a control stripped of
+        # its members mid-override could not be released until the ~15 s deadman
+        # expired — on a card whose renew timer was still renewing. Keep the exit
+        # reachable; taking a *new* override still needs members.
+        self._manual_btn.setEnabled(
+            (bool(control.members) and self._manual_allowed) or self._manual_btn.isChecked()
+        )
+        if self._manual_btn.isChecked():
+            # The user is commanding these fans right now. "No members" would be
+            # both wrong and, via `_apply_chip`, announced as the card's
+            # description. Manual owns the chip until it is released, at which
+            # point `_restore_daemon_chip` repaints from the daemon's own view.
+            return
+        if not control.members:
+            self._output_label.setText("Assign outputs to enable")
+            # Through `_apply_chip`, which owns the tooltip: writing the chip
+            # directly leaves a previous state's tooltip attached, and Qt maps
+            # `toolTip` to `QAccessible::Text::Description`, so a screen reader
+            # announces "No members" described as "the daemon is not commanding
+            # these fans".
+            self._apply_chip("No members", "PageSubtitle")
+        elif self._status_chip.text() == "No members":
+            # Members restored. Nothing else takes this chip down: `set_output`
+            # repaints only once it is past its own member guard, and the page
+            # reconciles skips on a *delta*, so a stale "No members" otherwise
+            # pinned the card for the rest of the session. Guarded rather than
+            # unconditional so a live "Applied" is not blanked for a frame on
+            # every profile edit.
+            self._restore_daemon_chip()
+
+    def _effective_floor(self) -> float:
+        """The label-derived minimum PWM (DEC-095/162): the larger of the user-set
+        floor and the role-derived floor. Drives the manual slider's minimum (P2-1).
+
+        Since DEC-417 it no longer drives the Min badge, and the two can differ:
+        the badge also takes a header's pump ROLE, which the daemon floors at 30%
+        on the assignment alone, and by the user's choice the slider does not. A
+        request between the two on such a member is clamped up by the daemon."""
+        return max(self._control.minimum_pct, control_minimum_pct(self._control.members))
+
+    def refresh_min_pwm_badge(self) -> None:
+        """Repaint the Min badge — the Controls page calls this when the headers
+        change, so a pump role assigned after this card was built reaches it."""
+        self._update_min_pwm_badge(self._control)
+
+    def _update_min_pwm_badge(self, control: LogicalControl) -> None:
+        """Render the Min badge from its view-model (``controls_view.min_pwm_badge``)."""
+        badge = min_pwm_badge(control, self._floor_roles())
+        if badge.floor_pct <= 0.0:
+            self._min_pwm_label.setText("")
+            self._min_pwm_label.setToolTip("")
+            return
+        self._min_pwm_label.setText(f"Min: {badge.floor_pct:.0f}%")
+        self._min_pwm_label.setToolTip(badge.tooltip)

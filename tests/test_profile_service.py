@@ -1,0 +1,1344 @@
+"""Tests for profile management, curve interpolation, and v1 migration."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from ventulus.services.profile_service import (
+    PROFILE_SCHEMA_VERSION,
+    UNKNOWN_CURVE_TYPE_OUTPUT_PCT,
+    ControlMember,
+    ControlMode,
+    CurveConfig,
+    CurvePoint,
+    CurveType,
+    LogicalControl,
+    Profile,
+    ProfileService,
+    default_profiles,
+)
+
+# ---------------------------------------------------------------------------
+# Graph curve interpolation
+# ---------------------------------------------------------------------------
+
+
+def test_graph_curve_interpolation_within_range():
+    curve = CurveConfig(
+        type=CurveType.GRAPH,
+        points=[
+            CurvePoint(30.0, 20.0),
+            CurvePoint(50.0, 50.0),
+            CurvePoint(70.0, 80.0),
+        ],
+    )
+    assert curve.interpolate(40.0) == 35.0
+
+
+def test_graph_curve_interpolation_at_points():
+    curve = CurveConfig(
+        type=CurveType.GRAPH,
+        points=[CurvePoint(30.0, 20.0), CurvePoint(70.0, 80.0)],
+    )
+    assert curve.interpolate(30.0) == 20.0
+    assert curve.interpolate(70.0) == 80.0
+
+
+def test_graph_curve_interpolation_below_range():
+    curve = CurveConfig(
+        type=CurveType.GRAPH,
+        points=[CurvePoint(30.0, 20.0), CurvePoint(70.0, 80.0)],
+    )
+    assert curve.interpolate(10.0) == 20.0
+
+
+def test_graph_curve_interpolation_above_range():
+    curve = CurveConfig(
+        type=CurveType.GRAPH,
+        points=[CurvePoint(30.0, 20.0), CurvePoint(70.0, 80.0)],
+    )
+    assert curve.interpolate(90.0) == 80.0
+
+
+def test_graph_curve_interpolation_empty():
+    curve = CurveConfig(type=CurveType.GRAPH, points=[])
+    assert curve.interpolate(50.0) == 50.0
+
+
+# ---------------------------------------------------------------------------
+# Linear curve interpolation
+# ---------------------------------------------------------------------------
+
+
+def test_linear_curve_within_range():
+    curve = CurveConfig(
+        type=CurveType.LINEAR,
+        start_temp_c=30.0,
+        start_output_pct=20.0,
+        end_temp_c=70.0,
+        end_output_pct=80.0,
+    )
+    assert curve.interpolate(50.0) == pytest.approx(50.0)
+
+
+def test_linear_curve_below_range():
+    curve = CurveConfig(
+        type=CurveType.LINEAR,
+        start_temp_c=30.0,
+        start_output_pct=20.0,
+        end_temp_c=70.0,
+        end_output_pct=80.0,
+    )
+    assert curve.interpolate(10.0) == 20.0
+
+
+def test_linear_curve_above_range():
+    curve = CurveConfig(
+        type=CurveType.LINEAR,
+        start_temp_c=30.0,
+        start_output_pct=20.0,
+        end_temp_c=70.0,
+        end_output_pct=80.0,
+    )
+    assert curve.interpolate(90.0) == 80.0
+
+
+# ---------------------------------------------------------------------------
+# Flat curve
+# ---------------------------------------------------------------------------
+
+
+def test_flat_curve_returns_constant():
+    curve = CurveConfig(type=CurveType.FLAT, flat_output_pct=65.0)
+    assert curve.interpolate(30.0) == 65.0
+    assert curve.interpolate(80.0) == 65.0
+    assert curve.interpolate(0.0) == 65.0
+
+
+# ---------------------------------------------------------------------------
+# Stepped curve interpolation (DEC-148)
+# ---------------------------------------------------------------------------
+
+
+def test_stepped_curve_holds_lower_point():
+    """Stepped holds each point's output until the next point's temp — no ramp.
+    The same points a graph would interpolate to 35% at 40°C stay at the lower
+    point's 20% under the staircase rule."""
+    curve = CurveConfig(
+        type=CurveType.STEPPED,
+        points=[
+            CurvePoint(30.0, 20.0),
+            CurvePoint(50.0, 50.0),
+            CurvePoint(70.0, 80.0),
+        ],
+    )
+    assert curve.interpolate(40.0) == 20.0  # a graph curve would return 35.0
+    assert curve.interpolate(49.9) == 20.0
+    assert curve.interpolate(60.0) == 50.0
+
+
+def test_stepped_curve_node_is_half_open_lower():
+    """Exactly on a node returns that node's output: each segment is the
+    half-open interval [p_i, p_{i+1})."""
+    curve = CurveConfig(
+        type=CurveType.STEPPED,
+        points=[CurvePoint(30.0, 20.0), CurvePoint(50.0, 50.0), CurvePoint(70.0, 80.0)],
+    )
+    assert curve.interpolate(30.0) == 20.0
+    assert curve.interpolate(50.0) == 50.0
+    assert curve.interpolate(70.0) == 80.0
+
+
+def test_stepped_curve_below_and_above_range_clamp():
+    curve = CurveConfig(
+        type=CurveType.STEPPED,
+        points=[CurvePoint(30.0, 20.0), CurvePoint(70.0, 80.0)],
+    )
+    assert curve.interpolate(10.0) == 20.0
+    assert curve.interpolate(90.0) == 80.0
+
+
+def test_stepped_curve_empty_returns_50():
+    curve = CurveConfig(type=CurveType.STEPPED, points=[])
+    assert curve.interpolate(50.0) == 50.0
+
+
+# ---------------------------------------------------------------------------
+# Trigger curve interpolation (DEC-149) — pure cold-start value
+# ---------------------------------------------------------------------------
+
+
+def test_trigger_curve_coldstart_below_load_is_idle():
+    """interpolate() is the stateless cold-start value: idle below the load
+    temp (the latching hysteresis is applied by the control loop, not here)."""
+    curve = CurveConfig(
+        type=CurveType.TRIGGER,
+        trigger_idle_temp_c=40.0,
+        trigger_load_temp_c=60.0,
+        trigger_idle_pct=30.0,
+        trigger_load_pct=80.0,
+    )
+    assert curve.interpolate(35.0) == 30.0  # below idle
+    assert curve.interpolate(50.0) == 30.0  # in band, cold-start = idle
+    assert curve.interpolate(59.9) == 30.0
+
+
+def test_trigger_curve_coldstart_at_or_above_load_is_load():
+    curve = CurveConfig(
+        type=CurveType.TRIGGER,
+        trigger_idle_temp_c=40.0,
+        trigger_load_temp_c=60.0,
+        trigger_idle_pct=30.0,
+        trigger_load_pct=80.0,
+    )
+    assert curve.interpolate(60.0) == 80.0  # at load temp (inclusive)
+    assert curve.interpolate(75.0) == 80.0
+
+
+# ---------------------------------------------------------------------------
+# Unknown curve type fallback
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_curve_type_falls_back_to_flat():
+    """Loading a config with an unknown curve type falls back to flat.
+
+    ``mix``/``sync`` became real types in v7 (DEC-150/151), so this uses a
+    genuinely-unrecognised value — the forward-compat path a future curve type
+    would hit on an older build.
+    """
+    data = {"id": "future", "name": "Future", "type": "spline", "flat_output_pct": 42.0}
+    curve = CurveConfig.from_dict(data)
+    assert curve.type == CurveType.FLAT
+    # At the daemon's fallback, not the document's own flat figure, which the
+    # daemon never reads for a type it does not know (batch 6).
+    assert curve.interpolate(50.0) == UNKNOWN_CURVE_TYPE_OUTPUT_PCT != data["flat_output_pct"]
+
+
+def test_mix_and_sync_are_known_types():
+    """``mix`` and ``sync`` round-trip as their own types (DEC-150/151) — no
+    longer the unknown-type fallback they were before v7."""
+    mix = CurveConfig.from_dict(
+        {"id": "m", "name": "M", "type": "mix", "mix_function": "average", "mix_curve_ids": ["a"]}
+    )
+    assert mix.type == CurveType.MIX
+    assert mix.mix_function == "average"
+    assert mix.mix_curve_ids == ["a"]
+
+    sync = CurveConfig.from_dict(
+        {"id": "s", "name": "S", "type": "sync", "sync_control_id": "c1", "sync_offset_pct": 7.0}
+    )
+    assert sync.type == CurveType.SYNC
+    assert sync.sync_control_id == "c1"
+    assert sync.sync_offset_pct == 7.0
+
+
+# ---------------------------------------------------------------------------
+# Tuning parameters roundtrip
+# ---------------------------------------------------------------------------
+
+
+def test_logical_control_tuning_roundtrip():
+    from ventulus.services.profile_service import LogicalControl
+
+    ctrl = LogicalControl(
+        name="Test",
+        step_up_pct=5.0,
+        step_down_pct=3.0,
+        start_pct=30.0,
+        stop_pct=20.0,
+        offset_pct=2.0,
+        minimum_pct=15.0,
+    )
+    data = ctrl.to_dict()
+    restored = LogicalControl.from_dict(data)
+    assert restored.step_up_pct == 5.0
+    assert restored.step_down_pct == 3.0
+    assert restored.start_pct == 30.0
+    assert restored.stop_pct == 20.0
+    assert restored.offset_pct == 2.0
+    assert restored.minimum_pct == 15.0
+
+
+# ---------------------------------------------------------------------------
+# Default profiles
+# ---------------------------------------------------------------------------
+
+
+def test_default_profiles_count():
+    profiles = default_profiles()
+    assert len(profiles) == 3
+    names = {p.name for p in profiles}
+    assert names == {"Quiet", "Balanced", "Performance"}
+
+
+def test_default_profiles_have_controls_and_curves():
+    for p in default_profiles():
+        assert len(p.controls) >= 1
+        assert len(p.curves) >= 1
+        # Each control references a valid curve
+        curve_ids = {c.id for c in p.curves}
+        for ctrl in p.controls:
+            assert ctrl.curve_id in curve_ids
+        # Each graph curve has 5 points
+        for c in p.curves:
+            if c.type == CurveType.GRAPH:
+                assert len(c.points) == 5
+
+
+# ---------------------------------------------------------------------------
+# Profile roundtrip
+# ---------------------------------------------------------------------------
+
+
+def test_profile_roundtrip():
+    original = default_profiles()[0]
+    data = original.to_dict()
+    restored = Profile.from_dict(data)
+    assert restored.name == original.name
+    assert len(restored.controls) == len(original.controls)
+    assert len(restored.curves) == len(original.curves)
+    assert restored.curves[0].points[0].temp_c == original.curves[0].points[0].temp_c
+
+
+def test_curve_config_roundtrip_graph():
+    curve = CurveConfig(
+        id="c1",
+        name="Test",
+        type=CurveType.GRAPH,
+        sensor_id="cpu",
+        points=[CurvePoint(30.0, 20.0), CurvePoint(80.0, 100.0)],
+    )
+    data = curve.to_dict()
+    restored = CurveConfig.from_dict(data)
+    assert restored.type == CurveType.GRAPH
+    assert len(restored.points) == 2
+    assert restored.sensor_id == "cpu"
+
+
+def test_curve_config_roundtrip_stepped():
+    curve = CurveConfig(
+        id="cs",
+        name="Stepped",
+        type=CurveType.STEPPED,
+        sensor_id="cpu",
+        points=[CurvePoint(30.0, 20.0), CurvePoint(80.0, 100.0)],
+    )
+    data = curve.to_dict()
+    assert data["type"] == "stepped"
+    assert "points" in data  # stepped serializes its points like a graph
+    restored = CurveConfig.from_dict(data)
+    assert restored.type == CurveType.STEPPED
+    assert len(restored.points) == 2
+    assert restored.sensor_id == "cpu"
+
+
+def test_curve_config_roundtrip_trigger():
+    curve = CurveConfig(
+        id="ct",
+        name="Trigger",
+        type=CurveType.TRIGGER,
+        trigger_idle_temp_c=35.0,
+        trigger_load_temp_c=65.0,
+        trigger_idle_pct=25.0,
+        trigger_load_pct=90.0,
+    )
+    data = curve.to_dict()
+    assert data["type"] == "trigger"
+    restored = CurveConfig.from_dict(data)
+    assert restored.type == CurveType.TRIGGER
+    assert restored.trigger_idle_temp_c == 35.0
+    assert restored.trigger_load_temp_c == 65.0
+    assert restored.trigger_idle_pct == 25.0
+    assert restored.trigger_load_pct == 90.0
+
+
+def test_curve_config_roundtrip_linear():
+    curve = CurveConfig(
+        id="c2",
+        name="Linear",
+        type=CurveType.LINEAR,
+        start_temp_c=25.0,
+        end_temp_c=85.0,
+        start_output_pct=15.0,
+        end_output_pct=95.0,
+    )
+    data = curve.to_dict()
+    restored = CurveConfig.from_dict(data)
+    assert restored.type == CurveType.LINEAR
+    assert restored.start_temp_c == 25.0
+    assert restored.end_output_pct == 95.0
+
+
+def test_curve_config_roundtrip_flat():
+    curve = CurveConfig(id="c3", name="Flat", type=CurveType.FLAT, flat_output_pct=42.0)
+    data = curve.to_dict()
+    restored = CurveConfig.from_dict(data)
+    assert restored.type == CurveType.FLAT
+    assert restored.flat_output_pct == 42.0
+
+
+# ---------------------------------------------------------------------------
+# V1 migration
+# ---------------------------------------------------------------------------
+
+
+def test_v1_profile_migration():
+    """Old v1 profile with assignments should migrate to v2 with controls + curves."""
+    v1_data = {
+        "id": "old",
+        "name": "Old Profile",
+        "version": 1,
+        "assignments": [
+            {
+                "target_id": "openfan:ch00",
+                "target_type": "fan",
+                "sensor_id": "cpu_temp",
+                "curve": {
+                    "sensor_id": "cpu_temp",
+                    "points": [
+                        {"temp_c": 30.0, "output_pct": 20.0},
+                        {"temp_c": 70.0, "output_pct": 80.0},
+                    ],
+                },
+                "enabled": True,
+            }
+        ],
+    }
+    profile = Profile.from_dict(v1_data)
+    assert profile.version == PROFILE_SCHEMA_VERSION
+    assert len(profile.controls) == 1
+    assert len(profile.curves) == 1
+    assert profile.controls[0].curve_id == profile.curves[0].id
+    assert len(profile.curves[0].points) == 2
+    assert profile.controls[0].members[0].member_id == "openfan:ch00"
+
+
+def test_v1_profile_migration_group_target():
+    """V1 profile with target_type='group' and target_id='all' migrates with empty members."""
+    v1_data = {
+        "id": "old_group",
+        "name": "Old Group Profile",
+        "version": 1,
+        "assignments": [
+            {
+                "target_id": "all",
+                "target_type": "group",
+                "sensor_id": "cpu_temp",
+                "curve": {
+                    "sensor_id": "cpu_temp",
+                    "points": [
+                        {"temp_c": 30.0, "output_pct": 25.0},
+                        {"temp_c": 80.0, "output_pct": 100.0},
+                    ],
+                },
+                "enabled": True,
+            }
+        ],
+    }
+    profile = Profile.from_dict(v1_data)
+    assert profile.version == PROFILE_SCHEMA_VERSION
+    assert len(profile.controls) == 1
+    assert profile.controls[0].name == "Group: all"
+    # Group targets have no explicit members (they apply to all fans)
+    assert len(profile.controls[0].members) == 0
+    assert len(profile.curves) == 1
+    assert len(profile.curves[0].points) == 2
+
+
+# ---------------------------------------------------------------------------
+# Profile service
+# ---------------------------------------------------------------------------
+
+
+def test_profile_service_load_creates_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    svc = ProfileService()
+    svc.load()
+    assert len(svc.profiles) == 3
+    assert svc.active_profile is not None
+
+
+def test_profile_service_crud(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    svc = ProfileService()
+    svc.load()
+
+    new_p = svc.create_profile("Custom")
+    assert svc.get_profile(new_p.id) is not None
+    assert len(svc.profiles) == 4
+
+    dup = svc.duplicate_profile(new_p.id, "Custom Copy")
+    assert dup is not None
+    assert len(svc.profiles) == 5
+
+    assert svc.delete_profile(dup.id) is True
+    assert len(svc.profiles) == 4
+
+    assert svc.set_active(new_p.id) is True
+    assert svc.active_id == new_p.id
+
+
+def test_profile_service_persistence(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    svc1 = ProfileService()
+    svc1.load()
+    svc1.create_profile("Persistent")
+
+    svc2 = ProfileService()
+    svc2.load()
+    names = {p.name for p in svc2.profiles}
+    assert "Persistent" in names
+
+
+def test_profile_persistence_roundtrips_all_fields(tmp_path, monkeypatch):
+    """Save a fully-populated profile, reload, verify every field survives."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    svc1 = ProfileService()
+    svc1.load()
+    p = svc1.create_profile("Full")
+
+    # Add a curve with non-trivial points
+    curve = CurveConfig(
+        id="c1",
+        name="CPU Fan",
+        type=CurveType.GRAPH,
+        sensor_id="cpu_temp",
+        points=[CurvePoint(30, 20), CurvePoint(55, 60), CurvePoint(80, 100)],
+    )
+    p.curves.append(curve)
+
+    # Add a control with tuning params and a member
+    control = LogicalControl(
+        id="ctrl1",
+        name="Chassis",
+        mode=ControlMode.CURVE,
+        curve_id="c1",
+        manual_output_pct=42.0,
+        members=[ControlMember(source="openfan", member_id="openfan:ch00", member_label="Fan 1")],
+        step_up_pct=10.0,
+        step_down_pct=5.0,
+        offset_pct=3.0,
+        minimum_pct=15.0,
+        start_pct=25.0,
+        stop_pct=10.0,
+    )
+    p.controls.append(control)
+    svc1.save_profile(p)
+
+    # Reload from disk in a fresh service
+    svc2 = ProfileService()
+    svc2.load()
+    reloaded = svc2.get_profile(p.id)
+    assert reloaded is not None
+
+    # Verify curves roundtripped
+    assert len(reloaded.curves) == 1
+    rc = reloaded.curves[0]
+    assert rc.id == "c1"
+    assert rc.name == "CPU Fan"
+    assert rc.type == CurveType.GRAPH
+    assert rc.sensor_id == "cpu_temp"
+    assert len(rc.points) == 3
+    assert rc.points[0].temp_c == 30
+    assert rc.points[0].output_pct == 20
+    assert rc.points[1].temp_c == 55
+    assert rc.points[1].output_pct == 60
+    assert rc.points[2].temp_c == 80
+    assert rc.points[2].output_pct == 100
+
+    # Verify controls roundtripped
+    assert len(reloaded.controls) == 1
+    rl = reloaded.controls[0]
+    assert rl.id == "ctrl1"
+    assert rl.name == "Chassis"
+    assert rl.mode == ControlMode.CURVE
+    assert rl.curve_id == "c1"
+    assert rl.manual_output_pct == 42.0
+    assert rl.step_up_pct == 10.0
+    assert rl.step_down_pct == 5.0
+    assert rl.offset_pct == 3.0
+    assert rl.minimum_pct == 15.0
+    assert rl.start_pct == 25.0
+    assert rl.stop_pct == 10.0
+
+    # Verify members roundtripped
+    assert len(rl.members) == 1
+    rm = rl.members[0]
+    assert rm.source == "openfan"
+    assert rm.member_id == "openfan:ch00"
+    assert rm.member_label == "Fan 1"
+
+
+# ---------------------------------------------------------------------------
+# Error handling — corrupted / minimal / missing fields
+# ---------------------------------------------------------------------------
+
+
+def test_load_corrupted_json_does_not_crash(tmp_path, monkeypatch):
+    """Corrupted JSON on disk → logged warning, defaults created instead."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    profiles_dir = tmp_path / "ventulus" / "profiles"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "broken.json").write_text("{not valid json!!!")
+
+    svc = ProfileService()
+    svc.load()  # must not raise
+
+    # Corrupted file skipped, defaults loaded
+    assert len(svc.profiles) == 3
+    assert svc.active_profile is not None
+
+
+def test_load_returns_per_profile_errors(tmp_path, monkeypatch):
+    """P3-4: corrupted profiles must be reported so the GUI can surface them
+    to the user via a Diagnostics warning, not silently swallowed."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    profiles_dir = tmp_path / "ventulus" / "profiles"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "broken.json").write_text("{not valid json!!!")
+    # A valid profile alongside the broken one so `loaded` is True and we
+    # avoid the defaults-creation fallback (which would obscure the error).
+    valid = {
+        "version": 3,
+        "id": "ok",
+        "name": "ok",
+        "description": "",
+        "controls": [],
+        "curves": [],
+    }
+    (profiles_dir / "ok.json").write_text(__import__("json").dumps(valid))
+
+    svc = ProfileService()
+    errors = svc.load()
+
+    assert len(errors) == 1
+    path, msg = errors[0]
+    assert "broken.json" in path
+    assert msg  # non-empty
+    # The valid profile is still loaded.
+    assert any(p.id == "ok" for p in svc.profiles)
+
+
+def test_load_returns_empty_list_on_clean_load(tmp_path, monkeypatch):
+    """A clean load with no broken files returns an empty error list."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    svc = ProfileService()
+    errors = svc.load()
+
+    assert errors == []
+
+
+def test_from_dict_empty_dict_uses_defaults():
+    """from_dict({}) with no fields → valid profile with defaults."""
+    p = Profile.from_dict({})
+    assert p.name == ""
+    assert p.controls == []
+    assert p.curves == []
+    assert p.version == PROFILE_SCHEMA_VERSION
+    assert len(p.id) > 0  # auto-generated UUID
+
+
+def test_from_dict_missing_controls_and_curves():
+    """from_dict with name but no controls/curves → valid empty profile."""
+    p = Profile.from_dict({"name": "Sparse", "version": 3})
+    assert p.name == "Sparse"
+    assert p.controls == []
+    assert p.curves == []
+
+
+# ---------------------------------------------------------------------------
+# V4 — role-aware minimum_pct, fan_zero_rpm, schema migration (DEC-095)
+# ---------------------------------------------------------------------------
+
+
+def test_role_inference_chassis_for_openfan_only():
+    from ventulus.services.profile_service import (
+        CONTROL_ROLE_CHASSIS,
+        infer_control_role,
+    )
+
+    members = [
+        ControlMember(source="openfan", member_id="openfan:ch00", member_label="ch00"),
+        ControlMember(source="openfan", member_id="openfan:ch01", member_label="ch01"),
+    ]
+    assert infer_control_role(members) == CONTROL_ROLE_CHASSIS
+
+
+def test_role_inference_cpu_pump_when_label_hints():
+    from ventulus.services.profile_service import (
+        CONTROL_ROLE_CPU_PUMP,
+        infer_control_role,
+    )
+
+    # CPU header label
+    cpu_members = [
+        ControlMember(source="hwmon", member_id="hwmon:nct6775:pwm1", member_label="CPU_FAN"),
+    ]
+    assert infer_control_role(cpu_members) == CONTROL_ROLE_CPU_PUMP
+
+    # Pump header label
+    pump_members = [
+        ControlMember(source="hwmon", member_id="hwmon:nct6775:pwm2", member_label="AIO_PUMP"),
+    ]
+    assert infer_control_role(pump_members) == CONTROL_ROLE_CPU_PUMP
+
+    # Mixed — any CPU/pump member promotes the whole control
+    mixed = [
+        ControlMember(source="openfan", member_id="openfan:ch00", member_label="ch00"),
+        ControlMember(source="hwmon", member_id="hwmon:nct6775:pwm1", member_label="CPU_FAN"),
+    ]
+    assert infer_control_role(mixed) == CONTROL_ROLE_CPU_PUMP
+
+
+def test_role_inference_gpu_when_only_amd_gpu():
+    from ventulus.services.profile_service import CONTROL_ROLE_GPU, infer_control_role
+
+    members = [
+        ControlMember(source="amd_gpu", member_id="amd_gpu:0000:03:00.0", member_label="9070XT"),
+    ]
+    assert infer_control_role(members) == CONTROL_ROLE_GPU
+
+
+def test_role_minimum_pct_values():
+    from ventulus.services.profile_service import (
+        CONTROL_ROLE_CHASSIS,
+        CONTROL_ROLE_CPU_PUMP,
+        CONTROL_ROLE_GPU,
+        role_minimum_pct,
+    )
+
+    # CPU/pump = 30, chassis = 20, GPU = 0 (firmware enforces its own range)
+    assert role_minimum_pct(CONTROL_ROLE_CPU_PUMP) == 30.0
+    assert role_minimum_pct(CONTROL_ROLE_CHASSIS) == 20.0
+    assert role_minimum_pct(CONTROL_ROLE_GPU) == 0.0
+
+
+def test_apply_role_floor_raises_chassis_to_20():
+    from ventulus.services.profile_service import apply_role_floor
+
+    ctrl = LogicalControl(
+        name="Top fans",
+        members=[ControlMember(source="openfan", member_id="openfan:ch00")],
+        minimum_pct=0.0,
+    )
+    changed = apply_role_floor(ctrl)
+    assert changed is True
+    assert ctrl.minimum_pct == 20.0
+
+
+def test_apply_role_floor_raises_cpu_to_30():
+    from ventulus.services.profile_service import apply_role_floor
+
+    ctrl = LogicalControl(
+        name="Pump",
+        members=[
+            ControlMember(source="hwmon", member_id="hwmon:nct6775:pwm1", member_label="AIO_PUMP")
+        ],
+        minimum_pct=10.0,
+    )
+    assert apply_role_floor(ctrl) is True
+    assert ctrl.minimum_pct == 30.0
+
+
+def test_apply_role_floor_preserves_user_value_above_role():
+    from ventulus.services.profile_service import apply_role_floor
+
+    # User explicitly set 40% — must not be lowered to 30 by policy.
+    ctrl = LogicalControl(
+        name="Pump",
+        members=[
+            ControlMember(source="hwmon", member_id="hwmon:nct6775:pwm1", member_label="PUMP")
+        ],
+        minimum_pct=40.0,
+    )
+    assert apply_role_floor(ctrl) is False
+    assert ctrl.minimum_pct == 40.0
+
+
+def test_v3_to_v4_migration_raises_cpu_pump_floor():
+    """A v3 profile with a CPU member at minimum_pct=0 must migrate to 30."""
+    v3 = {
+        "id": "legacy",
+        "name": "Legacy",
+        "version": 3,
+        "controls": [
+            {
+                "id": "c1",
+                "name": "CPU",
+                "mode": "curve",
+                "curve_id": "x",
+                "members": [
+                    {
+                        "source": "hwmon",
+                        "member_id": "hwmon:nct6775:pwm1",
+                        "member_label": "CPU_FAN",
+                    }
+                ],
+                "minimum_pct": 0.0,
+            }
+        ],
+        "curves": [],
+    }
+    p = Profile.from_dict(v3)
+    assert p.version == PROFILE_SCHEMA_VERSION
+    assert p.controls[0].minimum_pct == 30.0
+
+
+def test_v3_to_v4_migration_does_not_lower_explicit_user_value():
+    v3 = {
+        "id": "legacy",
+        "name": "Legacy",
+        "version": 3,
+        "controls": [
+            {
+                "id": "c1",
+                "name": "CPU",
+                "mode": "curve",
+                "curve_id": "x",
+                "members": [
+                    {
+                        "source": "hwmon",
+                        "member_id": "hwmon:nct6775:pwm1",
+                        "member_label": "CPU_FAN",
+                    }
+                ],
+                "minimum_pct": 50.0,
+            }
+        ],
+        "curves": [],
+    }
+    p = Profile.from_dict(v3)
+    assert p.controls[0].minimum_pct == 50.0
+
+
+# ─────────────────── DEC-167 pump stop_pct sanitization ───────────────────
+
+
+def test_sanitize_pump_stop_zeros_pump_control():
+    from ventulus.services.profile_service import sanitize_pump_stop
+
+    ctrl = LogicalControl(
+        name="Pump",
+        members=[
+            ControlMember(source="hwmon", member_id="hwmon:nct6775:pwm1", member_label="AIO_PUMP")
+        ],
+        stop_pct=35.0,
+    )
+    assert sanitize_pump_stop(ctrl) is True
+    assert ctrl.stop_pct == 0.0
+
+
+def test_sanitize_pump_stop_noop_when_already_zero():
+    from ventulus.services.profile_service import sanitize_pump_stop
+
+    ctrl = LogicalControl(
+        name="Pump",
+        members=[
+            ControlMember(source="hwmon", member_id="hwmon:nct6775:pwm1", member_label="PUMP")
+        ],
+        stop_pct=0.0,
+    )
+    assert sanitize_pump_stop(ctrl) is False
+    assert ctrl.stop_pct == 0.0
+
+
+def test_sanitize_pump_stop_preserves_nonpump_stop():
+    from ventulus.services.profile_service import sanitize_pump_stop
+
+    # A chassis/openfan control keeps its legitimate stop-to-0 feature.
+    ctrl = LogicalControl(
+        name="Top fans",
+        members=[ControlMember(source="openfan", member_id="openfan:ch00")],
+        stop_pct=15.0,
+    )
+    assert sanitize_pump_stop(ctrl) is False
+    assert ctrl.stop_pct == 15.0
+
+
+def test_apply_role_floor_sanitizes_pump_stop_when_pump_added():
+    from ventulus.services.profile_service import apply_role_floor
+
+    # A control that carried a stop and is now pump-role must lose the stop.
+    ctrl = LogicalControl(
+        name="Pump",
+        members=[
+            ControlMember(source="hwmon", member_id="hwmon:nct6775:pwm1", member_label="AIO_PUMP")
+        ],
+        minimum_pct=30.0,
+        stop_pct=20.0,
+    )
+    apply_role_floor(ctrl)
+    assert ctrl.stop_pct == 0.0
+
+
+def test_from_dict_sanitizes_pump_stop_pct():
+    # DEC-167: a hand-edited current-schema profile with a pump stop must load
+    # with stop_pct normalised to 0 (the version-gated v4 migration would miss it).
+    data = {
+        "id": "handedit",
+        "name": "HandEdit",
+        "version": PROFILE_SCHEMA_VERSION,
+        "controls": [
+            {
+                "id": "c1",
+                "name": "Pump",
+                "mode": "curve",
+                "curve_id": "x",
+                "members": [
+                    {
+                        "source": "hwmon",
+                        "member_id": "hwmon:nct6775:pwm1",
+                        "member_label": "AIO_PUMP",
+                    }
+                ],
+                "minimum_pct": 30.0,
+                "stop_pct": 35.0,
+            }
+        ],
+        "curves": [],
+    }
+    p = Profile.from_dict(data)
+    assert p.controls[0].stop_pct == 0.0
+
+
+def test_from_dict_preserves_nonpump_stop_pct():
+    data = {
+        "id": "chassis",
+        "name": "Chassis",
+        "version": PROFILE_SCHEMA_VERSION,
+        "controls": [
+            {
+                "id": "c1",
+                "name": "Top fans",
+                "mode": "curve",
+                "curve_id": "x",
+                "members": [{"source": "openfan", "member_id": "openfan:ch00"}],
+                "minimum_pct": 20.0,
+                "stop_pct": 15.0,
+            }
+        ],
+        "curves": [],
+    }
+    p = Profile.from_dict(data)
+    assert p.controls[0].stop_pct == 15.0
+
+
+def test_v3_to_v4_migration_chassis_only_raises_to_20():
+    v3 = {
+        "id": "legacy",
+        "name": "Legacy",
+        "version": 3,
+        "controls": [
+            {
+                "id": "c1",
+                "name": "Top",
+                "mode": "curve",
+                "curve_id": "x",
+                "members": [{"source": "openfan", "member_id": "openfan:ch00"}],
+                "minimum_pct": 0.0,
+            }
+        ],
+        "curves": [],
+    }
+    p = Profile.from_dict(v3)
+    assert p.controls[0].minimum_pct == 20.0
+
+
+# GSA-l: the floor every stored schema version loads with. A pump/CPU control is
+# raised to its floor on every version — by the v4 migration below v4, by the
+# DEC-423 heal from v4 on. The chassis default is a v4-migration floor only: from
+# v4 on the loader keeps a chassis minimum the user set below it.
+_CPU_MEMBER_ID = "hwmon:nct6798:nct6775.656:pwm1:CPU_FAN"
+_CHASSIS_MEMBER_ID = "openfan:ch00"
+_ALL_STORED_VERSIONS = [1, *range(3, PROFILE_SCHEMA_VERSION + 1)]
+
+
+def _stored_at(version: int, member_id: str) -> dict:
+    if version == 1:
+        return {
+            "id": "legacy",
+            "name": "Legacy",
+            "version": 1,
+            "assignments": [
+                {
+                    "target_id": member_id,
+                    "target_type": "fan",
+                    "curve": {"sensor_id": "cpu", "points": []},
+                }
+            ],
+        }
+    source = "openfan" if member_id.startswith("openfan") else "hwmon"
+    return {
+        "id": "legacy",
+        "name": "Legacy",
+        "version": version,
+        "controls": [
+            {
+                "id": "c1",
+                "name": "Role",
+                "mode": "curve",
+                "curve_id": "x",
+                "members": [{"source": source, "member_id": member_id}],
+                "minimum_pct": 0.0,
+            }
+        ],
+        "curves": [],
+    }
+
+
+@pytest.mark.parametrize("version", _ALL_STORED_VERSIONS)
+def test_every_stored_version_loads_a_cpu_pump_control_at_its_floor(version):
+    from ventulus.services.profile_service import (
+        CONTROL_ROLE_CPU_PUMP,
+        control_minimum_pct,
+        infer_control_role,
+    )
+
+    control = Profile.from_dict(_stored_at(version, _CPU_MEMBER_ID)).controls[0]
+
+    assert infer_control_role(control.members) == CONTROL_ROLE_CPU_PUMP, "precondition"
+    assert control_minimum_pct(control.members) > 0, "precondition: stored at 0, below it"
+    assert control.minimum_pct == control_minimum_pct(control.members)
+
+
+@pytest.mark.parametrize("version", _ALL_STORED_VERSIONS)
+def test_the_chassis_default_is_applied_only_by_the_v4_migration(version):
+    from ventulus.services.profile_service import (
+        CONTROL_ROLE_CHASSIS,
+        control_minimum_pct,
+        infer_control_role,
+    )
+
+    control = Profile.from_dict(_stored_at(version, _CHASSIS_MEMBER_ID)).controls[0]
+
+    assert infer_control_role(control.members) == CONTROL_ROLE_CHASSIS, "precondition"
+    assert control_minimum_pct(control.members) > 0, "precondition: stored at 0, below it"
+    expected = control_minimum_pct(control.members) if version < 4 else 0.0
+    assert control.minimum_pct == expected
+
+
+def test_fan_zero_rpm_field_roundtrip():
+    """ControlMember.fan_zero_rpm survives to_dict/from_dict."""
+    m = ControlMember(
+        source="amd_gpu",
+        member_id="amd_gpu:0000:03:00.0",
+        member_label="9070XT",
+        fan_zero_rpm=True,
+    )
+    d = m.to_dict()
+    assert d["fan_zero_rpm"] is True
+    m2 = ControlMember.from_dict(d)
+    assert m2.fan_zero_rpm is True
+
+
+def test_fan_zero_rpm_default_false_when_missing():
+    """Loading a profile without the field must default to False."""
+    m = ControlMember.from_dict({"source": "amd_gpu", "member_id": "amd_gpu:0000:03:00.0"})
+    assert m.fan_zero_rpm is False
+
+
+def test_load_resaves_when_migrating_from_v3(tmp_path, monkeypatch):
+    """Loading a v3 profile from disk must re-save it at the current schema version."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    profiles_dir = tmp_path / "ventulus" / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    legacy = profiles_dir / "legacy.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "id": "legacy",
+                "name": "Legacy",
+                "version": 3,
+                "controls": [],
+                "curves": [],
+            }
+        )
+    )
+
+    svc = ProfileService()
+    errors = svc.load()
+    assert errors == []
+
+    # File on disk should now report the current schema version.
+    rewritten = json.loads(legacy.read_text())
+    assert rewritten["version"] == PROFILE_SCHEMA_VERSION
+
+
+def test_local_file_with_traversal_id_is_rejected_not_resaved(tmp_path, monkeypatch):
+    """DEC-223 regression: a cached/imported file whose *content* id traverses
+    (old schema, so the migration resave would fire) must surface as a
+    per-file load error — and must not write through the traversal."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    pdir = tmp_path / "ventulus" / "profiles"
+    pdir.mkdir(parents=True)
+    (pdir / "smuggled.json").write_text(
+        json.dumps(
+            {
+                "id": "../../escaped",
+                "name": "Evil",
+                "version": 4,
+                "controls": [],
+                "curves": [],
+            }
+        )
+    )
+
+    svc = ProfileService()
+    errors = svc.load()
+
+    assert any("unsafe profile id" in msg for _, msg in errors)
+    assert svc.get_profile("../../escaped") is None
+    # The pre-fix resave would have landed at tmp_path/escaped.json
+    # (profiles/../../escaped.json). It must not exist anywhere.
+    assert not (tmp_path / "escaped.json").exists()
+    assert not (tmp_path / "ventulus" / "escaped.json").exists()
+
+
+def test_delete_profile_with_traversal_id_cannot_unlink_outside(tmp_path, monkeypatch):
+    """DEC-223 second line of defence: even a registry entry carrying a hostile
+    id (impossible via load since the from_dict guard, simulated here for any
+    future path that bypasses it) must not unlink outside the profiles dir."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    pdir = tmp_path / "ventulus" / "profiles"
+    pdir.mkdir(parents=True)
+    victim = tmp_path / "ventulus" / "victim.json"
+    victim.write_text("{}")
+
+    svc = ProfileService()
+    svc.load()
+    svc._profiles["../victim"] = Profile(id="../victim", name="Evil")
+    with pytest.raises(ValueError, match="unsafe profile id"):
+        svc.delete_profile("../victim")
+    assert victim.exists(), "unlink must not escape the profiles dir"
+
+
+def test_profile_path_rejects_traversal_id(tmp_path, monkeypatch):
+    """DEC-223: the public path accessor refuses ids it cannot contain."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    svc = ProfileService()
+    with pytest.raises(ValueError, match="unsafe profile id"):
+        svc.profile_path("../evil")
+
+
+@pytest.mark.parametrize("version", [4, 5, 6])
+def test_migration_resave_preserves_curve_and_control_content(tmp_path, monkeypatch, version):
+    """TEST-2 (2026-07-21 audit): the empty-fixture resave test below cannot
+    see content corruption — a migration bug that cleared or mutated curves or
+    controls stayed invisible. A contentful pre-v7 profile must come through
+    the migration resave with curve id/sensor/points and control/member intact,
+    on disk and in memory."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    pdir = tmp_path / "ventulus" / "profiles"
+    pdir.mkdir(parents=True, exist_ok=True)
+    legacy = pdir / "legacy.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "id": "legacy",
+                "name": "Legacy",
+                "version": version,
+                "controls": [
+                    {
+                        "id": "ctl1",
+                        "name": "Front",
+                        "curve_id": "crv1",
+                        "members": [{"source": "openfan", "member_id": "openfan:ch00"}],
+                    }
+                ],
+                "curves": [
+                    {
+                        "id": "crv1",
+                        "name": "Ramp",
+                        "type": "graph",
+                        "sensor_id": "cpu",
+                        "points": [
+                            {"temp_c": 40.0, "output_pct": 20.0},
+                            {"temp_c": 80.0, "output_pct": 100.0},
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    svc = ProfileService()
+    errors = svc.load()
+    assert errors == []
+
+    rewritten = json.loads(legacy.read_text())
+    assert rewritten["version"] == PROFILE_SCHEMA_VERSION
+    assert [c["id"] for c in rewritten["curves"]] == ["crv1"]
+    assert rewritten["curves"][0]["sensor_id"] == "cpu"
+    assert len(rewritten["curves"][0]["points"]) == 2
+    assert [c["id"] for c in rewritten["controls"]] == ["ctl1"]
+    assert rewritten["controls"][0]["members"][0]["member_id"] == "openfan:ch00"
+    prof = svc.get_profile("legacy")
+    assert prof is not None
+    assert prof.curves[0].points[0].temp_c == 40.0
+    assert prof.controls[0].members[0].member_id == "openfan:ch00"
+
+
+def test_migration_resave_write_failure_surfaces_error_keeps_profile(tmp_path, monkeypatch):
+    """TEST-5 (2026-07-21 audit): a failing local write during the migration
+    resave (e.g. read-only filesystem) must surface as a per-file load error —
+    not crash ``load()`` and not silently drop the already-parsed profile from
+    memory."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    pdir = tmp_path / "ventulus" / "profiles"
+    pdir.mkdir(parents=True, exist_ok=True)
+    legacy = pdir / "legacy.json"
+    legacy.write_text(
+        json.dumps({"id": "legacy", "name": "L", "version": 4, "controls": [], "curves": []})
+    )
+
+    import ventulus.services.profile_service as ps_mod
+
+    real_atomic_write = ps_mod.atomic_write
+
+    def failing_write(path, content):
+        if "legacy" in str(path):
+            raise PermissionError("read-only filesystem")
+        return real_atomic_write(path, content)
+
+    monkeypatch.setattr(ps_mod, "atomic_write", failing_write)
+
+    svc = ProfileService()
+    errors = svc.load()
+
+    assert any("legacy" in src and "read-only filesystem" in msg for src, msg in errors)
+    assert svc.get_profile("legacy") is not None, "parsed profile must survive in memory"
+
+
+@pytest.mark.parametrize("version", [4, 5, 6])
+def test_load_resaves_when_migrating_from_older_schema(tmp_path, monkeypatch, version):
+    """Loading any pre-v7 profile from disk must re-save it at the current schema
+    version — not just v3 (the resave fires for every ``version < PROFILE_SCHEMA_VERSION``
+    in ``_load_from_local``)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    profiles_dir = tmp_path / "ventulus" / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    legacy = profiles_dir / "legacy.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "id": "legacy",
+                "name": "Legacy",
+                "version": version,
+                "controls": [],
+                "curves": [],
+            }
+        )
+    )
+
+    svc = ProfileService()
+    errors = svc.load()
+    assert errors == []
+
+    # File on disk should now report the current schema version.
+    rewritten = json.loads(legacy.read_text())
+    assert rewritten["version"] == PROFILE_SCHEMA_VERSION
+
+
+def test_default_seeding_on_readonly_config_degrades_not_crashes(tmp_path, monkeypatch):
+    """Phase-4 follow-up (2026-07-21 sweep): with EVERY local write failing
+    (read-only config dir), load() must surface per-profile errors and keep the
+    in-memory defaults — never raise out of load()."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "ventulus" / "profiles").mkdir(parents=True)
+
+    import ventulus.services.profile_service as ps_mod
+
+    def failing_write(path, content):
+        raise PermissionError("read-only filesystem")
+
+    monkeypatch.setattr(ps_mod, "atomic_write", failing_write)
+
+    svc = ProfileService()
+    errors = svc.load()  # must not raise
+
+    assert errors, "seed-write failures must be surfaced"
+    assert all("read-only filesystem" in msg for _, msg in errors)
+    # Defaults still usable in memory despite the failed persistence.
+    assert svc.get_profile(svc.active_id) is not None
+
+
+def test_reload_profile_discards_in_memory_edits(tmp_path, monkeypatch):
+    """DEC-233: reload_profile re-reads the persisted profile, dropping unsaved
+    in-memory edits — backs the Controls page 'Revert'."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    svc = ProfileService()
+    svc.load()  # seeds + persists the default profiles locally
+    pid = svc.active_id
+    prof = svc.get_profile(pid)
+    before = len(prof.controls)
+    prof.controls.append(LogicalControl(id="tmp", name="Temp", mode=ControlMode.MANUAL))
+    reloaded = svc.reload_profile(pid)
+    assert reloaded is not None
+    assert len(reloaded.controls) == before
+    assert not any(c.id == "tmp" for c in reloaded.controls)
+    # The in-memory registry now points at the reloaded copy.
+    assert svc.get_profile(pid) is reloaded
+
+
+def test_reload_profile_unknown_returns_none(tmp_path, monkeypatch):
+    """DEC-233: a never-persisted / unknown id has no stored version to fall back
+    to — reload returns None rather than fabricating one."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    svc = ProfileService()
+    svc.load()
+    assert svc.reload_profile("does-not-exist") is None
+
+
+def test_reload_profile_prefers_daemon_document(tmp_path, monkeypatch):
+    """DEC-233/160: when a profile is daemon-published, reload_profile re-reads the
+    daemon document (store of record) and replaces the in-memory copy."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    svc = ProfileService()
+    svc.load()
+    pid = svc.active_id
+    stored = svc.get_profile(pid).to_dict()  # the "saved" daemon document
+    # A local in-memory edit not present in the daemon document.
+    svc.get_profile(pid).controls.append(
+        LogicalControl(id="tmp", name="T", mode=ControlMode.MANUAL)
+    )
+
+    class _Stub:
+        def get_profile(self, _id):
+            return stored
+
+    svc._client = _Stub()
+    svc._daemon_ids.add(pid)
+    reloaded = svc.reload_profile(pid)
+    assert reloaded is not None
+    assert not any(c.id == "tmp" for c in reloaded.controls)  # daemon doc wins
+    assert svc.get_profile(pid) is reloaded
+
+
+def test_reload_profile_falls_back_to_cache_on_daemon_error(tmp_path, monkeypatch):
+    """DEC-233: a daemon read that raises (incl. a non-dict body → AttributeError)
+    must fall back to the local mirror, not escape — the broadened except."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    svc = ProfileService()
+    svc.load()
+    pid = svc.active_id
+    before = len(svc.get_profile(pid).controls)
+    svc.get_profile(pid).controls.append(
+        LogicalControl(id="tmp", name="T", mode=ControlMode.MANUAL)
+    )
+
+    class _Stub:
+        def get_profile(self, _id):
+            raise RuntimeError("garbage daemon response")
+
+    svc._client = _Stub()
+    svc._daemon_ids.add(pid)
+    reloaded = svc.reload_profile(pid)  # must NOT raise
+    assert reloaded is not None
+    assert len(reloaded.controls) == before  # local cache = last saved
+    assert not any(c.id == "tmp" for c in reloaded.controls)

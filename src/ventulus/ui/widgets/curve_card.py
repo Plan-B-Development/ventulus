@@ -1,0 +1,372 @@
+"""Curve card — compact, information-dense card for the curve library grid.
+
+Shows: name, type badge, sensor+value, used-by, status, mini preview.
+Actions via setMenu dropdown. The preview is owner-drawn (paintEvent) with a
+constant font-derived size hint, so it can never inflate the card (DEC-129).
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import (
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ventulus.services.curve_hysteresis import curve_meta_text
+from ventulus.services.profile_service import CurveConfig, CurveType
+from ventulus.ui.components.labels import ElidedLabel
+from ventulus.ui.qt_util import repolish
+from ventulus.ui.theme import active_theme, default_dark_theme
+from ventulus.ui.widgets.card_metrics import DEFAULT_CARD_SIZE
+from ventulus.ui.widgets.resizable_grid_card import ResizableGridCard
+
+
+class CurvePreview(QWidget):
+    """Owner-drawn curve preview: graph sparkline or text summary.
+
+    Replaces the old QLabel+QPixmap preview whose ``sizeHint`` was its pixmap:
+    rendering at the current size grew the hint, the flow layout granted the
+    bigger hint, and the card ratcheted taller on every pass. Painting in
+    ``paintEvent`` with a constant, font-derived hint makes that loop
+    structurally impossible — the default card shows a modest sparkline a few
+    text lines tall, and the Expanding policy lets the preview fill whatever
+    extra space a DEC-129 user resize grants.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._curve: CurveConfig | None = None
+        self._theme = default_dark_theme()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumHeight(24)
+
+    @property
+    def curve(self) -> CurveConfig | None:
+        return self._curve
+
+    def set_curve(self, curve: CurveConfig) -> None:
+        self._curve = curve
+        self.update()
+
+    def set_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
+
+    def summary_text(self) -> str:
+        """The text painted for the parameter/composite curves (empty for the
+        point-based graph/stepped curves, which paint a sparkline/staircase).
+
+        Mix/Sync summaries are self-contained — they describe the curve from its
+        own fields (function + input count, offset) without resolving other
+        curves' or controls' names, so the preview never depends on data the
+        card was not given (the R31 ownership rule)."""
+        curve = self._curve
+        if curve is None:
+            return ""
+        if curve.is_unsupported:
+            return f"Not editable here · {curve.unknown_type}"
+        if curve.type == CurveType.LINEAR:
+            return (
+                f"{curve.start_temp_c:.0f}°C→{curve.end_temp_c:.0f}°C: "
+                f"{curve.start_output_pct:.0f}%→{curve.end_output_pct:.0f}%"
+            )
+        if curve.type == CurveType.FLAT:
+            return f"Flat: {curve.flat_output_pct:.0f}%"
+        if curve.type == CurveType.TRIGGER:
+            return (
+                f"Idle {curve.trigger_idle_pct:.0f}% <{curve.trigger_idle_temp_c:.0f}° / "
+                f"Load {curve.trigger_load_pct:.0f}% >{curve.trigger_load_temp_c:.0f}°"
+            )
+        if curve.type == CurveType.MIX:
+            n = len(curve.mix_curve_ids)
+            return f"{curve.mix_function.title()} of {n} curve{'' if n == 1 else 's'}"
+        if curve.type == CurveType.SYNC:
+            sign = "+" if curve.sync_offset_pct >= 0 else ""
+            return f"Mirror control {sign}{curve.sync_offset_pct:.0f}%"
+        return ""
+
+    def painted_summary_text(self) -> str:
+        """``summary_text`` as it is actually painted at the current width.
+
+        Split out so the elision is assertable headlessly, without diffing pixels.
+        """
+        text = self.summary_text()
+        if not text:
+            return ""
+        return self.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, self.width())
+
+    def sizeHint(self) -> QSize:
+        # Constant per font — never derived from what was last painted, so
+        # the old render→hint→grant→render ratchet cannot recur.
+        return QSize(120, self.fontMetrics().height() * 3)
+
+    def paintEvent(self, event) -> None:
+        if self._curve is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        text = self.summary_text()
+        if text:
+            # Linear/flat: centered one-line summary in the muted card tone.
+            # Elided, not clipped (DEC-238): drawText clips mid-glyph when the
+            # summary outruns the width, which the long Trigger form
+            # ("Idle 30% <40° / Load 100% >70°") can do in a narrow preview. An
+            # ellipsis says "there is more"; half a digit reads as a real value.
+            painter.setPen(QPen(QColor(self._theme.text_secondary)))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.painted_summary_text())
+            painter.end()
+            return
+
+        points = self._curve.points
+        if len(points) < 2:
+            painter.end()
+            return
+
+        w = self.width()
+        h = self.height()
+        x_min = points[0].temp_c
+        x_max = points[-1].temp_c
+        x_range = max(x_max - x_min, 1.0)
+        pad = 3
+
+        is_stepped = self._curve.type == CurveType.STEPPED
+        path = QPainterPath()
+        prev_py = 0.0
+        for i, p in enumerate(points):
+            px = ((p.temp_c - x_min) / x_range) * (w - 2 * pad) + pad
+            py = h - pad - (p.output_pct / 100.0) * (h - 2 * pad)
+            if i == 0:
+                path.moveTo(px, py)
+            elif is_stepped:
+                # Staircase: hold the previous point's output until this
+                # point's temperature, then step (matches _interpolate_stepped).
+                path.lineTo(px, prev_py)
+                path.lineTo(px, py)
+            else:
+                path.lineTo(px, py)
+            prev_py = py
+
+        painter.setPen(QPen(QColor(self._theme.accent_primary), 2))
+        painter.drawPath(path)
+        painter.end()
+
+
+class CurveCard(ResizableGridCard):
+    """Compact curve card with preview, metadata, and actions."""
+
+    edit_requested = Signal(str)
+    delete_requested = Signal(str)
+    rename_requested = Signal(str)
+    duplicate_requested = Signal(str)
+    # DEC-214 "Link Logic": detach this curve from the role(s) using it.
+    unlink_requested = Signal(str)
+    # resized / size_reset (per-card user resize, DEC-129) are inherited from
+    # ResizableGridCard.
+
+    def __init__(
+        self,
+        curve: CurveConfig,
+        card_size: str = DEFAULT_CARD_SIZE,
+        user_size: tuple[int, int] | None = None,
+        hysteresis_supported: bool = False,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)  # Card base sets class="Card"
+        self._curve = curve
+        # DEC-489: the band shows on the type line only where the daemon applies it.
+        self._hysteresis_supported = hysteresis_supported
+        self._theme = default_dark_theme()
+        # DEC-233: highlight state while this curve is open in the editor pane.
+        # A 2px accent border + faint tint (QSS ``editing`` property) plus a soft
+        # accent glow (drop-shadow effect) — deliberately stronger than, and
+        # coexisting with, the thin "assigned" border so the user can always tell
+        # which card is on the workbench.
+        self._editing = False
+        # Sizing (DEC-128 floor) + the DEC-129 resize grip live in the base.
+        self._init_grid_card(curve.id, f"CurveCard_Grip_{curve.id}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
+
+        # Row 1: Name + type badge + actions
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        self._name_label = QLabel(curve.name or "Unnamed")
+        self._name_label.setStyleSheet("font-weight: bold; background: transparent;")
+        self._name_label.setObjectName(f"CurveCard_Label_{curve.id}")
+        self._name_label.setToolTip(curve.name or "Unnamed")
+        header.addWidget(self._name_label, 1)
+
+        # Type, plus the slow-down band where the user set one (DEC-489).
+        self._type_label = QLabel(curve_meta_text(curve, hysteresis_supported))
+        self._type_label.setProperty("class", "CardMeta")
+        self._type_label.setStyleSheet("background: transparent;")
+        self._type_label.setObjectName(f"CurveCard_Label_type_{curve.id}")
+        header.addWidget(self._type_label)
+
+        actions_btn = QPushButton("Actions")
+        actions_btn.setObjectName(f"CurveCard_Btn_actions_{curve.id}")
+        actions_btn.setStyleSheet("padding: 2px 6px; background: transparent;")
+        actions_menu = QMenu(actions_btn)
+        actions_menu.addAction("Edit", lambda: self.edit_requested.emit(self._curve.id))
+        actions_menu.addAction("Rename", lambda: self.rename_requested.emit(self._curve.id))
+        actions_menu.addAction("Duplicate", lambda: self.duplicate_requested.emit(self._curve.id))
+        actions_menu.addSeparator()
+        actions_menu.addAction("Unlink", lambda: self.unlink_requested.emit(self._curve.id))
+        actions_menu.addAction("Delete", lambda: self.delete_requested.emit(self._curve.id))
+        actions_btn.setMenu(actions_menu)
+        header.addWidget(actions_btn)
+        layout.addLayout(header)
+
+        # Row 2: Sensor + live value
+        self._sensor_label = QLabel("No sensor")
+        self._sensor_label.setProperty("class", "CardMeta")
+        self._sensor_label.setStyleSheet("background: transparent;")
+        self._sensor_label.setObjectName(f"CurveCard_Label_sensor_{curve.id}")
+        if curve.sensor_id:
+            self._sensor_label.setToolTip(f"Raw ID: {curve.sensor_id}")
+        layout.addWidget(self._sensor_label)
+
+        # Row 3: Preview — Expanding, so surplus card height (DEC-128 floor
+        # or a DEC-129 user resize) grows the sparkline instead of padding
+        # out the text rows.
+        self._preview = CurvePreview()
+        self._preview.setObjectName(f"CurveCard_Preview_{curve.id}")
+        self._preview.set_theme(self._theme)
+        self._preview.set_curve(curve)
+        layout.addWidget(self._preview, 1)
+
+        # Row 4: Used by + status
+        footer = QHBoxLayout()
+        footer.setSpacing(4)
+        # Elided, not a plain QLabel: the card is a fixed width, so two or three
+        # role names overflow and a QLabel simply clips mid-word with no ellipsis
+        # — visible in the shipped Controls screenshot as "Case Exha". Same
+        # defect and same fix as the control card's curve line (DEC-258). The
+        # full list stays available as the tooltip set below, and DEC-231 holds:
+        # ElidedLabel renders plain text unconditionally, so a profile-authored
+        # role name cannot become markup.
+        self._used_by_label = ElidedLabel("Not assigned")
+        self._used_by_label.setProperty("class", "CardMeta")
+        self._used_by_label.setStyleSheet("background: transparent;")
+        self._used_by_label.setObjectName(f"CurveCard_Label_usedBy_{curve.id}")
+        footer.addWidget(self._used_by_label, 1)
+
+        self._status_label = QLabel("")
+        self._status_label.setStyleSheet("background: transparent;")
+        self._status_label.setObjectName(f"CurveCard_Label_status_{curve.id}")
+        footer.addWidget(self._status_label)
+        layout.addLayout(footer)
+
+        self.apply_card_size(active_theme().base_font_size_pt, card_size, user_size)
+
+    @property
+    def curve(self) -> CurveConfig:
+        return self._curve
+
+    # Sizing + grip API (apply_card_size / set_user_size / clear_user_size /
+    # user_size / _on_grip_* / resizeEvent grip positioning) is inherited from
+    # ResizableGridCard — CurveCard adds no extra resize logic.
+
+    def set_theme(self, tokens) -> None:
+        """Update theme and repaint the curve preview."""
+        self._theme = tokens
+        self._preview.set_theme(tokens)
+        if self._editing:
+            # Keep the editing glow in step with the new accent colour.
+            self._apply_editing_glow()
+
+    @property
+    def is_editing(self) -> bool:
+        """Whether this card is the one currently open in the editor (DEC-233)."""
+        return self._editing
+
+    def set_editing(self, editing: bool) -> None:
+        """Mark this card as the curve currently open in the editor pane (DEC-233).
+
+        Toggles the ``editing`` QSS property (2px accent border + faint tint) and
+        a soft accent drop-shadow glow. Idempotent, and distinct from the
+        ``active`` (assigned-to-a-role) border, so a card can be both at once.
+        """
+        if self._editing == editing:
+            return
+        self._editing = editing
+        self.setProperty("editing", editing)
+        if editing:
+            self._apply_editing_glow()
+        else:
+            self.setGraphicsEffect(None)
+        repolish(self)
+
+    def _apply_editing_glow(self) -> None:
+        """(Re)build the accent drop-shadow glow used for the editing state."""
+        glow = QGraphicsDropShadowEffect(self)
+        glow.setBlurRadius(22)
+        glow.setOffset(0, 0)
+        color = QColor(self._theme.accent_secondary)
+        color.setAlpha(190)
+        glow.setColor(color)
+        self.setGraphicsEffect(glow)
+
+    def update_sensor_display(self, label: str, value_c: float | None = None) -> None:
+        if value_c is not None:
+            self._sensor_label.setText(f"{label} — {value_c:.1f}°C")
+        else:
+            self._sensor_label.setText(label if label else "No sensor")
+
+    def set_used_by(self, role_names: list[str]) -> None:
+        """Reflect whether any role uses this curve (DEC-214 "Link Logic").
+
+        An assigned curve is the *active* one — a success pill + a solid accent
+        card border (the mockup's ACTIVE treatment, driven off the real used-by
+        status). The status text stays "Assigned"/"Unassigned" (the assigned/
+        used-by concept), styled as a pill rather than reworded, so it never
+        fabricates an "active" state the data doesn't support.
+        """
+        if role_names:
+            text = ", ".join(role_names[:3])
+            if len(role_names) > 3:
+                text += f" +{len(role_names) - 3}"
+            self._used_by_label.setText(f"Used by: {text}")
+            self._used_by_label.setToolTip(", ".join(role_names))
+            self._status_label.setText("Assigned")
+            self._status_label.setProperty("class", "Pill_success")
+            self.setProperty("active", True)
+        else:
+            self._used_by_label.setText("Not assigned")
+            self._status_label.setText("Unassigned")
+            self._status_label.setProperty("class", "Pill_neutral")
+            self.setProperty("active", False)
+        repolish(self._status_label)
+        repolish(self)
+
+    def set_hysteresis_supported(self, supported: bool) -> None:
+        """Re-render the type line for a daemon that does or does not apply the band."""
+        self._hysteresis_supported = supported
+        self._type_label.setText(curve_meta_text(self._curve, supported))
+
+    def update_curve(self, curve: CurveConfig) -> None:
+        self._curve = curve
+        self._item_id = curve.id  # keep the base's item id live (DEC-235 parity)
+        self._name_label.setText(curve.name or "Unnamed")
+        self._name_label.setToolTip(curve.name or "Unnamed")
+        self._type_label.setText(curve_meta_text(curve, self._hysteresis_supported))
+        if curve.sensor_id:
+            self._sensor_label.setToolTip(f"Raw ID: {curve.sensor_id}")
+        else:
+            self._sensor_label.setText("No sensor")
+        self._preview.set_curve(curve)
+        if self._user_size is not None:
+            # Content may have changed: re-clamp the user override so a
+            # previously-valid size can't start clipping rows.
+            self.apply_card_size(active_theme().base_font_size_pt, self._card_size_tier)

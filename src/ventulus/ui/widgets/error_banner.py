@@ -1,0 +1,93 @@
+"""Error banner widget — dismissible notification strip for errors and warnings."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import QTimer, Signal
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+
+from ventulus.ui.qt_util import set_chip_class
+
+
+class ErrorBanner(QWidget):
+    """A horizontal banner that shows error/warning messages with auto-dismiss."""
+
+    dismissed = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setVisible(False)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(8)
+
+        self._icon_label = QLabel()
+        layout.addWidget(self._icon_label)
+
+        self._message_label = QLabel()
+        self._message_label.setWordWrap(True)
+        layout.addWidget(self._message_label, 1)
+
+        self._dismiss_btn = QPushButton("Dismiss")
+        self._dismiss_btn.setObjectName("ErrorBanner_Btn_dismiss")
+        # DEC-258: was setFixedWidth(80) while the button's own hint is 110 at
+        # the shipped default font — the label was cut off before anyone changed
+        # a setting. A minimum keeps the button from collapsing in a cramped
+        # banner without capping it below its own text.
+        self._dismiss_btn.setMinimumWidth(80)
+        self._dismiss_btn.clicked.connect(self.hide_banner)
+        layout.addWidget(self._dismiss_btn)
+
+        self._auto_dismiss_timer = QTimer(self)
+        self._auto_dismiss_timer.setSingleShot(True)
+        self._auto_dismiss_timer.timeout.connect(self.hide_banner)
+
+    def show_error(self, message: str, auto_dismiss_ms: int = 0) -> None:
+        self._icon_label.setText("[!]")
+        self._message_label.setText(message)
+        set_chip_class(self._message_label, "CriticalChip")
+        self._arm_auto_dismiss(auto_dismiss_ms)
+
+    def show_warning(self, message: str, auto_dismiss_ms: int = 0) -> None:
+        self._icon_label.setText("[*]")
+        self._message_label.setText(message)
+        set_chip_class(self._message_label, "WarningChip")
+        self._arm_auto_dismiss(auto_dismiss_ms)
+
+    def show_info(self, message: str, auto_dismiss_ms: int = 5000) -> None:
+        self._icon_label.setText("[i]")
+        self._message_label.setText(message)
+        set_chip_class(self._message_label, "SuccessChip")
+        self._arm_auto_dismiss(auto_dismiss_ms)
+
+    def _arm_auto_dismiss(self, auto_dismiss_ms: int) -> None:
+        """Show the banner and (re)arm or cancel the one dismiss timer.
+
+        A message with no auto-dismiss must cancel a timer an earlier message
+        started (DEC-462 review), or that timer hides it: a failure shown within
+        10 s of the Stop banner, or within 3 s of "Connected", vanished on its own.
+        """
+        self.setVisible(True)
+        if auto_dismiss_ms > 0:
+            self._auto_dismiss_timer.start(auto_dismiss_ms)
+        else:
+            self._auto_dismiss_timer.stop()
+
+    def hide_banner(self) -> None:
+        self._auto_dismiss_timer.stop()
+        self.setVisible(False)
+        self.dismissed.emit()
+
+    def hide_if_showing(self, message: str) -> bool:
+        """Hide the banner only while it still shows ``message``; True if it did.
+
+        For a message that a later event makes stale — a failed activation that
+        a later Apply succeeded at. Anything shown since (a disconnect, another
+        warning) replaced the text, so it is left alone. ``isHidden`` reads the
+        banner's own flag, which is what "showing" means here even while the
+        window itself is not on screen.
+        """
+        if self.isHidden() or self._message_label.text() != message:
+            return False
+        self.hide_banner()
+        return True

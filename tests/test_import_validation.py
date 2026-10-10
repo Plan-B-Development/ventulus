@@ -1,0 +1,607 @@
+"""Tests for S1 — import validation of profiles and themes at import time."""
+
+from __future__ import annotations
+
+import pytest
+
+from ventulus.services.profile_service import PROFILE_SCHEMA_VERSION, Profile
+from ventulus.ui.theme import ThemeTokens, _migrate_tokens
+
+# ---------------------------------------------------------------------------
+# Profile validation (Profile.from_dict)
+# ---------------------------------------------------------------------------
+
+
+class TestProfileImportValidation:
+    """Profile.from_dict() must reject structurally invalid data."""
+
+    def test_valid_profile_roundtrips(self):
+        data = {
+            "id": "abc123",
+            "name": "Test Profile",
+            "version": 3,
+            "controls": [],
+            "curves": [
+                {
+                    "id": "c1",
+                    "name": "CPU Curve",
+                    "type": "graph",
+                    "sensor_id": "cpu0",
+                    "points": [{"temp_c": 30, "output_pct": 20}],
+                }
+            ],
+        }
+        profile = Profile.from_dict(data)
+        assert profile.name == "Test Profile"
+        assert len(profile.curves) == 1
+
+    def test_empty_dict_produces_default_profile(self):
+        profile = Profile.from_dict({})
+        assert profile.name == ""
+        assert profile.version == PROFILE_SCHEMA_VERSION
+        assert profile.controls == []
+        assert profile.curves == []
+
+    def test_non_string_control_mode_raises(self):
+        """An unknown mode *string* is a newer format and loads (batch 6); a
+        non-string ``mode`` is not a mode at all."""
+        data = {
+            "controls": [{"mode": ["not", "a", "mode"]}],
+            "curves": [],
+        }
+        with pytest.raises((TypeError, ValueError)):
+            Profile.from_dict(data)
+
+    def test_non_dict_curve_points_raises(self):
+        data = {
+            "curves": [{"points": ["not", "dicts"]}],
+            "controls": [],
+        }
+        with pytest.raises(ValueError, match="curve point"):
+            Profile.from_dict(data)
+
+    def test_non_dict_control_member_raises(self):
+        data = {
+            "controls": [{"members": [42]}],
+            "curves": [],
+        }
+        with pytest.raises((TypeError, AttributeError)):
+            Profile.from_dict(data)
+
+    def test_curve_with_too_many_points_raises(self):
+        """A crafted profile cannot smuggle an unbounded points list (P2-C)."""
+        from ventulus.services.profile_service import MAX_CURVE_POINTS
+
+        data = {
+            "controls": [],
+            "curves": [
+                {
+                    "id": "c1",
+                    "type": "graph",
+                    "points": [
+                        {"temp_c": float(i), "output_pct": 50.0}
+                        for i in range(MAX_CURVE_POINTS + 1)
+                    ],
+                }
+            ],
+        }
+        with pytest.raises(ValueError, match="too many points"):
+            Profile.from_dict(data)
+
+    def test_curve_at_max_points_accepted(self):
+        """The cap is inclusive — exactly MAX_CURVE_POINTS is still valid."""
+        from ventulus.services.profile_service import MAX_CURVE_POINTS
+
+        data = {
+            "controls": [],
+            "curves": [
+                {
+                    "id": "c1",
+                    "type": "graph",
+                    "points": [
+                        {"temp_c": float(i), "output_pct": 50.0} for i in range(MAX_CURVE_POINTS)
+                    ],
+                }
+            ],
+        }
+        profile = Profile.from_dict(data)
+        assert len(profile.curves[0].points) == MAX_CURVE_POINTS
+
+    def test_profile_with_too_many_curves_raises(self):
+        """Collection caps mirror the daemon's MAX_PROFILE_CURVES.
+
+        A deep Mix chain is a legal *acyclic* graph, so the cycle check never
+        fires on it; unbounded, it overflowed the daemon's stack and aborted it.
+        The GUI refuses the same shape at the parse boundary.
+        """
+        from ventulus.services.profile_service import MAX_PROFILE_CURVES
+
+        data = {
+            "controls": [],
+            "curves": [
+                {"id": f"c{i}", "type": "flat", "points": []} for i in range(MAX_PROFILE_CURVES + 1)
+            ],
+        }
+        with pytest.raises(ValueError, match="too many curves"):
+            Profile.from_dict(data)
+
+    def test_profile_at_max_curves_accepted(self):
+        """The cap is inclusive — exactly MAX_PROFILE_CURVES still loads."""
+        from ventulus.services.profile_service import MAX_PROFILE_CURVES
+
+        data = {
+            "controls": [],
+            "curves": [
+                {"id": f"c{i}", "type": "flat", "points": []} for i in range(MAX_PROFILE_CURVES)
+            ],
+        }
+        assert len(Profile.from_dict(data).curves) == MAX_PROFILE_CURVES
+
+    def test_profile_with_too_many_controls_raises(self):
+        from ventulus.services.profile_service import MAX_PROFILE_CONTROLS
+
+        data = {
+            "curves": [],
+            "controls": [
+                {"id": f"ctl{i}", "name": f"ctl{i}", "mode": "curve", "curve_id": "c"}
+                for i in range(MAX_PROFILE_CONTROLS + 1)
+            ],
+        }
+        with pytest.raises(ValueError, match="too many controls"):
+            Profile.from_dict(data)
+
+    def test_v1_profile_with_too_many_assignments_raises(self):
+        """The v1 branch must not slip past the collection caps.
+
+        A v1 document carries ``assignments``, not ``curves``/``controls``, so a
+        size check that inspected only the latter two was a NO-OP here — and
+        ``_migrate_v1_profile`` then builds one curve AND one control per
+        assignment directly, bypassing both caps and ``MAX_CURVE_POINTS``.
+        Bounded only by the 4 MB import cap, a crafted legacy bundle could
+        inflate to millions of dataclasses and hang the GUI.
+        """
+        from ventulus.services.profile_service import (
+            MAX_PROFILE_CONTROLS,
+            MAX_PROFILE_CURVES,
+        )
+
+        over = min(MAX_PROFILE_CURVES, MAX_PROFILE_CONTROLS) + 1
+        data = {
+            "version": 1,
+            "assignments": [{"curve": {"points": []}} for _ in range(over)],
+        }
+        with pytest.raises(ValueError, match="too many assignments"):
+            Profile.from_dict(data)
+
+    def test_v1_profile_at_max_assignments_accepted(self):
+        from ventulus.services.profile_service import (
+            MAX_PROFILE_CONTROLS,
+            MAX_PROFILE_CURVES,
+        )
+
+        at_cap = min(MAX_PROFILE_CURVES, MAX_PROFILE_CONTROLS)
+        data = {
+            "version": 1,
+            "assignments": [{"curve": {"points": []}} for _ in range(at_cap)],
+        }
+        assert len(Profile.from_dict(data).curves) == at_cap
+
+    def test_profile_at_max_controls_accepted(self):
+        """Boundary twin of the curves case — a `>` slipping to `>=` would
+        reject a profile sitting exactly on the cap."""
+        from ventulus.services.profile_service import MAX_PROFILE_CONTROLS
+
+        data = {
+            "curves": [],
+            "controls": [
+                {"id": f"ctl{i}", "name": f"ctl{i}", "mode": "curve", "curve_id": "c"}
+                for i in range(MAX_PROFILE_CONTROLS)
+            ],
+        }
+        assert len(Profile.from_dict(data).controls) == MAX_PROFILE_CONTROLS
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+    def test_curve_with_nonfinite_point_raises(self, bad):
+        """NaN/inf point values are rejected (would corrupt curve math) — P2-C.
+
+        Python's json module parses Infinity/NaN by default, so these can reach
+        ``from_dict`` through an imported profile bundle.
+        """
+        data = {
+            "controls": [],
+            "curves": [
+                {
+                    "id": "c1",
+                    "type": "graph",
+                    "points": [{"temp_c": bad, "output_pct": 50.0}],
+                }
+            ],
+        }
+        with pytest.raises(ValueError, match="non-finite"):
+            Profile.from_dict(data)
+
+
+# ---------------------------------------------------------------------------
+# Scalar-field finiteness (DEC-172): the curve *points* path was already
+# guarded; these cover the scalar curve/control fields that were not. Python's
+# json parses NaN/Infinity by default and 1e400 overflows to inf, so any of
+# these can reach from_dict via an imported profile bundle.
+# ---------------------------------------------------------------------------
+
+_NONFINITE = [float("inf"), float("-inf"), float("nan"), 1e400, "oops"]
+
+
+class TestProfileIdSafety:
+    """DEC-223: unsafe profile ids are rejected at the parse boundary.
+
+    The id becomes an on-disk filename under ``profiles_dir()`` (CWE-22), so
+    ``Profile.from_dict`` must refuse anything the daemon's
+    ``is_safe_profile_id`` would refuse — separators, dot-dot, control
+    characters, over-long or non-string ids — on *every* construction path.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "../evil",
+            "..",
+            "a/b",
+            "a\\b",
+            "x" * 129,
+            "a\x00b",
+            "a\x1bb",
+            "a\x7fb",
+            "",
+            5,
+        ],
+    )
+    def test_unsafe_profile_id_rejected(self, bad_id):
+        with pytest.raises(ValueError, match="unsafe profile id"):
+            Profile.from_dict({"id": bad_id, "name": "X", "version": 7})
+
+    def test_unsafe_id_rejected_on_v1_migration_path_too(self):
+        """The v1 ``assignments`` early-return branch must not bypass the guard."""
+        with pytest.raises(ValueError, match="unsafe profile id"):
+            Profile.from_dict({"id": "../evil", "version": 1, "assignments": []})
+
+    def test_max_length_id_accepted(self):
+        """128 UTF-8 bytes is the daemon's cap — the boundary value passes."""
+        p = Profile.from_dict({"id": "x" * 128, "name": "X", "version": 7})
+        assert p.id == "x" * 128
+
+    def test_missing_id_still_generates_one(self):
+        p = Profile.from_dict({"name": "X", "version": 7})
+        assert p.id and len(p.id) == 8
+
+
+class TestScalarFieldFiniteness:
+    @pytest.mark.parametrize("bad", _NONFINITE)
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "start_temp_c",
+            "end_output_pct",
+            "flat_output_pct",
+            "trigger_load_temp_c",
+            "trigger_idle_pct",
+            "sync_offset_pct",
+        ],
+    )
+    def test_curve_scalar_nonfinite_rejected(self, field, bad):
+        from ventulus.services.profile_service import CurveConfig
+
+        with pytest.raises(ValueError, match="non-finite"):
+            CurveConfig.from_dict({"id": "c1", "type": "graph", field: bad})
+
+    @pytest.mark.parametrize("bad", _NONFINITE)
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "manual_output_pct",
+            "step_up_pct",
+            "step_down_pct",
+            "start_pct",
+            "stop_pct",
+            "offset_pct",
+            "minimum_pct",
+        ],
+    )
+    def test_control_scalar_nonfinite_rejected(self, field, bad):
+        from ventulus.services.profile_service import LogicalControl
+
+        with pytest.raises(ValueError, match="non-finite"):
+            LogicalControl.from_dict({"mode": "curve", field: bad})
+
+    def test_finite_scalars_still_accepted(self):
+        """Valid finite values — including a legitimately negative offset — load
+        unchanged (the guard rejects non-finite only, never clamps a range)."""
+        from ventulus.services.profile_service import CurveConfig, LogicalControl
+
+        c = CurveConfig.from_dict({"id": "c1", "type": "sync", "sync_offset_pct": -15.0})
+        assert c.sync_offset_pct == -15.0
+        lc = LogicalControl.from_dict({"mode": "curve", "offset_pct": -10.0, "minimum_pct": 30})
+        assert lc.offset_pct == -10.0
+        assert lc.minimum_pct == 30
+
+    def test_nonfinite_rejected_through_profile_import_path(self):
+        """The reject also fires via the top-level Profile.from_dict (the real
+        import entry point), for both a curve scalar and a control scalar."""
+        with pytest.raises(ValueError, match="non-finite"):
+            Profile.from_dict(
+                {
+                    "controls": [],
+                    "curves": [{"id": "c1", "type": "flat", "flat_output_pct": float("nan")}],
+                }
+            )
+        with pytest.raises(ValueError, match="non-finite"):
+            Profile.from_dict(
+                {"controls": [{"mode": "curve", "stop_pct": float("inf")}], "curves": []}
+            )
+
+
+# The ten optional curve scalars the daemon models as ``Option<f64>``, with the
+# GUI-side defaults an absent (or explicitly-null) key must resolve to.
+_CURVE_OPTIONAL_DEFAULTS = {
+    "start_temp_c": 30.0,
+    "start_output_pct": 20.0,
+    "end_temp_c": 80.0,
+    "end_output_pct": 100.0,
+    "flat_output_pct": 50.0,
+    "trigger_idle_temp_c": 40.0,
+    "trigger_load_temp_c": 60.0,
+    "trigger_idle_pct": 30.0,
+    "trigger_load_pct": 80.0,
+    "sync_offset_pct": 0.0,
+}
+
+
+class TestCurveOptionalNullTolerance:
+    """Explicit JSON ``null`` on the optional curve scalars means "use the
+    default", matching the daemon's ``Option<f64>`` model — its ``if let
+    Some(v)`` guards accept such a document and store it verbatim, so external
+    tooling can legitimately hand the GUI one. Pre-fix,
+    ``data.get(key, default)`` returned ``None`` for a present-but-null key and
+    ``_require_finite`` then failed the whole profile load (an *absent* key
+    already worked)."""
+
+    @pytest.mark.parametrize("field,default", sorted(_CURVE_OPTIONAL_DEFAULTS.items()))
+    def test_explicit_null_loads_the_default(self, field, default):
+        from ventulus.services.profile_service import CurveConfig
+
+        c = CurveConfig.from_dict({"id": "c1", "type": "graph", field: None})
+        assert getattr(c, field) == default
+
+    def test_null_field_via_json_document_loads(self):
+        """End-to-end through the real import entry point, with the ``null``
+        coming from an actual JSON parse (``json.loads`` maps null -> None)."""
+        import json
+
+        doc = json.loads(
+            '{"id": "p1", "name": "X", "version": 7, "controls": [],'
+            ' "curves": [{"id": "c1", "type": "linear", "start_temp_c": null,'
+            ' "end_temp_c": 70.0}]}'
+        )
+        p = Profile.from_dict(doc)
+        assert p.curves[0].start_temp_c == 30.0  # null -> default
+        assert p.curves[0].end_temp_c == 70.0  # explicit value still honoured
+
+    @pytest.mark.parametrize("bad", _NONFINITE)
+    def test_null_tolerance_does_not_weaken_nonfinite_rejection(self, bad):
+        """Only real ``null`` is tolerated — NaN/inf/1e400/strings still raise."""
+        from ventulus.services.profile_service import CurveConfig
+
+        with pytest.raises(ValueError, match="non-finite"):
+            CurveConfig.from_dict({"id": "c1", "type": "linear", "start_temp_c": bad})
+
+    def test_string_null_still_rejected(self):
+        """The *string* "null" is garbage, not a JSON null."""
+        from ventulus.services.profile_service import CurveConfig
+
+        with pytest.raises(ValueError, match="non-finite"):
+            CurveConfig.from_dict({"id": "c1", "type": "flat", "flat_output_pct": "null"})
+
+
+# ---------------------------------------------------------------------------
+# Theme validation (_migrate_tokens + ThemeTokens construction)
+# ---------------------------------------------------------------------------
+
+
+class TestThemeImportValidation:
+    """Theme import validation must catch non-dict data."""
+
+    def test_valid_theme_dict_accepted(self):
+        data = {"name": "My Theme", "app_bg": "#112233", "version": 2}
+        migrated = _migrate_tokens(data)
+        tokens = ThemeTokens()
+        for k, v in migrated.items():
+            if hasattr(tokens, k):
+                setattr(tokens, k, v)
+        assert tokens.name == "My Theme"
+        assert tokens.app_bg == "#112233"
+
+    def test_empty_dict_produces_defaults(self):
+        migrated = _migrate_tokens({})
+        tokens = ThemeTokens()
+        for k, v in migrated.items():
+            if hasattr(tokens, k):
+                setattr(tokens, k, v)
+        assert tokens.name == "Default Dark"
+        assert tokens.version == 2
+
+    def test_unknown_keys_ignored(self):
+        data = {"name": "Custom", "totally_fake_key": "whatever", "version": 2}
+        migrated = _migrate_tokens(data)
+        tokens = ThemeTokens()
+        for k, v in migrated.items():
+            if hasattr(tokens, k):
+                setattr(tokens, k, v)
+        assert tokens.name == "Custom"
+        assert not hasattr(tokens, "totally_fake_key")
+
+
+# ---------------------------------------------------------------------------
+# Integration: _import_profiles / _import_themes on SettingsPage
+# ---------------------------------------------------------------------------
+
+
+class TestSettingsPageImportValidation:
+    """SettingsPage import methods must skip invalid entries."""
+
+    def _make_page(self, tmp_path, qtbot, monkeypatch):
+        """Create a minimal SettingsPage wired to tmp_path directories."""
+        from ventulus.services.app_settings_service import AppSettingsService
+        from ventulus.ui.pages.settings_page import SettingsPage
+
+        # Override paths so imports write to tmp_path
+        profiles = tmp_path / "profiles"
+        profiles.mkdir()
+        themes = tmp_path / "themes"
+        themes.mkdir()
+        monkeypatch.setattr("ventulus.paths.profiles_dir", lambda: profiles)
+        monkeypatch.setattr("ventulus.ui.pages.settings_page.themes_dir", lambda: themes)
+
+        svc = AppSettingsService()
+        page = SettingsPage(settings_service=svc)
+        qtbot.addWidget(page)
+        return page, profiles, themes
+
+    def test_valid_profile_imported(self, tmp_path, qtbot, monkeypatch):
+        page, profiles, _themes = self._make_page(tmp_path, qtbot, monkeypatch)
+        data = {
+            "good": {
+                "id": "g1",
+                "name": "Good",
+                "version": 3,
+                "controls": [],
+                "curves": [],
+            }
+        }
+        skipped = page._import_profiles(data)
+        assert skipped == 0
+        assert (profiles / "good.json").exists()
+
+    def test_invalid_profile_skipped(self, tmp_path, qtbot, monkeypatch):
+        page, profiles, _themes = self._make_page(tmp_path, qtbot, monkeypatch)
+        data = {
+            "good": {
+                "id": "g1",
+                "name": "Good",
+                "version": 3,
+                "controls": [],
+                "curves": [],
+            },
+            "bad": {
+                "controls": [],
+                "curves": [{"points": ["not", "dicts"]}],
+            },
+            "also_bad": "not a dict",
+        }
+        skipped = page._import_profiles(data)
+        assert skipped == 2
+        assert (profiles / "good.json").exists()
+        assert not (profiles / "bad.json").exists()
+        assert not (profiles / "also_bad.json").exists()
+
+    def test_bundle_smuggled_traversal_id_skipped(self, tmp_path, qtbot, monkeypatch):
+        """DEC-223: a bundle entry whose *key* is safe but whose content id
+        traverses must be skipped — nothing written inside or outside the
+        profiles dir under the hostile id."""
+        page, profiles, _themes = self._make_page(tmp_path, qtbot, monkeypatch)
+        data = {
+            "innocent": {
+                "id": "../../escaped",
+                "name": "Evil",
+                "version": 3,
+                "controls": [],
+                "curves": [],
+            }
+        }
+        skipped = page._import_profiles(data)
+        assert skipped == 1
+        assert not (profiles / "innocent.json").exists()
+        assert not (tmp_path / "escaped.json").exists()
+
+    def test_valid_theme_imported(self, tmp_path, qtbot, monkeypatch):
+        page, _profiles, themes = self._make_page(tmp_path, qtbot, monkeypatch)
+        data = {"mytheme": {"name": "My Theme", "app_bg": "#001122", "version": 2}}
+        skipped = page._import_themes(data)
+        assert skipped == 0
+        assert (themes / "mytheme.json").exists()
+
+    def test_invalid_theme_skipped(self, tmp_path, qtbot, monkeypatch):
+        page, _profiles, themes = self._make_page(tmp_path, qtbot, monkeypatch)
+        data = {
+            "good": {"name": "Good", "version": 2},
+            "bad": "not a dict",
+        }
+        skipped = page._import_themes(data)
+        assert skipped == 1
+        assert (themes / "good.json").exists()
+        assert not (themes / "bad.json").exists()
+
+    @pytest.mark.parametrize("evil_name", ["../evil", "../../evil", "a/b", "/abs_evil"])
+    def test_profile_with_traversal_name_skipped(self, tmp_path, qtbot, monkeypatch, evil_name):
+        """An untrusted profile key cannot escape the profiles dir (P1-B)."""
+        page, profiles, _themes = self._make_page(tmp_path, qtbot, monkeypatch)
+        data = {
+            "good": {
+                "id": "g1",
+                "name": "Good",
+                "version": 3,
+                "controls": [],
+                "curves": [],
+            },
+            evil_name: {
+                "id": "e1",
+                "name": "Evil",
+                "version": 3,
+                "controls": [],
+                "curves": [],
+            },
+        }
+        skipped = page._import_profiles(data)
+        assert skipped == 1
+        # The good sibling imported and is the ONLY file in the profiles dir.
+        assert sorted(p.name for p in profiles.glob("*.json")) == ["good.json"]
+        # Nothing escaped into the parent (covers the "../" cases).
+        assert list(tmp_path.glob("*.json")) == []
+
+    @pytest.mark.parametrize("evil_name", ["../evil", "a/b", "/abs_evil"])
+    def test_theme_with_traversal_name_skipped(self, tmp_path, qtbot, monkeypatch, evil_name):
+        """An untrusted theme key cannot escape the themes dir (P1-B)."""
+        page, _profiles, themes = self._make_page(tmp_path, qtbot, monkeypatch)
+        data = {
+            "good": {"name": "Good", "app_bg": "#001122", "version": 2},
+            evil_name: {"name": "Evil", "app_bg": "#001122", "version": 2},
+        }
+        skipped = page._import_themes(data)
+        assert skipped == 1
+        assert sorted(p.name for p in themes.glob("*.json")) == ["good.json"]
+        assert list(tmp_path.glob("*.json")) == []
+
+    def test_profile_import_uses_atomic_write(self, tmp_path, qtbot, monkeypatch):
+        """Imports route through atomic_write, not raw write_text (P2-B)."""
+        import ventulus.ui.pages.settings_page as sp
+
+        page, profiles, _themes = self._make_page(tmp_path, qtbot, monkeypatch)
+        calls: list[str] = []
+        real = sp.atomic_write
+
+        def spy(path, content):
+            calls.append(path.name)
+            real(path, content)
+
+        monkeypatch.setattr(sp, "atomic_write", spy)
+        data = {
+            "good": {
+                "id": "g1",
+                "name": "Good",
+                "version": 3,
+                "controls": [],
+                "curves": [],
+            }
+        }
+        skipped = page._import_profiles(data)
+        assert skipped == 0
+        assert (profiles / "good.json").exists()
+        assert "good.json" in calls

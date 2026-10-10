@@ -1,0 +1,585 @@
+"""DEC-314: headless tests for the Logs page's three new components.
+
+The model, the row delegate and the activity histogram each ship their own test per
+the project rulebook § GUI component standard — outcome and painted state, not merely that
+they construct.
+
+**Paint assertions check the specific painted value**, never "the two renders differ":
+DEC-273 recorded a disabled-state test that passed against an empty stylesheet because
+Qt's own ``QPalette`` disabled group recoloured the text on its own. The severity edge
+and the histogram bars are flat FILLs, where an exact colour match is both safe and
+portable — unlike text, whose antialiasing makes an exact token hit depend on the
+font stack.
+"""
+
+from __future__ import annotations
+
+import pytest
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter
+from PySide6.QtWidgets import QStyleOptionViewItem
+
+from ventulus.services.diagnostics_service import DiagEvent
+from ventulus.services.logs_view import (
+    build_log_row,
+    build_log_rows,
+    collapse_repeats,
+    time_span,
+)
+from ventulus.services.logs_view import histogram_buckets as make_buckets
+from ventulus.ui.theme import ThemeTokens, active_theme, set_active_theme
+from ventulus.ui.widgets.activity_histogram import ActivityHistogram
+from ventulus.ui.widgets.log_event_model import ROW_ROLE, LogEventModel
+from ventulus.ui.widgets.log_row_delegate import (
+    LogRowDelegate,
+    message_color,
+    meta_line,
+    severity_color,
+)
+
+_BASE = 1_700_000_000.0
+
+
+def _ev(i: int, level: str = "info", source: str = "gui", message: str = "m", **fields):
+    return DiagEvent(
+        timestamp=_BASE + i,
+        level=level,
+        source=source,
+        message=message,
+        seq=i + 1,
+        fields=dict(fields),
+    )
+
+
+def _rows(*events):
+    return build_log_rows(events)
+
+
+@pytest.fixture
+def default_theme():
+    """Register a known theme cheaply and restore it afterwards.
+
+    ``set_active_theme`` rather than ``apply_theme``: the latter re-polishes every
+    live widget in the process and DEC-287 measured that at 507 ms. The painted
+    widgets under test read ``active_theme()`` directly, so registration is all they
+    need.
+    """
+    previous = active_theme()
+    tokens = ThemeTokens()
+    set_active_theme(tokens)
+    yield tokens
+    set_active_theme(previous)
+
+
+# ── LogEventModel ──────────────────────────────────────────────────────────
+
+
+def test_model_is_empty_until_rows_are_set(qtbot):
+    model = LogEventModel()
+    assert model.rowCount() == 0
+    assert model.columnCount() == 1
+    assert model.row_at(0) is None
+    assert model.index_of_event(1) == -1
+
+
+def test_model_exposes_the_view_model_under_its_own_role(qtbot):
+    model = LogEventModel()
+    rows = _rows(_ev(0, "error", "hwmon", "write failed"))
+    model.set_rows(rows)
+
+    assert model.rowCount() == 1
+    assert model.data(model.index(0, 0), ROW_ROLE) is rows[0]
+
+
+def test_model_display_role_is_the_whole_log_line(qtbot):
+    """The delegate paints the row and ignores DisplayRole, but Qt's accessibility
+    bridge reads it — so a screen reader must not get an empty cell."""
+    model = LogEventModel()
+    model.set_rows(_rows(_ev(0, "warning", "fan", "stall detected")))
+
+    text = model.data(model.index(0, 0), Qt.ItemDataRole.DisplayRole)
+    assert "stall detected" in text and "WARN" in text and "fan" in text
+
+
+def test_model_tooltip_is_the_message(qtbot):
+    model = LogEventModel()
+    model.set_rows(_rows(_ev(0, "info", "gui", "a very long message")))
+    assert model.data(model.index(0, 0), Qt.ItemDataRole.ToolTipRole) == "a very long message"
+
+
+def test_model_rejects_a_child_parent_and_an_invalid_index(qtbot):
+    """A flat table must report no children, or a tree view would recurse forever."""
+    model = LogEventModel()
+    model.set_rows(_rows(_ev(0)))
+    top = model.index(0, 0)
+    assert model.rowCount(top) == 0
+    assert model.columnCount(top) == 0
+    assert model.data(model.index(5, 0), ROW_ROLE) is None
+
+
+def test_model_finds_a_row_by_stable_event_id(qtbot):
+    """Selection is re-anchored through this after every reset (brief §4)."""
+    model = LogEventModel()
+    rows = _rows(_ev(0, message="a"), _ev(1, message="b"), _ev(2, message="c"))
+    model.set_rows(list(reversed(rows)))
+
+    assert model.index_of_event(rows[0].event_id) == 2
+    assert model.index_of_event(rows[2].event_id) == 0
+    assert model.index_of_event(9999) == -1
+
+
+def test_model_set_rows_replaces_and_signals_a_reset(qtbot):
+    model = LogEventModel()
+    model.set_rows(_rows(_ev(0, message="first")))
+    with qtbot.waitSignal(model.modelReset, timeout=500):
+        model.set_rows(_rows(_ev(1, message="second")))
+    assert [r.message for r in model.rows()] == ["second"]
+
+
+def test_model_rows_returns_a_copy(qtbot):
+    model = LogEventModel()
+    model.set_rows(_rows(_ev(0)))
+    model.rows().clear()
+    assert model.rowCount() == 1, "a caller must not be able to empty the model"
+
+
+# ── LogRowDelegate ─────────────────────────────────────────────────────────
+
+
+def _paint_row(row, *, width=400, height=40, selected=False, theme=None):
+    """Render one delegate row to an image and return it."""
+    model = LogEventModel()
+    model.set_rows([row])
+    delegate = LogRowDelegate()
+    image = QImage(width, height, QImage.Format.Format_ARGB32)
+    image.fill(QColor((theme or active_theme()).surface_1))
+    option = QStyleOptionViewItem()
+    option.rect = QRect(0, 0, width, height)
+    if selected:
+        option.state |= option.state.__class__.State_Selected
+    painter = QPainter(image)
+    delegate.paint(painter, option, model.index(0, 0))
+    painter.end()
+    return image
+
+
+@pytest.mark.parametrize(
+    "level,token",
+    [("info", "status_ok"), ("warning", "status_warn"), ("error", "status_crit")],
+)
+def test_the_severity_edge_paints_the_exact_status_token(level, token, default_theme, qtbot):
+    """A flat fill, so an exact colour comparison is safe and portable here."""
+    image = _paint_row(build_log_row(_ev(0, level, "gui", "message")), theme=default_theme)
+    edge = QColor(image.pixel(1, 20))
+    assert edge.name() == QColor(getattr(default_theme, token)).name()
+
+
+def test_a_selected_row_paints_the_selection_background(default_theme, qtbot):
+    """Assert the painted value, not that two renders differ (DEC-273)."""
+    row = build_log_row(_ev(0, "info", "gui", "message"))
+    plain = _paint_row(row, theme=default_theme)
+    picked = _paint_row(row, selected=True, theme=default_theme)
+
+    far_right = 395  # past the text, so only the background is there
+    assert QColor(picked.pixel(far_right, 20)).name() == QColor(default_theme.selected_bg).name()
+    assert QColor(plain.pixel(far_right, 20)).name() == QColor(default_theme.surface_1).name()
+
+
+def test_the_row_height_is_two_lines_of_the_themed_fonts(default_theme, qtbot):
+    """A font metric, computed at runtime — never a literal (the project rulebook § Hard-won
+    lessons: an exact-pixel layout threshold is not portable)."""
+    model = LogEventModel()
+    model.set_rows(_rows(_ev(0)))
+    delegate = LogRowDelegate()
+    option = QStyleOptionViewItem()
+    option.rect = QRect(0, 0, 400, 40)
+    hint = delegate.sizeHint(option, model.index(0, 0))
+
+    one_line = QFontMetrics(option.font).height()
+    assert hint.height() >= 2 * one_line, "two text lines must fit"
+    assert hint.height() < 4 * one_line, "…and the row stays dense"
+
+
+def test_the_row_height_grows_with_the_themed_font_size(qtbot):
+    """The relationship, measured from the same widget at two theme sizes — the
+    portable form of "it scales with the user's font"."""
+    model = LogEventModel()
+    model.set_rows(_rows(_ev(0)))
+    delegate = LogRowDelegate()
+    option = QStyleOptionViewItem()
+    option.rect = QRect(0, 0, 400, 40)
+
+    previous = active_theme()
+    try:
+        set_active_theme(ThemeTokens(base_font_size_pt=7))
+        small = delegate.sizeHint(option, model.index(0, 0)).height()
+        set_active_theme(ThemeTokens(base_font_size_pt=16))
+        large = delegate.sizeHint(option, model.index(0, 0)).height()
+    finally:
+        set_active_theme(previous)
+    assert large > small
+
+
+def test_the_meta_line_carries_time_source_and_component():
+    row = build_log_row(_ev(0, "warning", "fan", "stall", component="cpu_fan"))
+    line = meta_line(row)
+    assert row.time_str in line and "fan" in line and "cpu_fan" in line
+
+
+def test_the_meta_line_omits_an_absent_component_and_marks_an_absent_source():
+    assert "cpu_fan" not in meta_line(build_log_row(_ev(0, "info", "gui", "m")))
+    assert "—" in meta_line(build_log_row(_ev(0, "info", "", "m")))
+
+
+@pytest.mark.parametrize(
+    "state,attr",
+    [("crit", "status_crit"), ("warn", "status_warn"), ("ok", "status_ok"), ("weird", "status_ok")],
+)
+def test_severity_color_maps_states_to_status_tokens(state, attr, default_theme):
+    assert severity_color(default_theme, state) == getattr(default_theme, attr)
+
+
+def test_message_color_tints_only_warnings_and_errors(default_theme):
+    """Preserved from the pre-DEC-314 table: dropping the tint would make an ERR
+    line less visible than it is today, which brief §15 forbids."""
+    assert message_color(default_theme, "crit") == default_theme.status_crit
+    assert message_color(default_theme, "warn") == default_theme.status_warn
+    assert message_color(default_theme, "ok") == default_theme.text_primary
+
+
+# ── ActivityHistogram ──────────────────────────────────────────────────────
+
+
+def _histogram(qtbot, events, *, buckets=4, width=400):
+    widget = ActivityHistogram(object_name="Test_Histogram")
+    qtbot.addWidget(widget)
+    widget.resize(width, 60)
+    rows = build_log_rows(events)
+    widget.set_buckets(make_buckets(rows, span=time_span(rows), bucket_count=buckets))
+    return widget
+
+
+def test_histogram_bucket_capacity_follows_its_width(qtbot):
+    widget = ActivityHistogram()
+    qtbot.addWidget(widget)
+    widget.resize(120, 60)
+    narrow = widget.preferred_bucket_count()
+    widget.resize(600, 60)
+    wide = widget.preferred_bucket_count()
+
+    assert wide > narrow, "a wider strip must offer more resolution (brief §3)"
+    assert narrow >= 1, "and a very narrow one must still be usable"
+
+
+def test_histogram_emits_capacity_changed_only_when_the_count_moves(qtbot):
+    widget = ActivityHistogram()
+    qtbot.addWidget(widget)
+    widget.resize(400, 60)
+    # Shown, because Qt defers the resize event for a widget that has never been
+    # mapped — a hidden widget would record zero resizes and the test would pass
+    # while asserting nothing.
+    widget.show()
+    qtbot.waitExposed(widget)
+    seen: list[int] = []
+    widget.capacity_changed.connect(lambda: seen.append(1))
+
+    widget.resize(400, 90)  # height only — capacity is unchanged
+    qtbot.wait(1)
+    assert seen == []
+
+    widget.resize(700, 90)
+    qtbot.wait(1)
+    assert seen == [1]
+
+
+def test_histogram_click_selects_the_bucket_under_the_cursor(qtbot):
+    widget = _histogram(qtbot, [_ev(i * 10) for i in range(4)])
+    with qtbot.waitSignal(widget.bucket_clicked, timeout=500) as sig:
+        qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(350, 30))
+    assert sig.args == [3], "the right-hand quarter is the last bucket"
+
+
+def test_clicking_the_selected_bucket_again_asks_to_clear(qtbot):
+    widget = _histogram(qtbot, [_ev(i * 10) for i in range(4)])
+    widget.set_selected_index(3)
+    with qtbot.waitSignal(widget.bucket_clicked, timeout=500) as sig:
+        qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(350, 30))
+    assert sig.args == [-1]
+
+
+def test_histogram_is_keyboard_operable(qtbot):
+    """DEC-251: an interactive control that only a mouse can reach is a gap."""
+    widget = _histogram(qtbot, [_ev(i * 10) for i in range(4)])
+    widget.show()
+    qtbot.waitExposed(widget)
+    widget.setFocus()
+
+    qtbot.keyClick(widget, Qt.Key.Key_Right)
+    with qtbot.waitSignal(widget.bucket_clicked, timeout=500) as sig:
+        qtbot.keyClick(widget, Qt.Key.Key_Space)
+    assert sig.args == [1]
+
+    widget.set_selected_index(1)
+    with qtbot.waitSignal(widget.bucket_clicked, timeout=500) as sig:
+        qtbot.keyClick(widget, Qt.Key.Key_Escape)
+    assert sig.args == [-1], "Escape clears an applied window"
+
+
+def test_histogram_cursor_stays_inside_the_bucket_range(qtbot):
+    widget = _histogram(qtbot, [_ev(i * 10) for i in range(4)])
+    widget.show()
+    qtbot.waitExposed(widget)
+    widget.setFocus()
+    for _ in range(10):
+        qtbot.keyClick(widget, Qt.Key.Key_Right)
+    with qtbot.waitSignal(widget.bucket_clicked, timeout=500) as sig:
+        qtbot.keyClick(widget, Qt.Key.Key_Return)
+    assert sig.args == [3], "never past the last bucket"
+
+
+def test_histogram_drops_a_selection_that_no_longer_exists(qtbot):
+    widget = _histogram(qtbot, [_ev(i * 10) for i in range(4)], buckets=4)
+    widget.set_selected_index(3)
+    rows = build_log_rows([_ev(0)])
+    widget.set_buckets(make_buckets(rows, span=time_span(rows), bucket_count=2))
+    assert widget.selected_index() is None
+
+
+def test_histogram_paints_the_severity_token_for_its_events(qtbot, default_theme):
+    """One bucket, all errors — the column must be painted in the crit token."""
+    widget = _histogram(qtbot, [_ev(i, "error") for i in range(3)], buckets=1, width=100)
+    image = QImage(100, 60, QImage.Format.Format_ARGB32)
+    image.fill(QColor(default_theme.app_bg))
+    widget.render(image)
+
+    column = [QColor(image.pixel(50, y)).name() for y in range(60)]
+    assert QColor(default_theme.status_crit).name() in column
+
+
+def test_an_empty_histogram_says_so_rather_than_painting_nothing(qtbot):
+    """Brief §12 — no large blank panels that look broken."""
+    widget = ActivityHistogram()
+    qtbot.addWidget(widget)
+    widget.resize(200, 60)
+    assert widget.buckets() == []
+    widget.render(QImage(200, 60, QImage.Format.Format_ARGB32))  # must not raise
+
+
+def test_histogram_height_is_a_font_metric(qtbot):
+    """Not ``setMinimumHeight`` and not a literal: DEC-281 capped a pane 300 px below
+    its content that way, and a literal derived on one machine is not portable."""
+    widget = ActivityHistogram()
+    qtbot.addWidget(widget)
+    line = QFontMetrics(widget.font()).height()
+    assert widget.minimumSizeHint().height() >= 2 * line
+    assert widget.minimumSizeHint() == widget.sizeHint()
+
+
+def test_histogram_tooltip_describes_the_bucket(qtbot):
+    widget = _histogram(qtbot, [_ev(0, "error"), _ev(0, "info")], buckets=1, width=100)
+    text = widget._describe(0)
+    assert "2 events" in text and "error" in text and "info" in text
+    assert widget._describe(99) == ""
+
+
+def test_histogram_tooltip_reports_an_empty_bucket(qtbot):
+    widget = _histogram(qtbot, [_ev(0), _ev(30)], buckets=4)
+    empties = [i for i, b in enumerate(widget.buckets()) if b.total == 0]
+    assert empties, "a sparse span must leave some columns empty"
+    assert "no events" in widget._describe(empties[0])
+
+
+def test_a_collapsed_run_is_still_counted_once_per_event_in_the_histogram(qtbot):
+    """The histogram takes the UNCOLLAPSED rows so the bars show real volume — the
+    reason its totals legitimately differ from the filter chips'."""
+    events = [_ev(i, "warning", "fan", "stall") for i in range(5)]
+    rows = build_log_rows(events)
+    assert len(collapse_repeats(rows)) == 1, "precondition: these collapse to one row"
+    buckets = make_buckets(rows, span=time_span(rows), bucket_count=2)
+    assert sum(b.total for b in buckets) == 5
+
+
+# ── Sparse-feed column bounding (release-screenshot defect 4) ──────────────
+
+
+def test_a_sparse_feeds_columns_are_neither_slivers_nor_slabs(qtbot):
+    """Both bounds, asserted as a COLUMN WIDTH — which is the thing the eye judges.
+
+    Bounding only the count failed twice in opposite directions: width alone spread one
+    event over 229 slivers, and a fixed floor of 8 columns then gave it a 148px
+    full-height slab that read as a rendering glitch. Asserting the width catches both,
+    where asserting the count caught neither.
+    """
+    widget = ActivityHistogram()
+    qtbot.addWidget(widget)
+    widget.resize(1400, 60)
+    assert widget.preferred_bucket_count() > 100, "precondition: width alone allows many"
+
+    for events in (1, 3, 10):
+        n = widget.preferred_bucket_count(events)
+        assert n >= 1
+        column_px = widget.width() / n
+        assert column_px <= 32, f"{events} event(s) -> {column_px:.0f}px columns (a slab)"
+        assert column_px >= 4, f"{events} event(s) -> {column_px:.0f}px columns (slivers)"
+
+
+def test_a_dense_feed_still_gets_the_full_width_resolution(qtbot):
+    """The data bound must never cost resolution once there is data to show — the
+    width cap has to win again as soon as the feed is large."""
+    widget = ActivityHistogram()
+    qtbot.addWidget(widget)
+    widget.resize(1400, 60)
+    assert widget.preferred_bucket_count(200) == widget.preferred_bucket_count()
+
+
+def test_a_sparse_strip_keeps_its_columns_narrow_at_every_width(qtbot):
+    """The slab was width-dependent — it only looked wrong once the widget was wide.
+    A single fixed size would not have caught it."""
+    widget = ActivityHistogram()
+    qtbot.addWidget(widget)
+    for w in (400, 900, 1400, 1900):
+        widget.resize(w, 60)
+        n = widget.preferred_bucket_count(1)
+        assert widget.width() / n <= 32, f"one event at {w}px -> {widget.width() / n:.0f}px column"
+
+
+def test_the_column_count_never_decreases_as_events_arrive(qtbot):
+    """Monotonic, so the strip does not visibly re-shard backwards while you watch it."""
+    widget = ActivityHistogram()
+    qtbot.addWidget(widget)
+    widget.resize(1400, 60)
+    counts = [widget.preferred_bucket_count(n) for n in (1, 2, 5, 20, 60, 200)]
+    assert counts == sorted(counts)
+
+
+def test_an_empty_feed_asks_for_no_columns(qtbot):
+    """Zero rows means the strip paints its "no activity" text, not zero-width bars."""
+    widget = ActivityHistogram()
+    qtbot.addWidget(widget)
+    widget.resize(1400, 60)
+    assert widget.preferred_bucket_count(0) == 0
+
+
+def test_a_sparse_strip_is_meaningfully_filled(qtbot, default_theme):
+    """The visual consequence: with one event the painted column has to actually be
+    drawn, and drawn at its full column width rather than as a sliver.
+
+    Asserted against **the widget's own column width**, not a share of the strip. The
+    first version of this test demanded the bar cover 1/16 of the whole strip, which
+    was really a restatement of the slab bug — it passed only while one event owned a
+    148px block, and correctly failed the moment the column width was bounded.
+    """
+    widget = _histogram(qtbot, [_ev(0, "error")], buckets=1, width=400)
+    widget.set_buckets(
+        make_buckets(
+            build_log_rows([_ev(0, "error")]),
+            span=time_span(build_log_rows([_ev(0, "error")])),
+            bucket_count=widget.preferred_bucket_count(1),
+        )
+    )
+    image = QImage(400, 60, QImage.Format.Format_ARGB32)
+    image.fill(QColor(default_theme.app_bg))
+    widget.render(image)
+
+    crit = QColor(default_theme.status_crit).name()
+    row = [QColor(image.pixel(x, 58)).name() for x in range(400)]
+    painted = row.count(crit)
+    column_px = widget.width() / widget.preferred_bucket_count(1)
+    assert painted >= column_px * 0.7, (
+        f"the event's column is {column_px:.0f}px wide but only {painted}px was painted"
+    )
+    assert painted <= column_px * 1.5, (
+        f"{painted}px painted for a {column_px:.0f}px column — one event is claiming more "
+        "of the strip than its own slice"
+    )
+
+
+# ── AUD2-d: the focus ring must survive the empty-feed path ──────────────────
+
+
+def _focused_histogram(qtbot, events=None, *, width=200):
+    widget = ActivityHistogram(object_name="Test_HistogramFocus")
+    qtbot.addWidget(widget)
+    widget.resize(width, 60)
+    if events:
+        rows = build_log_rows(events)
+        widget.set_buckets(make_buckets(rows, span=time_span(rows), bucket_count=4))
+    widget.show()
+    qtbot.waitExposed(widget)
+    widget.activateWindow()
+    widget.setFocus()
+    # `hasFocus()` needs the window activated and the event queue drained; a bare
+    # `setFocus()` on a freshly shown widget is not enough under offscreen.
+    qtbot.waitUntil(widget.hasFocus, timeout=2000)
+    return widget
+
+
+def _ring_pixels(widget, default_theme, *, width=200):
+    """`text_primary` pixels along the top border — the ring's own row.
+
+    Sampled on the border rather than over the whole image so the count cannot
+    be confused with the centre text, which is painted in `text_muted`. The
+    stroke is not antialiased (this painter sets no render hint), so an exact
+    token match is safe here in a way it is not for glyphs.
+    """
+    image = QImage(width, 60, QImage.Format.Format_ARGB32)
+    image.fill(QColor(default_theme.app_bg))
+    widget.render(image)
+    token = QColor(default_theme.text_primary).name()
+    return [QColor(image.pixel(x, 0)).name() for x in range(width)].count(token)
+
+
+def test_an_empty_histogram_still_paints_its_focus_ring(qtbot, default_theme):
+    """DEC-251 / WCAG 2.4.7 (`AUD2-d`).
+
+    `paintEvent` returned on the empty-buckets path *before* reaching the focus
+    ring, so a keyboard user had a fully operable control — Left/Right/Space/Esc
+    are all live — with no visible focus. It fired on every fresh launch, because
+    the feed is empty until something is logged, and whenever a filter matched
+    nothing. Measured before the fix: **0** ring pixels; after: the full border.
+    """
+    widget = _focused_histogram(qtbot)
+    assert widget.buckets() == [], "precondition: this is the empty-feed path"
+    assert _ring_pixels(widget, default_theme) == 200, "the whole top border must be the focus ring"
+
+
+def test_an_unfocused_empty_histogram_paints_no_ring(qtbot, default_theme):
+    """The other branch, so the assertion above cannot pass by always being true."""
+    widget = ActivityHistogram(object_name="Test_HistogramNoFocus")
+    qtbot.addWidget(widget)
+    widget.resize(200, 60)
+    assert widget.hasFocus() is False
+    assert _ring_pixels(widget, default_theme) == 0
+
+
+def test_a_populated_histogram_still_paints_its_focus_ring(qtbot, default_theme):
+    """The rule now lives in one helper with two call sites, and this is the
+    second one — extracting it does not test the site that already worked."""
+    widget = _focused_histogram(qtbot, [_ev(i * 10) for i in range(4)])
+    assert widget.buckets(), "precondition: this is the populated path"
+    assert _ring_pixels(widget, default_theme) == 200
+
+
+def test_the_focus_ring_reports_whether_it_painted(qtbot, default_theme):
+    """`_paint_focus_ring` returns the predicate the caller used to re-test.
+
+    The cursor column is gated on that return value, so a helper that painted
+    but reported `False` would silently drop it.
+    """
+    focused = _focused_histogram(qtbot, [_ev(i * 10) for i in range(4)])
+    image = QImage(200, 60, QImage.Format.Format_ARGB32)
+    painter = QPainter(image)
+    try:
+        assert focused._paint_focus_ring(painter, default_theme) is True
+    finally:
+        painter.end()
+
+    unfocused = ActivityHistogram()
+    qtbot.addWidget(unfocused)
+    unfocused.resize(200, 60)
+    image2 = QImage(200, 60, QImage.Format.Format_ARGB32)
+    painter2 = QPainter(image2)
+    try:
+        assert unfocused._paint_focus_ring(painter2, default_theme) is False
+    finally:
+        painter2.end()

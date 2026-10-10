@@ -1,0 +1,182 @@
+"""Page-level import/export: portable export, merge, robustness, chart range.
+
+Covers F6 (chart-range combo), F8 (round-trip/robustness coverage), F10
+(malformed-input containment), F11 (import applies live side effects), and
+F12 (portable export + machine-state-preserving merge).
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from ventulus.paths import config_dir, set_path_overrides, themes_dir
+from ventulus.services.app_settings_service import MACHINE_SPECIFIC_KEYS, AppSettingsService
+
+
+def _make_page(tmp_path, qtbot, monkeypatch, client=None):
+    from ventulus.ui.pages.settings_page import SettingsPage
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    set_path_overrides()  # clear any leaked global directory overrides
+    svc = AppSettingsService()
+    svc.load()
+    page = SettingsPage(settings_service=svc, client=client)
+    qtbot.addWidget(page)
+    return page, svc
+
+
+def _drive_import(page, monkeypatch, path: Path):
+    """Run _import_settings against *path* by stubbing the open dialog."""
+    monkeypatch.setattr(
+        "ventulus.ui.pages.settings_page.QFileDialog.getOpenFileName",
+        lambda *a, **k: (str(path), ""),
+    )
+    page._import_settings()
+
+
+class TestPortableExport:
+    def test_export_excludes_machine_keys(self, tmp_path, qtbot, monkeypatch):
+        page, svc = _make_page(tmp_path, qtbot, monkeypatch)
+        svc.update(window_geometry=[1, 2, 3, 4], fan_aliases={"f": "n"}, theme_name="X")
+        block = page._build_full_export()["settings"]
+        for key in MACHINE_SPECIFIC_KEYS:
+            assert key not in block
+        assert block["theme_name"] == "X"
+        assert block["fan_aliases"] == {"f": "n"}  # kept portable (user choice)
+        assert block["hidden_chart_series"] == []
+
+
+class TestImportMerge:
+    def test_import_preserves_local_machine_state(self, tmp_path, qtbot, monkeypatch):
+        page, svc = _make_page(tmp_path, qtbot, monkeypatch)
+        svc.update(window_geometry=[11, 22, 333, 444], profiles_dir_override="/local/x")
+        # Even a legacy FULL export carrying machine keys must not clobber them.
+        imp = tmp_path / "imp.json"
+        imp.write_text(
+            json.dumps(
+                {
+                    "export_version": 1,
+                    "settings": {
+                        "theme_name": "Imported",
+                        "window_geometry": [9, 9, 9, 9],
+                        "profiles_dir_override": "/their/path",
+                    },
+                }
+            )
+        )
+        _drive_import(page, monkeypatch, imp)
+        assert svc.settings.theme_name == "Imported"  # portable applied
+        assert svc.settings.window_geometry == [11, 22, 333, 444]  # local preserved
+        assert svc.settings.profiles_dir_override == "/local/x"  # local preserved
+
+    def test_import_writes_nothing_to_the_daemon(self, tmp_path, qtbot, monkeypatch):
+        """DEC-285 (M6): an imported config must not reconfigure the daemon.
+
+        Import used to POST the file's `daemon_startup_delay_secs` to whatever
+        daemon this machine is running — so a config shared between two people
+        carried one machine's daemon setting onto the other's. That is the
+        DEC-140 concern (someone else's state changing yours) reaching past
+        window geometry to a daemon-owned key. The field is gone from
+        `AppSettings` entirely, which is why no `MACHINE_SPECIFIC_KEYS` entry is
+        needed for it.
+
+        The stub raises on *any* attribute so a future daemon write added to the
+        import path fails loudly here rather than shipping.
+        """
+
+        class _NoWritesClient:
+            def __getattr__(self, name):
+                raise AssertionError(f"import must not call the daemon: {name}")
+
+        page, _svc = _make_page(tmp_path, qtbot, monkeypatch, client=_NoWritesClient())
+        imp = tmp_path / "imp.json"
+        imp.write_text(
+            json.dumps(
+                {
+                    "export_version": 1,
+                    "settings": {"daemon_startup_delay_secs": 7, "theme_name": "Imported"},
+                }
+            )
+        )
+        _drive_import(page, monkeypatch, imp)  # must not raise
+        assert _svc.settings.theme_name == "Imported", "the portable half still applies"
+        assert not hasattr(_svc.settings, "daemon_startup_delay_secs")
+
+
+class TestImportRobustness:
+    def test_malformed_root_rejected(self, tmp_path, qtbot, monkeypatch):
+        page, svc = _make_page(tmp_path, qtbot, monkeypatch)
+        before = svc.settings.theme_name
+        for content in ["[]", "null", '"x"', "not json at all"]:
+            imp = tmp_path / "bad.json"
+            imp.write_text(content)
+            _drive_import(page, monkeypatch, imp)  # must not raise
+        assert svc.settings.theme_name == before  # unchanged
+
+    def test_unsupported_version_rejected(self, tmp_path, qtbot, monkeypatch):
+        page, svc = _make_page(tmp_path, qtbot, monkeypatch)
+        imp = tmp_path / "v2.json"
+        imp.write_text(json.dumps({"export_version": 2, "settings": {"theme_name": "Nope"}}))
+        _drive_import(page, monkeypatch, imp)
+        assert svc.settings.theme_name != "Nope"
+
+    def test_non_numeric_version_rejected(self, tmp_path, qtbot, monkeypatch):
+        page, svc = _make_page(tmp_path, qtbot, monkeypatch)
+        imp = tmp_path / "vx.json"
+        imp.write_text(json.dumps({"export_version": "x", "settings": {"theme_name": "Nope"}}))
+        _drive_import(page, monkeypatch, imp)  # must not leak TypeError
+        assert svc.settings.theme_name != "Nope"
+
+    def test_profiles_as_list_does_not_crash(self, tmp_path, qtbot, monkeypatch):
+        page, _svc = _make_page(tmp_path, qtbot, monkeypatch)
+        imp = tmp_path / "pl.json"
+        imp.write_text(json.dumps({"export_version": 1, "profiles": ["not", "a", "dict"]}))
+        _drive_import(page, monkeypatch, imp)  # must not let AttributeError escape
+
+    def test_backup_created_before_import(self, tmp_path, qtbot, monkeypatch):
+        page, svc = _make_page(tmp_path, qtbot, monkeypatch)
+        svc.save()  # ensure an app_settings.json exists to back up
+        imp = tmp_path / "imp.json"
+        imp.write_text(json.dumps({"export_version": 1, "settings": {"theme_name": "New"}}))
+        _drive_import(page, monkeypatch, imp)
+        backups = list((config_dir() / "backups").glob("settings_backup_*.json"))
+        assert backups
+
+
+class TestChartRangeCombo:
+    def test_combo_matches_time_ranges(self, tmp_path, qtbot, monkeypatch):
+        from ventulus.ui.widgets.timeline_chart import TIME_RANGES
+
+        page, _svc = _make_page(tmp_path, qtbot, monkeypatch)
+        combo = page._chart_range_combo
+        labels = [combo.itemText(i) for i in range(combo.count())]
+        assert labels == [label for label, _ in TIME_RANGES]
+        assert labels[4] == "15m"  # default index 4 → 15m
+
+
+class TestThemeColorImport:
+    def test_import_themes_skips_bad_color(self, tmp_path, qtbot, monkeypatch):
+        page, _svc = _make_page(tmp_path, qtbot, monkeypatch)
+        data = {
+            "good": {"name": "Good", "app_bg": "#112233", "version": 2},
+            "bad": {"name": "Bad", "app_bg": "}; color:red", "version": 2},
+        }
+        skipped = page._import_themes(data)
+        assert skipped == 1
+        assert (themes_dir() / "good.json").exists()
+        assert not (themes_dir() / "bad.json").exists()
+
+    def test_oversized_import_rejected_cleanly(self, tmp_path, qtbot, monkeypatch):
+        """The live import path reads via load_json_capped — an oversized file
+        must be rejected without a wholesale read or a crash, leaving settings
+        untouched. (Re-vehicled from the removed service-level
+        ``import_settings`` test in the 2026-07-21 sweep.)"""
+        from ventulus.paths import MAX_IMPORT_BYTES
+
+        page, svc = _make_page(tmp_path, qtbot, monkeypatch)
+        before = svc.settings.theme_name
+        big = tmp_path / "huge_settings.json"
+        big.write_bytes(b'{"x": "' + b"A" * (MAX_IMPORT_BYTES + 100) + b'"}')
+        _drive_import(page, monkeypatch, big)  # must not raise
+        assert svc.settings.theme_name == before

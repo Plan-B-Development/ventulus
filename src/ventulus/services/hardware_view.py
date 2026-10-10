@@ -1,0 +1,645 @@
+"""Qt-free view-model layer for the Hardware page (DEC-212).
+
+Pure builders that turn a ``HardwareReadiness`` / ``SuperIoReport`` into frozen
+``…VM`` dataclasses the thin ``HardwarePage`` renderer consumes. Reuses the
+existing pure mapping ``ui/cooling_readiness.py`` (``build_readiness_items`` /
+``group_for`` / ``GROUP_ORDER``) so the action targets + doc links come for free,
+and mirrors the ``CoolingReadinessView`` derivations (Super-I/O panel, verdict,
+scanned-age) as data. Like ``system_state_view``, the imports pull PySide6
+transitively but nothing here needs a ``QApplication`` — headless-testable.
+
+Honesty (master.txt "do not invent"): there is NO numeric readiness score — the
+summary is the daemon verdict + real tier counts; the Super-I/O rows carry only
+real per-chip fields (no fabricated per-channel/address/poll-age columns).
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from enum import Enum
+
+from ventulus.api.models import HardwareReadiness, SuperIoReport
+from ventulus.ui.cooling_readiness import GROUP_ORDER, build_readiness_items, group_for
+from ventulus.ui.readiness_merge import MergedReadinessItem
+from ventulus.ui.widgets.inventory_readiness_view import _AUTO_EXPAND_RANK, _severity_chip
+
+# Daemon severity → StatusPill state / checklist badge word / verdict.
+_STATE: dict[str, str] = {"ok": "ok", "info": "info", "warning": "warn", "critical": "crit"}
+_BADGE: dict[str, str] = {"ok": "PASS", "info": "INFO", "warning": "WARN", "critical": "FAIL"}
+
+#: The Hardware page's verdict, and it says "HARDWARE" out loud on purpose
+#: (`SSN-i`, DEC-379). This page and System State answer two different, narrower
+#: questions — "is this machine's hardware/driver stack set up for fan control?"
+#: here, from the daemon's evidence-based `GET /inventory/hardware-readiness`;
+#: "what on this machine needs a response right now?" there, from observation in
+#: ISA-18.2 vocabulary. Neither owns a global verdict. The words used to be a
+#: bare `READY` against System State's `SYSTEM READY`, which is two different
+#: answers a glance apart in near-identical words — and the section header this
+#: pill trails was called "System Readiness Checklist", putting the other page's
+#: noun on this page's question. Both are renamed; keep them distinguishable.
+_VERDICT: dict[str, tuple[str, str]] = {
+    "ok": ("HARDWARE READY", "ok"),
+    "info": ("HARDWARE READY", "ok"),
+    "warning": ("HARDWARE NEEDS ATTENTION", "warn"),
+    "critical": ("HARDWARE NEEDS ATTENTION", "crit"),
+}
+_CONFIDENCE_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1, "unknown": 0}
+
+# Copied from cooling_readiness_view.py (the old view is untouched this stage).
+_LIABILITY = (
+    "Kernel-module and hardware-access changes can affect system stability. Review "
+    "the guidance for your hardware before proceeding. Ventulus does not apply "
+    "these changes automatically."
+)
+
+
+def _norm(severity: str) -> str:
+    s = (severity or "info").lower()
+    return "warning" if s == "warn" else s
+
+
+def _format_age(ms: int) -> str:
+    """A short human 'last scanned' phrase from a scan age in ms (copy of the view)."""
+    if ms <= 0:
+        return "just now"
+    secs = ms // 1000
+    if secs < 5:
+        return "just now"
+    if secs < 90:
+        return f"{secs}s ago"
+    return f"{secs // 60}m ago"
+
+
+# ─── View-model dataclasses ────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SummarySegmentVM:
+    label: str
+    count: int
+    state: str
+
+
+@dataclass(frozen=True)
+class ReadinessSummaryVM:
+    verdict_word: str
+    verdict_state: str
+    pass_count: int
+    warn_count: int
+    crit_count: int
+    info_count: int
+    to_fix: int
+    top_summary_line: str
+    scanned_age_line: str
+    segments: tuple[SummarySegmentVM, ...]
+
+
+@dataclass(frozen=True)
+class CheckRowVM:
+    code: str
+    title: str
+    detail: str
+    severity_state: str
+    badge_word: str
+    glyph: str
+    expandable: bool
+
+
+@dataclass(frozen=True)
+class CheckGroupVM:
+    name: str
+    rows: tuple[CheckRowVM, ...]
+
+
+@dataclass(frozen=True)
+class ImpactChipVM:
+    label: str
+    state: str
+
+
+@dataclass(frozen=True)
+class RecommendedActionVM:
+    code: str
+    headline: str
+    component: str
+    plain_detail: str
+    severity_state: str
+    badge_word: str
+    glyph: str
+    impact_chips: tuple[ImpactChipVM, ...]
+    action_kind: str
+    action_label: str
+    action_target: str
+    doc_url: str
+    doc_title: str
+    auto_expand: bool
+
+
+@dataclass(frozen=True)
+class SuperIoRowVM:
+    chip: str
+    vendor: str
+    driver_text: str
+    module_text: str
+    confidence: str
+    health_word: str
+    health_state: str
+    notes: str
+    has_recommendation: bool
+    reason: str
+    copy_command: str
+    mainline_text: str
+    mainline_state: str
+    risk_notes: tuple[str, ...]
+    caveats: tuple[str, ...]
+    #: How the daemon knows this chip is here, in its own words (`WIRE-w`).
+    #: Empty when the daemon sent none.
+    evidence_text: str = ""
+    #: The raw tokens, for callers that want to branch rather than render.
+    evidence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SuperIoPanelVM:
+    arch_supported: bool
+    arch_note: str
+    has_chips: bool
+    empty_note: str
+    summary_text: str
+    summary_state: str
+    rows: tuple[SuperIoRowVM, ...]
+    show_liability: bool
+    liability_text: str
+    notes_text: str
+    probe_available: bool
+    probe_reason: str
+
+
+# ─── Builders ──────────────────────────────────────────────────────────────
+
+
+def build_readiness_summary(hw: HardwareReadiness) -> ReadinessSummaryVM:
+    items = build_readiness_items(hw)
+    pass_count = sum(1 for m in items if m.is_ok)
+    warn_count = sum(1 for m in items if _norm(m.severity) == "warning")
+    crit_count = sum(1 for m in items if _norm(m.severity) == "critical")
+    info_count = sum(1 for m in items if _norm(m.severity) == "info")
+    overall = _norm(hw.overall)
+    verdict_word, verdict_state = _VERDICT.get(overall, ("HARDWARE NEEDS ATTENTION", "warn"))
+
+    top = (hw.rollup.top_summary or "").strip()
+    top_summary_line = f"Most important next step: {top}" if (top and overall != "ok") else ""
+    scanned_age_line = (
+        f"Last scanned {_format_age(hw.scanned_age_ms)}. "
+        "This assessment is read-only and does not change the system."
+    )
+    # Segments: PASS + WARN always; CRIT / INFO only when > 0 (criticals are
+    # never hidden inside WARN).
+    segments = [
+        SummarySegmentVM("PASS", pass_count, "ok"),
+        SummarySegmentVM("WARN", warn_count, "warn"),
+    ]
+    if crit_count:
+        segments.append(SummarySegmentVM("CRIT", crit_count, "crit"))
+    if info_count:
+        segments.append(SummarySegmentVM("INFO", info_count, "info"))
+
+    return ReadinessSummaryVM(
+        verdict_word=verdict_word,
+        verdict_state=verdict_state,
+        pass_count=pass_count,
+        warn_count=warn_count,
+        crit_count=crit_count,
+        info_count=info_count,
+        to_fix=warn_count + crit_count,
+        top_summary_line=top_summary_line,
+        scanned_age_line=scanned_age_line,
+        segments=tuple(segments),
+    )
+
+
+def _check_row(m: MergedReadinessItem) -> CheckRowVM:
+    sev = _norm(m.severity)
+    _word, glyph, _css, _rank = _severity_chip(m.severity)
+    return CheckRowVM(
+        code=m.code,
+        title=m.headline,
+        detail=m.plain_detail,
+        severity_state=_STATE.get(sev, "neutral"),
+        badge_word=_BADGE.get(sev, sev.upper()),
+        glyph=glyph,
+        expandable=bool(m.plain_detail),
+    )
+
+
+def build_checklist(items: list[MergedReadinessItem]) -> list[CheckGroupVM]:
+    """Group the daemon's actual items (incl. ok/PASS) into GROUP_ORDER. The input
+    is already most-severe-first, so within-group order is preserved."""
+    buckets: dict[str, list[MergedReadinessItem]] = {name: [] for name in GROUP_ORDER}
+    for m in items:
+        buckets.setdefault(group_for(m.code), []).append(m)
+    groups: list[CheckGroupVM] = []
+    for name in GROUP_ORDER:
+        rows = buckets.get(name, [])
+        if rows:
+            groups.append(CheckGroupVM(name, tuple(_check_row(m) for m in rows)))
+    return groups
+
+
+def build_recommended_actions(items: list[MergedReadinessItem]) -> list[RecommendedActionVM]:
+    return [_action_vm(m) for m in items if not m.is_ok]
+
+
+def _action_vm(m: MergedReadinessItem) -> RecommendedActionVM:
+    sev = _norm(m.severity)
+    word, glyph, _css, rank = _severity_chip(m.severity)
+    chips: list[ImpactChipVM] = []
+    if m.affects_safety:
+        chips.append(ImpactChipVM("affects thermal safety", "crit"))
+    if m.blocks_control:
+        chips.append(ImpactChipVM("blocks fan control", "crit"))
+    if m.blocks_monitoring:
+        chips.append(ImpactChipVM("blocks monitoring", "warn"))
+    if m.reboot_may_be_required:
+        chips.append(ImpactChipVM("reboot may be required", "info"))
+    return RecommendedActionVM(
+        code=m.code,
+        headline=m.headline,
+        component=(m.component or "").upper(),
+        plain_detail=m.plain_detail,
+        severity_state=_STATE.get(sev, "neutral"),
+        badge_word=word,
+        glyph=glyph,
+        impact_chips=tuple(chips),
+        action_kind=m.action.kind,
+        action_label=m.action.label,
+        action_target=m.action.target,
+        doc_url=m.doc_url,
+        doc_title=m.doc_title,
+        auto_expand=rank >= _AUTO_EXPAND_RANK,
+    )
+
+
+def _notes_text(report: SuperIoReport) -> str:
+    notes = list(report.notes)
+    if report.acpi_conflict_drivers:
+        notes.insert(
+            0,
+            "ACPI firmware claims the I/O ports of: "
+            + ", ".join(report.acpi_conflict_drivers)
+            + " — under acpi_enforce_resources=strict (the default) the driver may "
+            "refuse to bind.",
+        )
+    return "\n\n".join(notes)
+
+
+def _superio_row(c) -> SuperIoRowVM:
+    vendor = (c.vendor or "").strip()
+    vendor_text = vendor.upper() if vendor and vendor != "unknown" else ""
+    rec = c.recommendation
+    mainline_text = ""
+    mainline_state = "neutral"
+    risk: tuple[str, ...] = ()
+    if rec is not None:
+        mainline_text = (
+            "in mainline kernel" if rec.in_mainline else "needs out-of-tree (DKMS) driver"
+        )
+        mainline_state = "ok" if rec.in_mainline else "warn"
+        risk = tuple(rec.risk_notes)
+    return SuperIoRowVM(
+        evidence_text=_evidence_text(c.evidence),
+        evidence=tuple(c.evidence),
+        chip=c.chip_name or "(unknown chip)",
+        vendor=vendor_text,
+        driver_text=c.bound_driver or c.expected_module or "—",
+        module_text="Yes" if c.module_loaded else "No",
+        confidence=(c.confidence or "").lower() or "—",
+        health_word="HEALTHY" if c.hwmon_present else "UNBOUND",
+        health_state="ok" if c.hwmon_present else "warn",
+        notes="; ".join(c.caveats) if c.caveats else "",
+        has_recommendation=rec is not None,
+        reason=rec.reason if rec else "",
+        copy_command=rec.load_hint if rec else "",
+        mainline_text=mainline_text,
+        mainline_state=mainline_state,
+        risk_notes=risk,
+        caveats=tuple(c.caveats),
+    )
+
+
+#: `SuperIoChip.evidence` tokens in the daemon's discovery order, mapped to
+#: words a user can act on. Deliberately a *display* map and not a filter: an
+#: unrecognised token is rendered verbatim rather than dropped (the 273-i rule),
+#: because the daemon may add an evidence source before the GUI knows about it
+#: and "we found this chip somehow" is still worth more than silence.
+_EVIDENCE_LABELS = {
+    "dmi_board_table": "board table",
+    "kernel_log": "kernel log",
+    "bound_hwmon": "bound driver",
+    "port_probe": "port probe",
+}
+
+
+def _evidence_text(tokens: list[str]) -> str:
+    """Render `SuperIoChip.evidence` for display (`WIRE-w`).
+
+    The field was parsed and never shown, so after a user ran the opt-in
+    `/dev/port` probe nothing on screen said the newly-found chip came *from*
+    the probe — which is the whole reason the probe is worth running, and the
+    one evidence source the user themselves caused.
+    """
+    return ", ".join(_EVIDENCE_LABELS.get(tok, tok) for tok in tokens if tok)
+
+
+def build_superio_panel(report: SuperIoReport) -> SuperIoPanelVM:
+    if not report.arch_supported:
+        return SuperIoPanelVM(
+            arch_supported=False,
+            arch_note="Super-I/O detection is only available on x86 / x86_64 systems.",
+            has_chips=False,
+            empty_note="",
+            summary_text="",
+            summary_state="neutral",
+            rows=(),
+            show_liability=False,
+            liability_text="",
+            notes_text="",
+            probe_available=report.port_probe_available,
+            probe_reason=report.port_probe_reason,
+        )
+    chips = sorted(
+        report.chips,
+        key=lambda c: (
+            0 if c.recommendation is not None else 1,
+            -_CONFIDENCE_RANK.get((c.confidence or "").lower(), 0),
+            c.chip_name,
+        ),
+    )
+    if not chips:
+        return SuperIoPanelVM(
+            arch_supported=True,
+            arch_note="",
+            has_chips=False,
+            empty_note=(
+                "No motherboard Super-I/O chip was detected. On a system whose Super-I/O "
+                "driver is not loaded, the chip is not visible until it is."
+            ),
+            summary_text="",
+            summary_state="neutral",
+            rows=(),
+            show_liability=False,
+            liability_text="",
+            notes_text=_notes_text(report),
+            probe_available=report.port_probe_available,
+            probe_reason=report.port_probe_reason,
+        )
+    unbound = [c for c in chips if c.recommendation is not None]
+    summary_text = (
+        f"{len(unbound)} of {len(chips)} Super-I/O chip(s) need a driver loaded"
+        if unbound
+        else f"All {len(chips)} detected Super-I/O chip(s) have a driver bound"
+    )
+    return SuperIoPanelVM(
+        arch_supported=True,
+        arch_note="",
+        has_chips=True,
+        empty_note="",
+        summary_text=summary_text,
+        summary_state="warn" if unbound else "ok",
+        rows=tuple(_superio_row(c) for c in chips),
+        show_liability=bool(unbound),
+        liability_text=_LIABILITY if unbound else "",
+        notes_text=_notes_text(report),
+        probe_available=report.port_probe_available,
+        probe_reason=report.port_probe_reason,
+    )
+
+
+# ─── Voltage rails (`WIRE-ag`) ─────────────────────────────────────────────
+
+
+class RailKind(Enum):
+    """Who named a voltage row, which decides how it may be presented (DEC-464)."""
+
+    #: The driver published ``inN_label``: an internal input it has scaled.
+    DRIVER = "driver"
+    #: The daemon's board catalogue names it and gives its divider (``VOLT-b``).
+    CATALOGUE = "catalogue"
+    #: The board's config does not map the input: not a named rail, and not
+    #: known to be unconnected (upstream ``ignore`` — see DEC-464).
+    UNMAPPED = "unmapped"
+    #: Nobody named it: a raw reading at the chip's pin.
+    RAW = "raw"
+
+
+#: The Identification column's text per kind.
+_IDENTIFICATION_TEXT: dict[RailKind, str] = {
+    RailKind.DRIVER: "Named by the driver",
+    RailKind.CATALOGUE: "Named by the board catalogue",
+    RailKind.UNMAPPED: "Not used by this board",
+    RailKind.RAW: "Unnamed channel",
+}
+
+
+@dataclass(frozen=True)
+class VoltageRowVM:
+    """One rendered rail. ``kind`` decides how it must be presented.
+
+    Deliberately carries no ``id``: nothing renders it, and a VM field no
+    renderer reads is the ``WIRE-ak`` "parsed but never read" category — having
+    it in the type is what makes the gap invisible. The wire id stays on
+    :class:`~ventulus.api.models.VoltageRail`, which is the wire mirror.
+    """
+
+    #: The driver's label, else the board catalogue's, else the channel (``in0``).
+    name: str
+    chip: str
+    #: The rail voltage to millivolt resolution — the pin reading times the
+    #: board divider for a catalogue row, the pin reading itself otherwise.
+    value_text: str
+    kind: RailKind
+    #: The Identification column's text for :attr:`kind`.
+    identification_text: str
+    #: One-line explanation shown as the row tooltip; empty for a driver row.
+    caveat: str
+
+
+@dataclass(frozen=True)
+class VoltagePanelVM:
+    has_rails: bool
+    #: Shown instead of the table when the daemon reported no rails.
+    empty_note: str
+    rows: tuple[VoltageRowVM, ...]
+    #: Count line, e.g. "10 channels · 3 named by the driver · 7 by the board
+    #: catalogue".
+    summary_text: str
+    #: Says when the readings were taken and that they are not live. The GUI
+    #: reads ``/diagnostics/hardware`` on connect, on the Hardware page's
+    #: Re-scan and on a System State refresh or rescan (`VOLT-a`), so these are
+    #: a snapshot, and a panel that did not say so would let a user read
+    #: hours-old millivolts as current ones.
+    provenance_text: str
+    #: Shown under the table: the raw-pin warning while any row shows an
+    #: unscaled pin reading (unnamed or not used), and the catalogue's credit
+    #: while any row came from it; empty when neither applies.
+    footnote: str
+    #: Why the last re-read failed, shown while the previous readings (or the
+    #: empty note) stay on screen; empty when it did not fail.
+    refresh_error_text: str
+
+
+_UNIDENTIFIED_CAVEAT = (
+    "Raw ADC channel — the driver did not name it, so this is the voltage at the "
+    "chip's pin, not a known rail."
+)
+
+#: DEC-464: upstream's `ignore` means "not mapped by this SIV configuration",
+#: not "unconnected", so the row keeps its reading and says what is known.
+_UNMAPPED_CAVEAT = (
+    "The board catalogue does not map this input for this board — it may be "
+    "unconnected or unused, so this pin reading is not a known rail."
+)
+
+# `VOLT-b`: the last sentence used to say an /etc/sensors.d file "is what names
+# them". It does not, for this table: libsensors reads that file in user space,
+# the kernel driver never does, so `inN_label` — the only label the daemon reads
+# — is unchanged by it.
+_VOLTAGE_FOOTNOTE = (
+    "Unnamed and unused channels are shown as measured at the chip's input pin. Boards feed "
+    "rails through resistor dividers the driver knows nothing about, so those "
+    "readings are real voltages but not the rail voltage. An /etc/sensors.d file "
+    "names them for the sensors command, not here — lm_sensors reads it, and the "
+    "kernel driver this table reads from does not."
+)
+
+#: DEC-464 (Q11): the catalogue is GPL-2.0, and the facts it supplies are
+#: credited where they are shown.
+_CATALOGUE_FOOTNOTE = (
+    "Board-catalogue names, dividers and unused inputs come from the it87 driver "
+    "project's Gigabyte sensor configs (GPL-2.0), matched on this board's firmware "
+    "ID. Hover a board-catalogue row to see its pin reading and divider."
+)
+
+#: `VOLT-a`: the half of the provenance line that holds whatever the read time.
+#: It used to say the readings were "measured when the GUI connected", which
+#: stopped being true once System State's refresh and rescan could replace them.
+_VOLTAGE_NOT_LIVE = "Voltages are not on the live poll — Re-scan reads them again."
+
+_VOLTAGE_EMPTY_NOTE = (
+    "No voltage rails reported. The daemon publishes them from the hwmon chip's "
+    "ADC channels; a board whose Super-I/O driver exposes none, or a daemon older "
+    "than 2.37.0, reports nothing here."
+)
+
+
+def _read_at_text(read_at: float, now: float) -> str:
+    """Say "Read at 14:03." today, and "Read on 29 Sep at 23:58." on any other day.
+
+    A clock time rather than an age, so the line cannot go stale while the page
+    is open. The date is added off the day because a session can outlive one.
+    """
+    at, today = time.localtime(read_at), time.localtime(now)
+    clock = time.strftime("%H:%M", at)
+    if (at.tm_year, at.tm_yday) == (today.tm_year, today.tm_yday):
+        return f"Read at {clock}."
+    return f"Read on {at.tm_mday} {time.strftime('%b', at)} at {clock}."
+
+
+def _rail_kind(rail) -> RailKind:
+    """Classify a rail. The driver's label wins over the catalogue (DEC-464 Q2),
+    and "not used" over a catalogue name — the daemon never sends both, and if
+    one ever did, an unscaled reading that claims no rail is the safer
+    misreading than a name."""
+    if rail.identified:
+        return RailKind.DRIVER
+    if rail.board_unmapped:
+        return RailKind.UNMAPPED
+    if rail.board_label and rail.board_multiplier is not None:
+        return RailKind.CATALOGUE
+    return RailKind.RAW
+
+
+def _voltage_row(rail) -> VoltageRowVM:
+    kind = _rail_kind(rail)
+    name, value_text, caveat = rail.label, f"{rail.value_v:.3f} V", ""
+    if kind is RailKind.CATALOGUE:
+        multiplier = rail.board_multiplier
+        name = rail.board_label
+        value_text = f"{rail.value_v * multiplier:.3f} V"
+        if multiplier == 1.0:
+            caveat = "Named from the it87 board catalogue — read directly at the pin."
+        else:
+            caveat = (
+                f"Named from the it87 board catalogue — pin {rail.value_v:.3f} V "
+                f"\N{MULTIPLICATION SIGN} {multiplier:g}."
+            )
+    elif kind is RailKind.UNMAPPED:
+        caveat = _UNMAPPED_CAVEAT
+    elif kind is RailKind.RAW:
+        caveat = _UNIDENTIFIED_CAVEAT
+    return VoltageRowVM(
+        name=name,
+        chip=rail.chip_name,
+        value_text=value_text,
+        kind=kind,
+        identification_text=_IDENTIFICATION_TEXT[kind],
+        caveat=caveat,
+    )
+
+
+def build_voltage_panel(
+    rails, *, read_at: float | None, now: float, refresh_error: str
+) -> VoltagePanelVM:
+    """Build the Hardware page's Voltages panel from ``HardwareDiagnosticsResult.voltages``.
+
+    Display-only by construction: nothing here is offered as a control input,
+    and who named each rail is carried into the row rather than flattened,
+    because presenting a divided reading with the same authority as a direct
+    one is the specific failure the daemon's ``identified`` flag exists to
+    prevent. A board-catalogue row (``VOLT-b``, DEC-464) shows the rail voltage
+    — the pin reading times the board's divider — and says so in its caveat.
+
+    ``read_at`` is ``DiagnosticsService.last_hw_diagnostics_at`` (epoch seconds),
+    ``None`` when nothing recorded when the snapshot arrived — the line then
+    says nothing about its age rather than guessing. ``refresh_error`` is the
+    last failed re-read's message, or ``""``. All three are keyword-only with no
+    default, so a caller cannot silently omit one (DEC-379).
+    """
+    error_text = f"Could not re-read voltages: {refresh_error}" if refresh_error else ""
+    ordered = sorted(rails, key=lambda r: (r.chip_name, r.channel))
+    rows = tuple(_voltage_row(r) for r in ordered)
+    if not rows:
+        return VoltagePanelVM(
+            has_rails=False,
+            empty_note=_VOLTAGE_EMPTY_NOTE,
+            rows=(),
+            summary_text="",
+            provenance_text="",
+            footnote="",
+            refresh_error_text=error_text,
+        )
+    count = {kind: sum(1 for r in rows if r.kind is kind) for kind in RailKind}
+    channel_word = "channel" if len(rows) == 1 else "channels"
+    summary = f"{len(rows)} {channel_word} · {count[RailKind.DRIVER]} named by the driver"
+    if count[RailKind.CATALOGUE]:
+        summary += f" · {count[RailKind.CATALOGUE]} by the board catalogue"
+    if count[RailKind.UNMAPPED]:
+        summary += f" · {count[RailKind.UNMAPPED]} not used"
+    footnotes = []
+    if count[RailKind.RAW] or count[RailKind.UNMAPPED]:
+        footnotes.append(_VOLTAGE_FOOTNOTE)
+    if count[RailKind.CATALOGUE] or count[RailKind.UNMAPPED]:
+        footnotes.append(_CATALOGUE_FOOTNOTE)
+    provenance = _VOLTAGE_NOT_LIVE
+    if read_at is not None:
+        provenance = f"{_read_at_text(read_at, now)} {_VOLTAGE_NOT_LIVE}"
+    return VoltagePanelVM(
+        has_rails=True,
+        empty_note="",
+        rows=rows,
+        summary_text=summary,
+        provenance_text=provenance,
+        footnote=" ".join(footnotes),
+        refresh_error_text=error_text,
+    )

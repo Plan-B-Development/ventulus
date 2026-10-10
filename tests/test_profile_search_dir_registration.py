@@ -1,0 +1,350 @@
+"""Regression test: GUI auto-registers its profile directory with the daemon.
+
+The daemon's default profile search dirs are /etc/ventulus/profiles and
+the root user's XDG dir. When the GUI runs as an unprivileged user, its
+profiles live under that user's XDG config dir, which the daemon has no way
+to discover on its own. Before this fix, profile activation failed with
+"profile_path must be within a profile search directory" on every fresh
+install. The GUI now calls POST /config/profile-search-dirs during startup
+to teach the daemon where to look.
+
+The registration runs inside the PollingService worker thread (not the Qt
+main thread) so a slow or half-dead daemon cannot stall the UI.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from ventulus.api.errors import DaemonError, DaemonUnavailable
+from ventulus.services.polling import _PollWorker
+
+
+@pytest.fixture()
+def tmp_profiles_dir(tmp_path, monkeypatch):
+    """Redirect profiles_dir() to a temp location for the test."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    # Clear any lingering path overrides from previous tests
+    from ventulus.paths import set_path_overrides
+
+    set_path_overrides()
+    return tmp_path / "ventulus" / "profiles"
+
+
+class TestRegisterProfileSearchDir:
+    def test_calls_daemon_with_profiles_dir(self, tmp_profiles_dir):
+        """On success, the current profiles_dir() is sent to the daemon."""
+        worker = _PollWorker(socket_path="/tmp/nonexistent.sock")
+        client = MagicMock()
+
+        worker._register_profile_search_dir(client)
+
+        client.update_profile_search_dirs.assert_called_once()
+        kwargs = client.update_profile_search_dirs.call_args.kwargs
+        assert kwargs["add"] == [str(tmp_profiles_dir)]
+
+    def test_swallows_daemon_error(self, tmp_profiles_dir, caplog):
+        """A DaemonError response must not propagate — startup must continue."""
+        worker = _PollWorker(socket_path="/tmp/nonexistent.sock")
+        client = MagicMock()
+        client.update_profile_search_dirs.side_effect = DaemonError(
+            code="validation_error",
+            message="nope",
+            retryable=False,
+            source="validation",
+            status=400,
+        )
+
+        worker._register_profile_search_dir(client)
+
+        assert "Could not register profile search dir" in caplog.text
+
+    def test_swallows_daemon_unavailable(self, tmp_profiles_dir, caplog):
+        """Offline daemon at startup is tolerated — polling already handles that."""
+        worker = _PollWorker(socket_path="/tmp/nonexistent.sock")
+        client = MagicMock()
+        client.update_profile_search_dirs.side_effect = DaemonUnavailable()
+
+        worker._register_profile_search_dir(client)
+
+        assert "Could not register profile search dir" in caplog.text
+
+    def test_swallows_connection_error(self, tmp_profiles_dir, caplog):
+        """Transport-level errors must also be swallowed without propagating."""
+        worker = _PollWorker(socket_path="/tmp/nonexistent.sock")
+        client = MagicMock()
+        client.update_profile_search_dirs.side_effect = ConnectionError("closed")
+
+        worker._register_profile_search_dir(client)
+
+        assert "Connection error registering profile search dir" in caplog.text
+
+    def test_respects_path_override(self, tmp_path):
+        """If the user configured a custom profiles dir, that path is registered."""
+        from ventulus.paths import set_path_overrides
+
+        custom = tmp_path / "custom-profiles"
+        custom.mkdir()
+        set_path_overrides(profiles_dir=str(custom))
+        try:
+            worker = _PollWorker(socket_path="/tmp/nonexistent.sock")
+            client = MagicMock()
+            worker._register_profile_search_dir(client)
+            kwargs = client.update_profile_search_dirs.call_args.kwargs
+            assert kwargs["add"] == [str(custom)]
+        finally:
+            set_path_overrides()
+
+    def test_first_registration_logs_info_subsequent_logs_debug(self, tmp_profiles_dir, caplog):
+        """P2-D: only the first successful registration should appear at INFO.
+
+        Re-registration on every reconnect is intentional (the daemon may
+        have restarted with a stale search-dir list), but emitting a new
+        INFO line every time clutters the journal on a flapping socket.
+        First call → INFO. Subsequent calls → DEBUG.
+        """
+        import logging
+
+        worker = _PollWorker(socket_path="/tmp/nonexistent.sock")
+        client = MagicMock()
+
+        # First registration: must log at INFO.
+        with caplog.at_level(logging.DEBUG, logger="ventulus.services.polling"):
+            worker._register_profile_search_dir(client)
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert any("Registered profile search dir" in r.message for r in info_records), (
+            f"first registration must log at INFO; got {info_records}"
+        )
+        caplog.clear()
+
+        # Second registration (same dir, same session): must log at DEBUG, NOT INFO.
+        with caplog.at_level(logging.DEBUG, logger="ventulus.services.polling"):
+            worker._register_profile_search_dir(client)
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+        assert not info_records, (
+            f"re-registration of the same dir must NOT log at INFO; got {info_records}"
+        )
+        assert any("Re-registered profile search dir" in r.message for r in debug_records), (
+            f"re-registration must log at DEBUG; got {debug_records}"
+        )
+
+        # The daemon call still happens (additive endpoint, daemon may have
+        # restarted) — we only changed the log level, not the wire behaviour.
+        assert client.update_profile_search_dirs.call_count == 2
+
+
+class TestRegistrationRunsInWorkerPollCycle:
+    """P1-3: Registration runs inside the worker's poll() cycle, not on the Qt
+    main thread. Firing on ``_poll_count == 0`` covers both first-poll and
+    reconnect (worker resets _poll_count to 0 when recovering from failure).
+    """
+
+    def test_registration_fires_on_first_successful_poll(self, tmp_profiles_dir, monkeypatch):
+        """Worker.poll() calls update_profile_search_dirs when _poll_count == 0."""
+        from ventulus.api.models import ActiveProfileInfo, Capabilities
+
+        worker = _PollWorker(socket_path="/tmp/nonexistent.sock")
+
+        client = MagicMock()
+        client.capabilities.return_value = Capabilities(daemon_version="1.5.0")
+        client.hwmon_headers.return_value = []
+        client.active_profile.return_value = ActiveProfileInfo(active=False)
+        client.poll.return_value = (MagicMock(), [], [])
+
+        monkeypatch.setattr(worker, "_ensure_client", lambda: client)
+
+        worker.poll()
+
+        client.update_profile_search_dirs.assert_called_once()
+        kwargs = client.update_profile_search_dirs.call_args.kwargs
+        assert kwargs["add"] == [str(tmp_profiles_dir)]
+
+    def test_registration_repeats_after_reconnect(self, tmp_profiles_dir, monkeypatch):
+        """On reconnect the worker sets _poll_count=0, triggering a fresh register."""
+        from ventulus.api.errors import DaemonUnavailable
+        from ventulus.api.models import ActiveProfileInfo, Capabilities
+
+        worker = _PollWorker(socket_path="/tmp/nonexistent.sock")
+
+        client = MagicMock()
+        client.capabilities.return_value = Capabilities(daemon_version="1.5.0")
+        client.hwmon_headers.return_value = []
+        client.active_profile.return_value = ActiveProfileInfo(active=False)
+        client.poll.return_value = (MagicMock(), [], [])
+
+        monkeypatch.setattr(worker, "_ensure_client", lambda: client)
+
+        # First successful poll → registers.
+        worker.poll()
+        assert client.update_profile_search_dirs.call_count == 1
+
+        # Second poll — still connected — must NOT re-register.
+        worker.poll()
+        assert client.update_profile_search_dirs.call_count == 1
+
+        # Simulate a full disconnect: both the batch and the fallback
+        # individual endpoints raise, so the worker's outer DaemonError
+        # handler fires (mirroring a daemon that stopped listening).
+        client.poll.side_effect = DaemonUnavailable()
+        client.status.side_effect = DaemonUnavailable()
+        client.sensors.side_effect = DaemonUnavailable()
+        client.fans.side_effect = DaemonUnavailable()
+        worker.poll()
+        assert client.update_profile_search_dirs.call_count == 1
+
+        # Clear the error to simulate the daemon coming back.
+        client.poll.side_effect = None
+        client.status.side_effect = None
+        client.sensors.side_effect = None
+        client.fans.side_effect = None
+        client.poll.return_value = (MagicMock(), [], [])
+
+        # Step through enough cycles to cover the exponential backoff skip,
+        # the recovery poll (which resets _poll_count to 0), and the next
+        # cycle where register fires again.
+        for _ in range(5):
+            worker.poll()
+
+        assert client.update_profile_search_dirs.call_count == 2
+
+
+class TestSettingsPageSearchDirError:
+    """The Settings page must SURFACE a daemon refusal of a search-dir change
+    (e.g. the DEC-205 home-confinement rejection) to the user, not swallow it.
+
+    This is the interactive path (user picks a new profiles directory), distinct
+    from the worker auto-registration above which tolerates errors silently.
+    """
+
+    def test_confinement_error_surfaces_in_dialog(
+        self, qapp, app_state, settings_service, monkeypatch, tmp_path
+    ):
+        from PySide6.QtWidgets import QMessageBox
+
+        from ventulus.ui.pages.settings_page import SettingsPage
+
+        confinement_msg = (
+            "profile search directory must be within your home directory (/home/u): /tmp"
+        )
+
+        class _RefusingClient:
+            socket_path = "/tmp/x.sock"
+
+            def update_profile_search_dirs(self, add=None, remove=None):
+                raise DaemonError(
+                    code="validation_error",
+                    message=confinement_msg,
+                    retryable=False,
+                    source="validation",
+                    status=400,
+                )
+
+        page = SettingsPage(
+            state=app_state, settings_service=settings_service, client=_RefusingClient()
+        )
+
+        # Re-patch the conftest-neutralized modal to record what the user sees.
+        # (The autouse fixture makes warning() a no-op; a per-test re-patch wins.)
+        captured: list[tuple] = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            lambda parent, title, text, *a, **k: (
+                captured.append((title, text)) or QMessageBox.StandardButton.Ok
+            ),
+            raising=False,
+        )
+
+        # The profiles folder in force is absent → no file-migration branch.
+        page._handle_dir_change("profiles", "/tmp/new-profiles")
+
+        assert captured, "the daemon refusal must surface as a warning dialog"
+        _title, text = captured[-1]
+        assert "Failed to update daemon" in text
+        # The daemon's own message must reach the user verbatim.
+        assert "within your home directory" in text
+
+
+class TestDirectoryChangeRetiresTheOldEntry:
+    """DEC-285: the picker must MOVE the registration, not add a second one.
+
+    ``_sync_profile_search_dir`` has its own tests; this is the **call site**,
+    which is the half that has been missed five separate times in this project
+    (the project rulebook § Hard-won lessons). A helper with thorough unit tests and
+    nothing asserting the production path calls it is an untested rule — and the
+    production path here is the only way a user ever changes this directory.
+    """
+
+    @staticmethod
+    def _page(app_state, settings_service, client, *, remove_supported=True):
+        from ventulus.api.models import Capabilities, ControlCapability
+        from ventulus.ui.pages.settings_page import SettingsPage
+
+        app_state.capabilities = Capabilities(
+            control=ControlCapability(profile_search_dir_remove=remove_supported)
+        )
+        return SettingsPage(state=app_state, settings_service=settings_service, client=client)
+
+    def test_the_picker_sends_add_and_remove_together(
+        self, qapp, app_state, settings_service, tmp_path
+    ):
+        from ventulus.paths import profiles_dir
+
+        client = MagicMock()
+        page = self._page(app_state, settings_service, client)
+        old_dir = profiles_dir()  # the folder in force is the one retired
+        new_dir = tmp_path / "elsewhere"
+
+        page._handle_dir_change("profiles", str(new_dir))
+
+        client.update_profile_search_dirs.assert_called_once_with(
+            add=[str(new_dir)], remove=[str(old_dir)]
+        )
+
+    def test_an_old_daemon_still_gets_the_add(self, qapp, app_state, settings_service, tmp_path):
+        client = MagicMock()
+        page = self._page(app_state, settings_service, client, remove_supported=False)
+        new_dir = tmp_path / "elsewhere"
+
+        page._handle_dir_change("profiles", str(new_dir))
+
+        client.update_profile_search_dirs.assert_called_once_with(add=[str(new_dir)], remove=None)
+
+
+class TestSearchDirDisclosure:
+    """DEC-237: the automatic registration must be visible somewhere in the UI.
+
+    ``_register_profile_search_dir`` writes to daemon config on first poll and
+    on every reconnect. It is additive and deduplicated daemon-side, and it logs
+    — but nothing in the GUI ever told the operator it happens. The Path
+    Management card now states it.
+    """
+
+    def test_path_management_discloses_registration(
+        self, qapp, app_state, settings_service, tmp_path, monkeypatch
+    ):
+        from ventulus.paths import profiles_dir, set_path_overrides
+        from ventulus.ui.pages.settings_page import SettingsPage
+
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        set_path_overrides()
+        page = SettingsPage(state=app_state, settings_service=settings_service)
+
+        text = page._search_dir_note.text()
+        assert str(profiles_dir()) in text, "the disclosure must name the actual directory"
+        assert "daemon" in text.lower()
+        assert "reconnect" in text.lower(), "the repeat-on-reconnect behaviour must be stated"
+
+    def test_disclosure_follows_a_directory_change(
+        self, qapp, app_state, settings_service, tmp_path
+    ):
+        """Changing the profiles directory must not leave a stale path on display."""
+        from ventulus.ui.pages.settings_page import SettingsPage
+
+        page = SettingsPage(state=app_state, settings_service=settings_service)
+        new_dir = tmp_path / "elsewhere"
+        page._handle_dir_change("profiles", str(new_dir))
+        assert str(new_dir) in page._search_dir_note.text()

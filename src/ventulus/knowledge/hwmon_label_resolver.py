@@ -1,0 +1,669 @@
+"""Hwmon header label resolver (A3).
+
+Multi-tier resolution for the human-readable label of a motherboard PWM
+header. Used when neither the user alias nor the daemon-supplied sysfs
+label produces a useful name — the it87 driver, in particular, does not
+expose ``pwmN_label`` / ``fanN_label`` files for most Gigabyte boards,
+so without this resolver the user sees ``pwm1`` etc. on the X870E AORUS
+MASTER instead of CPU_FAN / SYS_FAN1 / SYS_FAN2 …
+
+This is the **hwmon** slice of the global fan-name tier list in
+``docs/08_API_Integration_Contract.md`` (which also covers GPU-model and
+OpenFan-channel sources, DEC-227); the tiers below are the hwmon-only subset.
+
+Priority (callers should check 1 first):
+
+    1. ``app_settings.fan_aliases[fan_id]``           ← caller's job
+    2. ``HwmonHeader.label`` (daemon-supplied sysfs)  ← this module
+    3. ``/etc/sensors.d/*.conf`` and friends          ← this module
+    4. In-repo ``HWMON_LABEL_FALLBACK`` table          ← this module
+    5. raw sensor name (``pwmN``)                      ← this module
+
+Tier 2 lives here rather than in the caller because the daemon *synthesises*
+``pwmN`` when the chip exposes no label file, so "non-empty" does not mean
+"authoritative" — see :func:`is_placeholder_hwmon_label` (DEC-229).
+
+Reading ``/etc/sensors.d/*.conf`` is plain user-space file I/O, not
+hardware access — it does not violate the GUI ↔ daemon boundary.
+
+The libsensors parser is intentionally minimal: it recognises only the
+``chip "<glob>"`` block header, ``label <feature> "<text>"`` lines, and
+``ignore <feature>`` directives. Other libsensors features (``compute``,
+``set``, ``bus``) are ignored. This is enough to resolve the chip
+labels every Gigabyte / ASUS / MSI fan-header config in the wild
+actually carries, without us having to track the full libsensors
+grammar across releases.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import logging
+import re
+from dataclasses import dataclass
+from glob import glob as _glob
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+
+# ─── Fallback table ────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class BoardKey:
+    """Identifies a ``(vendor, board, chip)`` triple for fallback lookup.
+
+    Attributes:
+        vendor: DMI ``board_vendor`` exact match (empty = wildcard).
+        board_glob: ``fnmatch`` pattern against DMI ``board_name``
+            (empty = wildcard).
+        chip: hwmon chip name exact match (e.g. ``it8696``,
+            ``it87952``).
+    """
+
+    vendor: str
+    board_glob: str
+    chip: str
+
+
+@dataclass(frozen=True)
+class FallbackLabel:
+    """A board-specific label entry. ``verified=False`` entries display
+    with an ``(unverified)`` suffix per Decision 4-A — we are the first
+    Linux source of truth for this mapping and want to make that obvious
+    until users confirm by physically tracing fan cables."""
+
+    text: str
+    verified: bool
+
+    def display(self) -> str:
+        return self.text if self.verified else f"{self.text} (unverified)"
+
+
+# Label sets shared by two DMI spellings of one board (DEC-421). The match
+# below is an ANCHORED `fnmatchcase`, so a key must equal the board name the
+# firmware actually reports — and for these boards real logs show more than
+# one spelling (a "-CF" suffix, or an MSI "(MS-xxxx)" model number).
+_X470_GAMING_PRO_NCT6795: dict[str, FallbackLabel] = {
+    "pwm1": FallbackLabel("PUMP_FAN1", verified=True),
+    "pwm2": FallbackLabel("CPU_FAN1", verified=True),
+    "pwm3": FallbackLabel("SYS_FAN1", verified=True),
+    "pwm4": FallbackLabel("SYS_FAN2", verified=True),
+    "pwm5": FallbackLabel("SYS_FAN3", verified=True),
+    "pwm6": FallbackLabel("SYS_FAN4", verified=True),
+}
+_B550_VISION_D_IT8688: dict[str, FallbackLabel] = {
+    "pwm1": FallbackLabel("CPU_FAN", verified=True),
+    "pwm2": FallbackLabel("SYS_FAN1", verified=True),
+    "pwm3": FallbackLabel("SYS_FAN2", verified=True),
+    "pwm4": FallbackLabel("SYS_FAN3", verified=True),
+    "pwm5": FallbackLabel("CPU_OPT", verified=True),
+}
+_B550_VISION_D_IT8792: dict[str, FallbackLabel] = {
+    "pwm1": FallbackLabel("SYS_FAN5_PUMP", verified=True),
+    "pwm2": FallbackLabel("SYS_FAN6_PUMP", verified=True),
+    "pwm3": FallbackLabel("SYS_FAN4", verified=True),
+}
+
+HWMON_LABEL_FALLBACK: dict[BoardKey, dict[str, FallbackLabel]] = {
+    # ── Gigabyte X870E AORUS MASTER ────────────────────────────────
+    # IT8696E primary chip. Mapping per the frankcrawford/it87 SIV catalogue
+    # (`Sensors configs/Gigabyte/configs/gigabyte-it87-amd.conf`, SIV
+    # A008090A — the SIV this board reports, read on the project's own host),
+    # the owner-posted sensors.d config in frankcrawford/it87 issue #103
+    # (DEC-144) and the vendor manual's header list. Until 2026-09-24 this
+    # comment cited "bakman2 / nathan818fr" references; the first is generic
+    # instructions and the second an X570 AORUS MASTER config (DEC-421).
+    BoardKey(
+        vendor="Gigabyte Technology Co., Ltd.",
+        board_glob="X870E AORUS MASTER",
+        chip="it8696",
+    ): {
+        "pwm1": FallbackLabel("CPU_FAN", verified=True),
+        "pwm2": FallbackLabel("SYS_FAN1", verified=True),
+        "pwm3": FallbackLabel("SYS_FAN2", verified=True),
+        "pwm4": FallbackLabel("SYS_FAN3", verified=True),
+        "pwm5": FallbackLabel("CPU_OPT", verified=True),
+    },
+    # IT87952E secondary chip. DEC-144: aligned with the owner-reported
+    # mapping in frankcrawford/it87 issue #103 (sensors.d config posted
+    # 2026-04: fan1=SYS_FAN5_PUMP, fan2=SYS_FAN6_PUMP, fan3=SYS_FAN4 —
+    # the same ordering as the X570/X470/B550 IT8792E upstream configs).
+    # DEC-421 (2026-09-24): now corroborated by the it87 SIV catalogue (SIV
+    # A008090A: it87952 pwm1 SYS_FAN5_PUMP, pwm2 SYS_FAN6_PUMP, pwm3 SYS_FAN4),
+    # a second owner in #103, and LibreHardwareMonitor's same-SIV siblings.
+    # One source disagreed: an annotation in it87 PR #100's body orders them
+    # SYS_FAN4 / FAN5_PUMP / FAN6_PUMP, read with three identical fans at
+    # near-identical RPM, so it did not isolate a channel.
+    # DEC-444 (2026-09-28) settles it on the reference host: the only fan on
+    # this chip's headers is plugged into SYS_FAN4 (FAN5_PUMP and FAN6_PUMP
+    # are empty, owner-confirmed), and it reads on pwm3/fan3 (1038 RPM, the
+    # daemon driving pwm3) while pwm1 and pwm2 read 0 RPM. PR #100 puts
+    # FAN6_PUMP on pwm3, so it is refuted; every remaining source agrees. The
+    # pwm1/pwm2 order rests on those sources, not on this test (both headers
+    # were empty) — and both are PUMP labels, so the floor they earn is the
+    # same either way. Register row BRD-i, CLOSED.
+    BoardKey(
+        vendor="Gigabyte Technology Co., Ltd.",
+        board_glob="X870E AORUS MASTER",
+        chip="it87952",
+    ): {
+        "pwm1": FallbackLabel("SYS_FAN5_PUMP", verified=True),
+        "pwm2": FallbackLabel("SYS_FAN6_PUMP", verified=True),
+        "pwm3": FallbackLabel("SYS_FAN4", verified=True),
+    },
+    # ── DEC-105: AM4 400-series boards with upstream lm-sensors configs ─
+    # Each entry below is taken VERBATIM from a config file in
+    # https://github.com/lm-sensors/lm-sensors/tree/master/configs — we
+    # only ship the fallback for boards where there is an upstream config
+    # to defend the mapping. Other AM4 400-series boards rely on the
+    # libsensors parser to pick up the user's own /etc/sensors.d/ file or
+    # default to the raw pwmN identifier.
+    # ── Gigabyte X470 AORUS ULTRA GAMING ────────────────────────────
+    # Source: configs/Gigabyte/X470-AORUS-ULTRA-GAMING.conf
+    # Primary IT8686E at 0x0a40 (CPU_FAN, SYS_FAN1..3, CPU_OPT) and
+    # secondary IT8792E at 0x0a60 (SYS_FAN5_PUMP, SYS_FAN6_PUMP, SYS_FAN4).
+    # The glob carries a trailing `*` (DEC-421): real boards report
+    # "X470 AORUS ULTRA GAMING-CF" (three independent logs), which the bare
+    # name never matched — so these labels, the two PUMP ones included,
+    # never reached a user.
+    BoardKey(
+        vendor="Gigabyte Technology Co., Ltd.",
+        board_glob="X470 AORUS ULTRA GAMING*",
+        chip="it8686",
+    ): {
+        "pwm1": FallbackLabel("CPU_FAN", verified=True),
+        "pwm2": FallbackLabel("SYS_FAN1", verified=True),
+        "pwm3": FallbackLabel("SYS_FAN2", verified=True),
+        "pwm4": FallbackLabel("SYS_FAN3", verified=True),
+        "pwm5": FallbackLabel("CPU_OPT", verified=True),
+    },
+    BoardKey(
+        vendor="Gigabyte Technology Co., Ltd.",
+        board_glob="X470 AORUS ULTRA GAMING*",
+        chip="it8792",
+    ): {
+        "pwm1": FallbackLabel("SYS_FAN5_PUMP", verified=True),
+        "pwm2": FallbackLabel("SYS_FAN6_PUMP", verified=True),
+        "pwm3": FallbackLabel("SYS_FAN4", verified=True),
+    },
+    # ── MSI X470 GAMING PRO (MS-7B79) ───────────────────────────────
+    # Source: configs/MSI/MS_7B79_X470_GAMINGPRO.conf
+    # Chip: NCT6795D. Note: fan1 = PUMP_FAN1, fan2 = CPU_FAN1.
+    # DEC-421: MSI firmware reports the model number in the DMI name —
+    # "X470 GAMING PRO (MS-7B79)" — so the bare key never matched a real
+    # board and PUMP_FAN1 / CPU_FAN1 never fed the 30% floor. The real
+    # spelling is keyed first; the bare one is kept for any firmware that
+    # omits the suffix. No wildcard: "X470 GAMING PRO*" would also catch the
+    # X470 GAMING PRO CARBON (MS-7B78), a different board this config does
+    # not describe.
+    BoardKey(
+        vendor="Micro-Star International Co., Ltd.",
+        board_glob="X470 GAMING PRO (MS-7B79)",
+        chip="nct6795",
+    ): _X470_GAMING_PRO_NCT6795,
+    BoardKey(
+        vendor="Micro-Star International Co., Ltd.",
+        board_glob="X470 GAMING PRO",
+        chip="nct6795",
+    ): _X470_GAMING_PRO_NCT6795,
+    # ── MSI B450M MORTAR (MS-7B89) ──────────────────────────────────
+    # Source: configs/MSI/MS-7B89-B450M-MORTAR.conf
+    # Chip: NCT6797D. fan1 is ignored upstream; fan2-fan5 mapped.
+    # NCT6797D is the chip that the out-of-tree nct6687 driver
+    # mis-claims via ID 0xd450 — see DEC-105 collision warning.
+    BoardKey(
+        vendor="Micro-Star International Co., Ltd.",
+        board_glob="B450M MORTAR*",
+        chip="nct6797",
+    ): {
+        "pwm2": FallbackLabel("CPU 1", verified=True),
+        "pwm3": FallbackLabel("SYSTEM 1", verified=True),
+        "pwm4": FallbackLabel("SYSTEM 2", verified=True),
+        "pwm5": FallbackLabel("SYSTEM 3", verified=True),
+    },
+    # ── ASRock B450 Gaming ITX/AC ────────────────────────────────────
+    # Source: configs/ASRock/B450-Gaming-ITX-ac.conf
+    # Chip: NCT6792D (mainline kernel coverage).
+    # DEC-421: the firmware spells it "B450 Gaming-ITX/ac" (hyphen); the key
+    # accepts the hyphen or a space so the labels reach real boards.
+    BoardKey(
+        vendor="ASRock",
+        board_glob="B450 Gaming[- ]ITX/ac",
+        chip="nct6792",
+    ): {
+        "pwm1": FallbackLabel("CHA_FAN1", verified=True),
+        "pwm2": FallbackLabel("CPU_FAN1", verified=True),
+        "pwm3": FallbackLabel("CHA_FAN2", verified=True),
+    },
+    # ── DEC-106: AM4 500-series boards with upstream lm-sensors configs ─
+    # Same D-B.B1 discipline as DEC-105: adopt only where upstream gives a
+    # citable mapping. The libsensors convention is that `fanN_label` and
+    # `pwmN` address the same physical fan, so we translate `fanN` labels
+    # to `pwmN` keys at `verified=True` exactly as DEC-105 did.
+    # ── Gigabyte B550 VISION D (GA-B550-VISION-D) ──────────────────
+    # Source: configs/Gigabyte/GA-B550-VISION-D.conf
+    # Primary IT8688E + secondary IT8792E. (The config itself gives no port
+    # addresses — it globs `it8688-*` / `it8792-*`; an earlier comment here
+    # quoted 0x0a40 / 0x0a60 as if it did.)
+    # DEC-421: the config's own DMI line reads "B550 VISION D-CF", which the
+    # bare key never matched, so both spellings are keyed. The VISION D-P is
+    # deliberately NOT covered — a different board this config does not
+    # describe.
+    BoardKey(
+        vendor="Gigabyte Technology Co., Ltd.",
+        board_glob="B550 VISION D",
+        chip="it8688",
+    ): _B550_VISION_D_IT8688,
+    BoardKey(
+        vendor="Gigabyte Technology Co., Ltd.",
+        board_glob="B550 VISION D-CF",
+        chip="it8688",
+    ): _B550_VISION_D_IT8688,
+    BoardKey(
+        vendor="Gigabyte Technology Co., Ltd.",
+        board_glob="B550 VISION D",
+        chip="it8792",
+    ): _B550_VISION_D_IT8792,
+    BoardKey(
+        vendor="Gigabyte Technology Co., Ltd.",
+        board_glob="B550 VISION D-CF",
+        chip="it8792",
+    ): _B550_VISION_D_IT8792,
+    # ── Gigabyte B550M AORUS PRO (GA-B550M-AORUS-PRO) ───────────────
+    # Source: configs/Gigabyte/GA-B550M-AORUS-PRO.conf
+    # Single-chip variant — IT8688E only.
+    BoardKey(
+        vendor="Gigabyte Technology Co., Ltd.",
+        board_glob="B550M AORUS PRO*",
+        chip="it8688",
+    ): {
+        "pwm1": FallbackLabel("CPU_FAN", verified=True),
+        "pwm2": FallbackLabel("SYS_FAN1", verified=True),
+        "pwm3": FallbackLabel("SYS_FAN2", verified=True),
+        "pwm4": FallbackLabel("SYS_FAN3", verified=True),
+        "pwm5": FallbackLabel("CPU_OPT", verified=True),
+    },
+    # ── MSI X570-A PRO (MS-7C37) ────────────────────────────────────
+    # Source: configs/MSI/X570-A-Pro.conf
+    # Chip: NCT6797D — same chip family as the DEC-105 B450M MORTAR
+    # entry; the DEC-105 collision warning applies if `nct6687d` is
+    # also loaded on this board.
+    BoardKey(
+        vendor="Micro-Star International Co., Ltd.",
+        board_glob="X570-A PRO*",
+        chip="nct6797",
+    ): {
+        "pwm1": FallbackLabel("Pump", verified=True),
+        "pwm2": FallbackLabel("CPU Fan", verified=True),
+        "pwm3": FallbackLabel("System Fan 1", verified=True),
+        "pwm4": FallbackLabel("System Fan 2", verified=True),
+        "pwm5": FallbackLabel("System Fan 3", verified=True),
+        "pwm6": FallbackLabel("System Fan 4", verified=True),
+        "pwm7": FallbackLabel("PCH Fan", verified=True),
+    },
+    # ── DEC-110: Intel LGA1700 — ASRock Z690 Extreme ───────────────
+    # Source: configs/ASRock/Z690_Extreme.conf (verified upstream
+    # lm-sensors config — chip reported as nct6798-isa-02a0 even though
+    # the physical part is NCT6796D-E).
+    # Only Intel-era board with an upstream lm-sensors config covering
+    # the LGA1700+ generation as of 2026-Q2; other Intel Z690/Z790/Z890
+    # boards rely on the libsensors parser to pick up the user's own
+    # /etc/sensors.d/ file or default to the raw pwmN identifier.
+    BoardKey(
+        vendor="ASRock",
+        board_glob="Z690 Extreme",
+        chip="nct6798",
+    ): {
+        "pwm1": FallbackLabel("Chassis fan3", verified=True),
+        "pwm2": FallbackLabel("CPU fan1", verified=True),
+        "pwm3": FallbackLabel("CPU fan2", verified=True),
+        "pwm4": FallbackLabel("Chassis fan1", verified=True),
+        "pwm5": FallbackLabel("Chassis fan2", verified=True),
+        "pwm6": FallbackLabel("Chassis fan4", verified=True),
+        "pwm7": FallbackLabel("Chassis fan5", verified=True),
+    },
+}
+
+
+# ─── Libsensors config parser ──────────────────────────────────────────
+
+
+# Standard libsensors search locations (libsensors 3.x). 3.5/3.6 are the
+# canonical subdirs on most distros.
+LIBSENSORS_CONFIG_PATHS: list[str] = [
+    "/etc/sensors.conf",
+    "/etc/sensors3.conf",
+    "/etc/sensors.d/*.conf",
+    "/usr/share/sensors/*.conf",
+    "/usr/share/sensors/3.5/*.conf",
+    "/usr/share/sensors/3.6/*.conf",
+]
+
+
+@dataclass
+class LibsensorsChipLabels:
+    """Parsed labels from a single libsensors ``chip "<glob>" { … }`` block."""
+
+    chip_glob: str
+    labels: dict[str, str]
+    ignored: set[str]
+
+
+# Top-level chip line. We keep the rest of the line for multi-glob splitting.
+_CHIP_RE = re.compile(r"^\s*chip\s+(.+?)\s*$")
+# Label line: label <feature> "<text>"
+_LABEL_RE = re.compile(r'^\s*label\s+(\S+)\s+"(.+)"\s*$')
+# Ignore line: ignore <feature>
+_IGNORE_RE = re.compile(r"^\s*ignore\s+(\S+)\s*$")
+
+
+def parse_libsensors_config(text: str) -> list[LibsensorsChipLabels]:
+    """Parse the chip-block label entries out of a libsensors config.
+
+    Returns one ``LibsensorsChipLabels`` per chip glob declared (a single
+    config line may declare multiple chips that share the rest of the
+    block's label/ignore directives).
+    """
+    chips: list[LibsensorsChipLabels] = []
+    current_globs: list[str] = []
+    current_labels: dict[str, str] = {}
+    current_ignored: set[str] = set()
+
+    def flush() -> None:
+        nonlocal current_labels, current_ignored
+        for glob in current_globs:
+            chips.append(
+                LibsensorsChipLabels(
+                    chip_glob=glob,
+                    labels=dict(current_labels),
+                    ignored=set(current_ignored),
+                )
+            )
+        current_labels = {}
+        current_ignored = set()
+
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        m = _CHIP_RE.match(line)
+        if m:
+            flush()
+            current_globs = _split_chip_globs(m.group(1))
+            continue
+        m = _LABEL_RE.match(line)
+        if m and current_globs:
+            current_labels[m.group(1)] = _unescape(m.group(2))
+            continue
+        m = _IGNORE_RE.match(line)
+        if m and current_globs:
+            current_ignored.add(m.group(1))
+            continue
+        # Anything else (compute, set, bus, brackets) — out of scope.
+
+    flush()
+    return chips
+
+
+def _split_chip_globs(text: str) -> list[str]:
+    """Pull every quoted glob out of a chip line. Multiple globs may
+    appear on one line, each in its own pair of quotes."""
+    out: list[str] = []
+    in_quote = False
+    buf: list[str] = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            if in_quote:
+                out.append("".join(buf))
+                buf = []
+                in_quote = False
+            else:
+                in_quote = True
+            i += 1
+            continue
+        if in_quote:
+            if c == "\\" and i + 1 < len(text):
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            buf.append(c)
+        i += 1
+    return out
+
+
+def _unescape(text: str) -> str:
+    """Drop ``\\<x>`` escapes, keeping ``<x>``. Covers ``\\"`` and ``\\\\``,
+    which is everything libsensors actually emits."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            out.append(text[i + 1])
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+# ─── Cache ─────────────────────────────────────────────────────────────
+
+
+# Module-level cache so the parse runs once per session. Tests and the
+# eventual Diagnostics rescan path call ``clear_libsensors_cache()`` to
+# force a re-read.
+_libsensors_cache: list[LibsensorsChipLabels] | None = None
+
+
+def load_libsensors_configs(
+    paths: list[str] | None = None, *, force: bool = False
+) -> list[LibsensorsChipLabels]:
+    """Load and parse all installed libsensors configs.
+
+    Args:
+        paths: Override the default search list (used by tests). ``None``
+            reads :data:`LIBSENSORS_CONFIG_PATHS`; ``[]`` reads nothing.
+        force: Re-read even if cached.
+
+    Returns:
+        Concatenated parsed chip blocks across all readable files.
+        I/O and parse errors log a warning and skip the offending
+        file — never fatal.
+    """
+    global _libsensors_cache
+    if paths is None and _libsensors_cache is not None and not force:
+        return _libsensors_cache
+    chips: list[LibsensorsChipLabels] = []
+    # `BRD-p`: only ``None`` means "the system defaults". An empty list is a
+    # caller saying "no files", and `paths or …` used to read the host's
+    # `/etc/sensors.d` for it, because ``[]`` is falsy.
+    search_paths = paths if paths is not None else LIBSENSORS_CONFIG_PATHS
+    for pattern in search_paths:
+        for path in _expand_glob(pattern):
+            try:
+                text = Path(path).read_text(encoding="utf-8")
+            except OSError as e:
+                log.warning("Could not read sensors config %s: %s", path, e)
+                continue
+            try:
+                chips.extend(parse_libsensors_config(text))
+            except Exception as e:  # pragma: no cover — defensive
+                log.warning("Failed to parse %s: %s", path, e)
+                continue
+    if paths is None:
+        _libsensors_cache = chips
+    return chips
+
+
+def clear_libsensors_cache() -> None:
+    global _libsensors_cache
+    _libsensors_cache = None
+
+
+def _expand_glob(pattern: str) -> list[str]:
+    if "*" in pattern or "?" in pattern:
+        return sorted(_glob(pattern))
+    return [pattern] if Path(pattern).is_file() else []
+
+
+# ─── Lookup helpers ────────────────────────────────────────────────────
+
+
+def _match_chip_glob(chip_glob: str, chip_name: str) -> bool:
+    """Match a libsensors chip identifier against our hwmon chip name.
+
+    libsensors chip identifiers are formatted ``<name>-<bus>-<addr>``
+    (e.g. ``it8688-isa-0a40``, ``nct6798-isa-0290``). For label
+    resolution we only care about the name component — matching on
+    bus + addr would force every user to author a per-machine config
+    and adds nothing for a same-chip-different-address case.
+    """
+    name_part = chip_glob.split("-", 1)[0]
+    return fnmatch.fnmatchcase(chip_name, name_part)
+
+
+def resolve_label_from_libsensors(
+    chip_name: str,
+    sensor_name: str,
+    *,
+    paths: list[str] | None = None,
+) -> str | None:
+    """Search installed libsensors configs for ``label <sensor> "<text>"``.
+
+    Returns ``None`` if no chip block matches, or if a matching block
+    explicitly ignored ``sensor_name``.
+    """
+    for chip in load_libsensors_configs(paths=paths):
+        if not _match_chip_glob(chip.chip_glob, chip_name):
+            continue
+        if sensor_name in chip.ignored:
+            return None
+        label = chip.labels.get(sensor_name)
+        if label:
+            return label
+    return None
+
+
+def resolve_label_from_fallback(
+    *,
+    vendor: str,
+    board_name: str,
+    chip_name: str,
+    sensor_name: str,
+) -> str | None:
+    """Look up a label in :data:`HWMON_LABEL_FALLBACK`.
+
+    Returns the display-formatted text (``(unverified)`` suffix
+    appended for unverified entries), or ``None`` if no entry matches.
+    """
+    for key, mapping in HWMON_LABEL_FALLBACK.items():
+        if key.vendor and vendor != key.vendor:
+            continue
+        if key.board_glob and not fnmatch.fnmatchcase(board_name, key.board_glob):
+            continue
+        if chip_name != key.chip:
+            continue
+        entry = mapping.get(sensor_name)
+        if entry is not None:
+            return entry.display()
+    return None
+
+
+def is_placeholder_hwmon_label(label: str, pwm_index: int) -> bool:
+    """Is ``label`` the daemon's synthesised stand-in rather than a real name?
+
+    The daemon's ``read_label`` (``hwmon/pwm_discovery.rs``) tries
+    ``pwm{N}_label``, then ``fan{N}_label``, and when neither file exists
+    **synthesises** ``format!("pwm{N}")`` — so ``HwmonHeader.label`` is never
+    empty and a caller treating "non-empty" as "authoritative" short-circuits
+    the tiers below it (DEC-229). On the X870E AORUS MASTER / IT8696E every
+    header arrives as ``pwm1``…``pwm5`` while the in-repo table knows the board
+    and would answer ``CPU_FAN``.
+
+    The predicate is deliberately an **exact** match on the header's own
+    ``pwm{index}`` token, not a "looks generic" heuristic:
+
+    * the daemon's synthesis is exact, so nothing wider is needed;
+    * ``pwm[1-*]_label`` is not a documented hwmon attribute at all
+      (docs.kernel.org/hwmon/sysfs-interface.html — only ``fan[1-*]_label``
+      is), so a driver reporting a real ``fanN_label`` of literally ``pwmN``
+      is not a realistic case;
+    * a wider rule would discard genuine board labels, which is the worse
+      failure — a wrong name outranks a merely unhelpful one.
+
+    ``pwm2`` on header 1 is therefore *not* a placeholder: it does not restate
+    that header's own id, so it is information we did not otherwise have.
+    """
+    return bool(label) and label == f"pwm{pwm_index}"
+
+
+def resolve_hwmon_header_label(
+    *,
+    sysfs_label: str,
+    chip_name: str,
+    sysfs_chip_name: str,
+    pwm_index: int,
+    board_vendor: str = "",
+    board_name: str = "",
+    sensors_paths: list[str] | None = None,
+) -> str:
+    """Resolve the best display label for a hwmon PWM header.
+
+    The caller is responsible for the user-alias check (priority 1).
+    This function covers priorities 2-5:
+
+        2. daemon-supplied ``sysfs_label`` (may be empty *or* a synthesised
+           ``pwmN`` placeholder — see :func:`is_placeholder_hwmon_label`)
+        3. libsensors config lookup, ``pwmN`` and ``fanN`` keys
+        4. in-repo fallback table
+        5. raw ``pwmN`` as the last resort
+
+    Args:
+        sysfs_label: ``HwmonHeader.label`` from the daemon (passes
+            through when non-empty and not a placeholder).
+        chip_name: ``HwmonHeader.chip_name`` (e.g. ``it8696``) — canonical;
+            the in-repo fallback table is keyed by it.
+        sysfs_chip_name: ``HwmonHeader.sysfs_chip_name`` — the name as sysfs
+            published it (``it8696_a008090a`` on an it87 v2.0 Gigabyte chip,
+            DEC-442). **libsensors blocks are matched against this and nothing
+            else**: upstream writes them against the suffixed name, exactly as
+            ``sensors`` itself matches, and matching them against the canonical
+            name would apply another board's labels. ``""`` (an older daemon)
+            falls back to *chip_name*. Required, so a caller cannot silently
+            match on the wrong spelling.
+        pwm_index: ``HwmonHeader.pwm_index`` (the N in ``pwmN``).
+        board_vendor: DMI ``board_vendor`` from
+            ``/diagnostics/hardware``. Empty ⇒ skip vendor match.
+        board_name: DMI ``board_name``. Empty ⇒ skip name match.
+        sensors_paths: Override libsensors search paths (tests only).
+    """
+    if sysfs_label and not is_placeholder_hwmon_label(sysfs_label, pwm_index):
+        return sysfs_label
+    pwm_key = f"pwm{pwm_index}"
+    fan_key = f"fan{pwm_index}"
+    # Tier 3 — libsensors. Communities almost always write fan-N labels
+    # rather than pwm-N, so check fan first.
+    sensors_chip = sysfs_chip_name or chip_name
+    label = resolve_label_from_libsensors(
+        sensors_chip, fan_key, paths=sensors_paths
+    ) or resolve_label_from_libsensors(sensors_chip, pwm_key, paths=sensors_paths)
+    if label:
+        return label
+    # Tier 4 — fallback table. Its keys are exclusively ``pwm{N}`` (unlike the
+    # libsensors tier, communities never key this in-repo table by ``fan{N}``),
+    # so a ``fan{N}`` lookup here can never match — query ``pwm{N}`` only. If a
+    # future table entry is ever keyed by ``fan{N}``, restore the fan-first probe.
+    label = resolve_label_from_fallback(
+        vendor=board_vendor,
+        board_name=board_name,
+        chip_name=chip_name,
+        sensor_name=pwm_key,
+    )
+    if label:
+        return label
+    return pwm_key

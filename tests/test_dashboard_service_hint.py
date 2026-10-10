@@ -1,0 +1,173 @@
+"""Tests for the dashboard's first-launch service-not-enabled hint.
+
+When a user installs both packages, never enables the daemon, and starts the
+GUI, the dashboard's disconnected state should surface an actionable hint
+with the enable command. This is the soft-landing for users who scrolled
+past the post_install message.
+
+The hint must:
+- Appear when ``check_daemon_service_state`` reports
+  ``installed_but_not_enabled``.
+- Stay hidden when the service is enabled or when the probe was unreliable.
+- Stay hidden when the dashboard is in CONNECTED state.
+- Have selectable command text and a Copy button that places ``ENABLE_COMMAND``
+  on the clipboard.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
+
+from ventulus.api.models import ConnectionState
+from ventulus.services.daemon_service_check import (
+    ENABLE_COMMAND,
+    DaemonServiceState,
+)
+from ventulus.ui.pages.dashboard_page import DashboardPage
+
+
+def _state(*, enabled: bool, active: bool, can_check: bool = True) -> DaemonServiceState:
+    return DaemonServiceState(
+        service_enabled=enabled,
+        service_active=active,
+        can_check=can_check,
+    )
+
+
+def _all_label_text(page: DashboardPage) -> str:
+    # 277-e: skip the hidden `*_A11yLabel` proxies `name_value_control`
+    # parents to a control (DEC-276). They carry real text but are
+    # invisible, so a future "this text must NOT appear" assertion on this
+    # helper would be checking text no user can see and could pass or fail
+    # for the wrong reason.
+    return "\n".join(
+        lab.text()
+        for lab in page.findChildren(QLabel)
+        if not lab.objectName().endswith("_A11yLabel")
+    )
+
+
+class TestServiceHintVisibility:
+    def test_hidden_initially(self, qtbot, app_state):
+        page = DashboardPage(state=app_state)
+        qtbot.addWidget(page)
+        frame = page.findChild(QFrame, "Dashboard_Frame_serviceHint")
+        assert frame is not None
+        assert frame.isVisible() is False
+
+    def test_visible_when_disconnected_and_service_disabled(self, qtbot, app_state):
+        page = DashboardPage(state=app_state)
+        qtbot.addWidget(page)
+        page.show()  # the visibility check needs the widget to be realized
+        with patch(
+            "ventulus.ui.pages.dashboard_page.check_daemon_service_state",
+            return_value=_state(enabled=False, active=False),
+        ):
+            page._on_connection_changed(ConnectionState.DISCONNECTED)
+        frame = page.findChild(QFrame, "Dashboard_Frame_serviceHint")
+        assert frame is not None
+        assert frame.isVisible() is True
+
+    def test_hidden_when_service_already_enabled(self, qtbot, app_state):
+        page = DashboardPage(state=app_state)
+        qtbot.addWidget(page)
+        page.show()
+        with patch(
+            "ventulus.ui.pages.dashboard_page.check_daemon_service_state",
+            return_value=_state(enabled=True, active=True),
+        ):
+            page._on_connection_changed(ConnectionState.DISCONNECTED)
+        frame = page.findChild(QFrame, "Dashboard_Frame_serviceHint")
+        assert frame.isVisible() is False
+
+    def test_hidden_when_probe_unreliable(self, qtbot, app_state):
+        # No systemctl on path / probe failed → don't show; misleading hint
+        # is worse than no hint.
+        page = DashboardPage(state=app_state)
+        qtbot.addWidget(page)
+        page.show()
+        with patch(
+            "ventulus.ui.pages.dashboard_page.check_daemon_service_state",
+            return_value=_state(enabled=False, active=False, can_check=False),
+        ):
+            page._on_connection_changed(ConnectionState.DISCONNECTED)
+        frame = page.findChild(QFrame, "Dashboard_Frame_serviceHint")
+        assert frame.isVisible() is False
+
+    def test_probe_exception_does_not_crash_ui(self, qtbot, app_state):
+        # Defensive: any unexpected exception inside the check must not
+        # propagate to the Qt event loop. We hide the hint and continue.
+        page = DashboardPage(state=app_state)
+        qtbot.addWidget(page)
+        page.show()
+        with patch(
+            "ventulus.ui.pages.dashboard_page.check_daemon_service_state",
+            side_effect=RuntimeError("kaboom"),
+        ):
+            page._on_connection_changed(ConnectionState.DISCONNECTED)
+        frame = page.findChild(QFrame, "Dashboard_Frame_serviceHint")
+        assert frame.isVisible() is False
+
+
+class TestEnableCommandCopy:
+    def test_copy_button_writes_command_to_clipboard(self, qtbot, app_state):
+        page = DashboardPage(state=app_state)
+        qtbot.addWidget(page)
+        page.show()
+        # Clear clipboard before the test to avoid contamination.
+        clipboard = QApplication.clipboard()
+        clipboard.clear()
+
+        btn = page.findChild(QPushButton, "Dashboard_Btn_copyEnableCommand")
+        assert btn is not None
+        btn.click()
+        assert clipboard.text() == ENABLE_COMMAND
+
+    def test_command_label_shows_enable_command(self, qtbot, app_state):
+        page = DashboardPage(state=app_state)
+        qtbot.addWidget(page)
+        label = page.findChild(QLabel, "Dashboard_Label_enableCommand")
+        assert label is not None
+        assert label.text() == ENABLE_COMMAND
+
+
+class TestDashboardCopyText:
+    def test_no_hardware_state_says_no_serial_group_is_needed(self, qtbot, app_state):
+        # DEC-438 (DC-bt(k), superseding DEC-145's group wording): the daemon
+        # runs as root, so no serial group gates it on any distribution — the
+        # unit's DeviceAllow= list (ttyACM/ttyUSB) is the only limit. The hint
+        # used to send Debian/Ubuntu users after a 'dialout' drop-in that did
+        # nothing, pointing at daemon docs that now say so.
+        page = DashboardPage(state=app_state)
+        qtbot.addWidget(page)
+        text = _all_label_text(page)
+        # Presence first: the OpenFan item is on the page at all.
+        assert "OpenFan controller" in text
+        assert "as root" in text
+        assert "/dev/ttyACM*" in text and "/dev/ttyUSB*" in text
+        assert "dialout" not in text
+        assert "uucp" not in text
+
+    def test_no_hardware_state_routes_to_readiness_report(self, qtbot, app_state):
+        # DEC-145: the most common cause of "no hardware" is a missing
+        # Super-I/O kernel module, so the empty state must route users to the
+        # Hardware page's readiness report rather than serial-group surgery.
+        # (The retired "Diagnostics -> Troubleshooting / Refresh Hardware
+        # Diagnostics" wording went with the redesign — Phase 2, v2.23.0.)
+        page = DashboardPage(state=app_state)
+        qtbot.addWidget(page)
+        text = _all_label_text(page)
+        assert "Hardware page" in text
+        assert "readiness report" in text
+
+    def test_no_hardware_state_drops_user_directed_serial_advice(self, qtbot, app_state):
+        # DEC-145 regression: the old copy told the *user* to verify their
+        # own serial-group membership — irrelevant, since the GUI talks to a
+        # 0666 socket (DEC-049) and the daemon (root, limited by the unit's
+        # DeviceAllow=) owns serial access.
+        page = DashboardPage(state=app_state)
+        qtbot.addWidget(page)
+        text = _all_label_text(page)
+        assert "Verify serial-port group membership" not in text

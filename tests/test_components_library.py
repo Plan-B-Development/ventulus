@@ -1,0 +1,261 @@
+"""DEC-208: shared component library — badges, buttons, cards, section header,
+dense table, segmented control, and the modal-dialog base.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from PySide6.QtWidgets import QLabel, QPushButton, QTableWidget, QVBoxLayout, QWidget
+
+from ventulus.ui.components.badges import StatusPill, pill_class_for
+from ventulus.ui.components.buttons import make_button
+from ventulus.ui.components.cards import Card, ContentSizedCard, SectionHeader
+from ventulus.ui.components.dialog import ModalDialog
+from ventulus.ui.components.tables import apply_dense_table
+
+# ── badges ──
+
+
+def test_pill_class_map():
+    assert pill_class_for("ok") == "Pill_success"
+    assert pill_class_for("warning") == "Pill_warning"
+    assert pill_class_for("critical") == "Pill_critical"
+    assert pill_class_for("info") == "Pill_info"
+    assert pill_class_for("anything-else") == "Pill_neutral"
+
+
+def test_status_pill_is_uppercase_and_tracks_state(qtbot):
+    pill = StatusPill("fresh", "ok")
+    qtbot.addWidget(pill)
+    assert pill.text() == "FRESH"
+    assert pill.property("class") == "Pill_success"
+    pill.set_state("critical")
+    assert pill.state() == "critical"
+    assert pill.property("class") == "Pill_critical"
+
+
+def test_status_pill_object_name_param(qtbot):
+    # Matches the make_button/RadialGauge/SectionHeader convention: default keeps
+    # the shared name; a caller with a meaningful single instance sets a unique
+    # one so reused pills don't collide on a hardcoded objectName.
+    default = StatusPill("x", "ok")
+    qtbot.addWidget(default)
+    assert default.objectName() == "StatusPill"
+    named = StatusPill("x", "ok", object_name="Foo_Pill_bar")
+    qtbot.addWidget(named)
+    assert named.objectName() == "Foo_Pill_bar"
+
+
+def test_status_pill_unique_names_are_separately_findable(qtbot):
+    # The point of the param: two pills under one parent are each reachable by
+    # name — a hardcoded name collides and findChild returns only the first.
+    # Mirrors the hardware_page per-item pills.
+    from PySide6.QtWidgets import QVBoxLayout
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    lay = QVBoxLayout(parent)
+    a = StatusPill("a", "ok", object_name="Foo_Pill_a")
+    b = StatusPill("b", "warning", object_name="Foo_Pill_b")
+    lay.addWidget(a)
+    lay.addWidget(b)
+    assert parent.findChild(StatusPill, "Foo_Pill_a") is a
+    assert parent.findChild(StatusPill, "Foo_Pill_b") is b
+
+
+# ── buttons ──
+
+
+def test_make_button_sets_variant_and_objectname(qtbot):
+    btn = make_button("Save", "primary", object_name="MyBtn")
+    qtbot.addWidget(btn)
+    assert isinstance(btn, QPushButton)
+    assert btn.property("variant") == "primary"
+    assert btn.objectName() == "MyBtn"
+
+
+def test_make_button_unknown_variant_is_ignored(qtbot):
+    btn = make_button("X", "bogus")
+    qtbot.addWidget(btn)
+    assert btn.property("variant") is None
+
+
+# ── cards + section header ──
+
+
+def test_card_class(qtbot):
+    card = Card()
+    qtbot.addWidget(card)
+    assert card.property("class") == "Card"
+
+
+# ── ContentSizedCard (the word-wrap clip) ──
+
+_WRAPPY = "sustained interference on this header " * 12
+
+
+def _card_of_wrapped_text(cls, qtbot, width: int):
+    card = cls()
+    layout = QVBoxLayout(card)
+    label = QLabel(_WRAPPY)
+    label.setWordWrap(True)
+    layout.addWidget(label)
+    qtbot.addWidget(card)
+    card.resize(width, 40)
+    return card
+
+
+def test_content_sized_card_reports_the_height_its_wrapped_text_needs(qtbot):
+    sized = _card_of_wrapped_text(ContentSizedCard, qtbot, 150)
+    needed = sized.layout().totalHeightForWidth(150)
+    assert needed > 0
+    assert sized.minimumSizeHint().height() >= needed
+    # The plain Card is the control: it under-reports, which is the clip this
+    # primitive exists to stop. Without this half the test could pass against a
+    # no-op override.
+    plain = _card_of_wrapped_text(Card, qtbot, 150)
+    assert plain.minimumSizeHint().height() < needed
+
+
+def test_content_sized_card_needs_less_height_as_it_gets_wider(qtbot):
+    narrow = _card_of_wrapped_text(ContentSizedCard, qtbot, 150)
+    wide = _card_of_wrapped_text(ContentSizedCard, qtbot, 600)
+    assert narrow.minimumSizeHint().height() > wide.minimumSizeHint().height()
+
+
+def test_content_sized_card_is_safe_before_it_has_a_layout_or_a_width(qtbot):
+    bare = ContentSizedCard()
+    qtbot.addWidget(bare)
+    assert bare.minimumSizeHint() == Card().minimumSizeHint()
+    unsized = ContentSizedCard()
+    QVBoxLayout(unsized).addWidget(QLabel("x"))
+    qtbot.addWidget(unsized)
+    assert unsized.minimumSizeHint().height() >= 0
+
+
+def test_card_takes_an_object_name_like_every_other_shared_primitive(qtbot):
+    """`SSN-j`: ``Card`` was the one shared primitive taking no ``object_name``.
+
+    The project rulebook § GUI component standard: "Every shared component takes a
+    settable ``object_name`` … Match the ``RadialGauge``/``SectionHeader``/
+    ``make_button`` parameter shape."
+    """
+    card = Card(object_name="Card_underTest")
+    qtbot.addWidget(card)
+    assert card.objectName() == "Card_underTest"
+    # `.Card` is a QSS *class* selector matched off the property, not off the
+    # objectName — a new parameter must not displace it.
+    assert card.property("class") == "Card"
+
+    # Omitted, it leaves Qt's default empty name rather than stringifying None.
+    anon = Card()
+    qtbot.addWidget(anon)
+    assert anon.objectName() == ""
+
+    # ContentSizedCard inherits the parameter; it needs no constructor of its own.
+    sized = ContentSizedCard(object_name="ContentSizedCard_underTest")
+    qtbot.addWidget(sized)
+    assert sized.objectName() == "ContentSizedCard_underTest"
+    assert sized.property("class") == "Card"
+
+
+_CARD_CTOR = re.compile(r"^(\s*)(\w+) = (?:ContentSized)?Card\(\s*\)\s*$")
+
+
+def test_no_production_card_is_still_named_after_construction():
+    """The sweep half of `SSN-j`, and what keeps it swept.
+
+    The runtime test above proves the parameter works; it cannot prove any call
+    site uses it (the project rulebook: an AST lint proves the call was written, not that
+    it worked — keep both kinds). This reads the source, so re-rolling the old
+    ``Card()`` + ``setObjectName(...)`` pattern on a new page fails here rather
+    than in the next audit. An anonymous ``Card()`` that is never named is not
+    an offender; only the two-step is.
+    """
+    src = Path(__file__).resolve().parent.parent / "src" / "ventulus"
+    offenders: list[str] = []
+    for path in sorted(src.rglob("*.py")):
+        lines = path.read_text().splitlines()
+        for i, line in enumerate(lines):
+            m = _CARD_CTOR.match(line)
+            if m is None:
+                continue
+            named = re.compile(rf"^\s*{re.escape(m.group(2))}\.setObjectName\(")
+            if any(named.match(w) for w in lines[i + 1 : i + 5]):
+                offenders.append(f"{path.relative_to(src)}:{i + 1}")
+    assert offenders == [], (
+        "Card now takes object_name=... — pass it at construction rather than "
+        f"calling setObjectName afterwards (SSN-j): {offenders}"
+    )
+
+
+def test_section_header(qtbot):
+    header = SectionHeader("Fan Array")
+    qtbot.addWidget(header)
+    assert header.title() == "FAN ARRAY"
+    assert header.objectName() == "SectionHeader_FanArray"
+
+
+def test_section_header_default_lead_is_bar(qtbot):
+    from PySide6.QtWidgets import QFrame
+
+    header = SectionHeader("Fan Array")
+    qtbot.addWidget(header)
+    assert isinstance(header._bar, QFrame)
+    assert header._bar.property("class") == "SectionBar"
+
+
+def test_section_header_step_badge(qtbot):
+    """DEC-233: a numbered step replaces the plain bar with a filled badge."""
+    from PySide6.QtWidgets import QLabel
+
+    header = SectionHeader("Assign Roles", step=1)
+    qtbot.addWidget(header)
+    assert isinstance(header._bar, QLabel)
+    assert header._bar.text() == "1"
+    assert header._bar.property("class") == "StepBadge"
+
+
+# ── dense table ──
+
+
+def test_apply_dense_table(qtbot):
+    table = QTableWidget(2, 3)
+    qtbot.addWidget(table)
+    apply_dense_table(table)
+    assert table.property("class") == "DenseTable"
+    assert not table.showGrid()
+    assert table.verticalHeader().isHidden()
+
+
+# ── modal dialog ──
+
+
+def test_modal_dialog_structure(qtbot):
+    dlg = ModalDialog("Edit Role")
+    qtbot.addWidget(dlg)
+    assert dlg.objectName() == "ModalDialog"
+    save = dlg.add_footer_button("Save", "primary", object_name="Dlg_Save")
+    assert save.property("variant") == "primary"
+    assert save.objectName() == "Dlg_Save"
+    body = QWidget()
+    dlg.body_layout().addWidget(body)
+    assert body.parent() is dlg._body
+
+
+def test_modal_dialog_scrim_lifecycle(qtbot):
+    # Exercise scrim create/destroy directly — showing a modal QDialog under the
+    # offscreen platform is exactly what the autouse modal guard exists to avoid.
+    host = QWidget()
+    host.resize(400, 300)
+    qtbot.addWidget(host)
+    dlg = ModalDialog("Edit", parent=host)
+    qtbot.addWidget(dlg)
+    assert dlg._scrim is None
+    dlg._ensure_scrim()
+    assert dlg._scrim is not None  # veil created over the parent window
+    assert dlg._scrim.objectName() == "ModalScrim"
+    dlg._remove_scrim()
+    assert dlg._scrim is None

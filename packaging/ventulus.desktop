@@ -1,0 +1,13 @@
+[Desktop Entry]
+# Version of the freedesktop Desktop Entry Specification this file targets —
+# NOT the application version.
+Version=1.0
+Type=Application
+Name=Ventulus
+Comment=Desktop fan control GUI for the Ventulus daemon
+Exec=ventulus
+Icon=ventulus
+Terminal=false
+Categories=System;Settings;Monitor;HardwareSettings;
+Keywords=fan;cooling;temperature;hwmon;
+StartupWMClass=ventulus

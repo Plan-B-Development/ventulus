@@ -1,0 +1,365 @@
+"""Dashboard fan-card wiring and reconciliation (DEC-222).
+
+Covers the page-level behaviour the pure VM tests cannot: that cards are built
+from live state, reconciled in place at poll rate rather than rebuilt, cleared on
+disconnect, and that Edit routes to the Controls page.
+"""
+
+from __future__ import annotations
+
+from ventulus.api.models import ConnectionState, FanReading
+from ventulus.services.profile_service import (
+    ControlMember,
+    CurveConfig,
+    CurvePoint,
+    LogicalControl,
+)
+from ventulus.ui.pages.dashboard_page import DashboardPage
+from ventulus.ui.widgets.fan_control_card import FanControlCard
+
+
+def _fan(fan_id, rpm=1200, pwm=45, source="openfan"):
+    return FanReading(id=fan_id, source=source, rpm=rpm, last_commanded_pwm=pwm, age_ms=100)
+
+
+def _layout_order(page) -> list[str]:
+    """Card keys in the order the flow layout will actually paint them."""
+    layout = page._fan_cards_layout
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    by_widget = {card: key for key, card in page._fan_cards.items()}
+    return [by_widget[w] for w in widgets if w in by_widget]
+
+
+def _page(qtbot, state, **kw):
+    page = DashboardPage(state=state, **kw)
+    qtbot.addWidget(page)
+    return page
+
+
+def _one_control(profile_service, member="openfan:ch00", cid="c1"):
+    """Give the active profile a single control owning ``member``.
+
+    Since DEC-356 a card exists only for a control with a live member, so a
+    card-level test needs a control — there is no longer an Unassigned pseudo-card
+    to stand in for one. Returns the service so it can be passed inline.
+    """
+    profile_service.active_profile.controls = [
+        LogicalControl(
+            id=cid, name="Chassis", members=[ControlMember(source="openfan", member_id=member)]
+        )
+    ]
+    return profile_service
+
+
+class TestCardsFromState:
+    def test_no_profile_renders_no_cards(self, qtbot, app_state):
+        """DEC-356: controllable fans nothing is driving get no card. This was one
+        pooled "Unassigned" card; the Controls page owns assigning them and counts
+        them on its "Unassigned Fans (N)" button (DEC-233)."""
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state)
+        app_state.set_fans([_fan("openfan:ch00"), _fan("openfan:ch01")])
+        assert page._fan_cards == {}
+        assert page._fan_cards_layout.count() == 0
+
+    def test_a_live_control_does_render(self, qtbot, app_state, profile_service):
+        """The opposite branch of the test above — without it a page that rendered
+        nothing at all would pass."""
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=_one_control(profile_service))
+        app_state.set_fans([_fan("openfan:ch00")])
+        card = page._fan_cards["c1"]
+        assert isinstance(card, FanControlCard)
+        assert card._count.text() == "1 fan"
+
+    def test_header_counts_real_controls_only(self, qtbot, app_state, profile_service):
+        """A read-only fan card is NOT a control — reporting it as one would
+        overstate how much of the system is actually under curve control."""
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=_one_control(profile_service))
+        app_state.set_fans(
+            [_fan("openfan:ch00"), _fan("nvidia_gpu:a", pwm=None, source="nvidia_gpu")]
+        )
+        assert len(page._fan_cards) == 2  # the control + the read-only fan
+        assert page._fan_count_label.text() == "1 control · 2 fans"
+
+    def test_no_cards_and_no_empty_state_when_nothing_is_driven(self, qtbot, app_state):
+        """DEC-356 removed the empty-state label with the Unassigned card. The
+        band is left genuinely empty: "No controllable fans detected." was false
+        in the case it fired most often — fans present, none assigned."""
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state)
+        app_state.set_fans([])
+        assert page._fan_cards == {}
+        assert page._fan_cards_layout.count() == 0
+        assert not hasattr(page, "_fan_cards_empty")
+
+    def test_cards_follow_the_active_profile(self, qtbot, app_state, profile_service):
+        curve = CurveConfig(id="cv", name="C", sensor_id="s0", points=[CurvePoint(30, 20)])
+        control = LogicalControl(
+            id="c1",
+            name="Chassis",
+            curve_id="cv",
+            members=[ControlMember(source="openfan", member_id="openfan:ch00")],
+        )
+        active = profile_service.active_profile
+        active.controls = [control]
+        active.curves = [curve]
+
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=profile_service)
+        app_state.set_fans([_fan("openfan:ch00")])
+
+        assert "c1" in page._fan_cards
+        assert page._fan_cards["c1"]._name.text() == "Chassis"
+
+    def test_sensor_values_reach_the_card_temp_column(self, qtbot, app_state, profile_service):
+        """The page must pass sensor_values into the VM builder. If that argument
+        were dropped, TEMP would silently read "—" on every card forever and only
+        a pure-layer test would still pass."""
+        from ventulus.api.models import SensorReading
+
+        curve = CurveConfig(id="cv", name="C", sensor_id="s0", points=[CurvePoint(30, 20)])
+        control = LogicalControl(
+            id="c1",
+            name="Chassis",
+            curve_id="cv",
+            members=[ControlMember(source="openfan", member_id="openfan:ch00")],
+        )
+        active = profile_service.active_profile
+        active.controls = [control]
+        active.curves = [curve]
+
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=profile_service)
+        app_state.set_sensors(
+            [SensorReading(id="s0", kind="cpu_temp", label="CPU", value_c=57.0, age_ms=100)]
+        )
+        app_state.set_fans([_fan("openfan:ch00")])
+
+        assert page._fan_cards["c1"]._temp_value.text() == "57°C"
+
+
+class TestReconciliation:
+    def test_repeated_polls_update_in_place(self, qtbot, app_state, profile_service):
+        """The 1 Hz refresh must not destroy and recreate widgets."""
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=_one_control(profile_service))
+        app_state.set_fans([_fan("openfan:ch00", rpm=1200)])
+        card = next(iter(page._fan_cards.values()))
+
+        app_state.set_fans([_fan("openfan:ch00", rpm=900)])
+        assert next(iter(page._fan_cards.values())) is card  # same widget
+        assert card._rpm_value.text() == "900"
+
+    def test_departed_controls_are_dropped(self, qtbot, app_state, profile_service):
+        control = LogicalControl(
+            id="c1",
+            name="Chassis",
+            members=[ControlMember(source="openfan", member_id="openfan:ch00")],
+        )
+        active = profile_service.active_profile
+        active.controls = [control]
+
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=profile_service)
+        app_state.set_fans([_fan("openfan:ch00")])
+        assert "c1" in page._fan_cards
+
+        active.controls = []
+        page._refresh_fan_cards()
+        assert "c1" not in page._fan_cards
+
+    def test_removed_cards_detach_from_the_flow_layout(self, qtbot, app_state, profile_service):
+        """A dropped card must leave FlowLayout's item list, not just the dict.
+
+        The cards are reconciled at 1 Hz; if removal only forgot the dict entry,
+        stale QLayoutItems would accumulate in the layout on every poll and the
+        pane would slowly fill with ghosts. FlowLayout implements takeAt(), which
+        is what QLayout.removeWidget() drives, so this pins that contract.
+        """
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=_one_control(profile_service))
+        layout = page._fan_cards_layout
+
+        app_state.set_fans([_fan("openfan:ch00")])
+        assert layout.count() == len(page._fan_cards) == 1
+
+        page._clear_fan_cards()
+        assert layout.count() == 0
+        assert page._fan_cards == {}
+
+        # Re-add, then poll repeatedly: the count must not creep.
+        for _ in range(5):
+            app_state.set_fans([_fan("openfan:ch00")])
+        assert layout.count() == len(page._fan_cards) == 1
+
+    def test_disconnect_clears_every_card(self, qtbot, app_state, profile_service):
+        """A stale card must never survive a disconnect and read as current."""
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=_one_control(profile_service))
+        app_state.set_fans([_fan("openfan:ch00")])
+        assert page._fan_cards
+
+        app_state.set_connection(ConnectionState.DISCONNECTED)
+        assert page._fan_cards == {}
+        assert page._fan_count_label.text() == ""
+
+    def test_rename_refreshes_the_cards(self, qtbot, app_state):
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state)
+        app_state.set_fans([_fan("nvidia_gpu:a", pwm=None, source="nvidia_gpu")])
+        card = next(iter(page._fan_cards.values()))
+        assert card._name.text() == "NVIDIA D-GPU Fan"
+
+        app_state.set_fan_alias("nvidia_gpu:a", "My GPU")
+        assert next(iter(page._fan_cards.values()))._name.text() == "My GPU"
+
+
+class TestCardOrdering:
+    """Layout order must track VM order (controls in profile order, then
+    read-only), not the order cards happened to be created in."""
+
+    def test_read_only_card_moves_below_controls_when_a_profile_activates(
+        self, qtbot, app_state, profile_service
+    ):
+        """The common path: the GUI starts with no profile, so a read-only GPU's
+        card is built first at index 0. Activating a profile appends control
+        cards — so without a positional reconcile the card that belongs last is
+        pinned first, permanently.
+
+        Was the Unassigned card's test until DEC-356 removed that card. The
+        ordering rule is unchanged and still has a first-built card that belongs
+        last, so the case survives with a read-only fan in that role.
+        """
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=profile_service)
+        fans = [_fan("openfan:ch00"), _fan("nvidia_gpu:z", pwm=None, source="nvidia_gpu")]
+
+        profile_service.active_profile.controls = []
+        app_state.set_fans(fans)
+        assert _layout_order(page) == ["readonly:nvidia_gpu:z"]
+
+        profile_service.active_profile.controls = [
+            LogicalControl(
+                id="aaa",
+                name="A",
+                members=[ControlMember(source="openfan", member_id="openfan:ch00")],
+            )
+        ]
+        app_state.set_fans(fans)
+        # Read-only last, not first — the positional reconcile ran.
+        assert _layout_order(page) == ["aaa", "readonly:nvidia_gpu:z"]
+
+    def test_a_control_inserted_first_renders_first(self, qtbot, app_state, profile_service):
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=profile_service)
+        fans = [_fan("openfan:ch00"), _fan("openfan:ch01")]
+
+        def control(cid, member):
+            return LogicalControl(
+                id=cid,
+                name=cid,
+                members=[ControlMember(source="openfan", member_id=member)],
+            )
+
+        profile_service.active_profile.controls = [control("aaa", "openfan:ch00")]
+        app_state.set_fans(fans)
+        profile_service.active_profile.controls.insert(0, control("zzz", "openfan:ch01"))
+        app_state.set_fans(fans)
+        assert _layout_order(page)[:2] == ["zzz", "aaa"]
+
+
+class TestEditRouting:
+    def test_edit_reemits_on_the_page_signal(self, qtbot, app_state, profile_service):
+        control = LogicalControl(
+            id="c1",
+            name="Chassis",
+            members=[ControlMember(source="openfan", member_id="openfan:ch00")],
+        )
+        profile_service.active_profile.controls = [control]
+
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state, profile_service=profile_service)
+        app_state.set_fans([_fan("openfan:ch00")])
+
+        seen: list[str] = []
+        page.open_control.connect(seen.append)
+        page._fan_cards["c1"]._edit_btn.click()
+        assert seen == ["c1"]
+
+    def test_main_window_routes_edit_to_the_controls_page(self, qtbot, settings_service):
+        """End-to-end: the card's Edit must land the user on Controls, or every
+        card's button would be a dead affordance. This caught exactly that —
+        open_control was initially left unconnected."""
+        from ventulus.constants import PAGE_CONTROLS
+        from ventulus.ui.main_window import MainWindow
+
+        # settings_service is explicit for a reason (DEC-244): omitting it makes
+        # MainWindow default-construct one pointed at the real user config file,
+        # and this test used to overwrite it for real.
+        window = MainWindow(settings_service=settings_service, demo_mode=True)
+        qtbot.addWidget(window)
+        window.dashboard_page.open_control.emit("")
+        assert window.page_stack.currentIndex() == PAGE_CONTROLS
+        assert window.page_stack.currentWidget() is window.controls_page
+        window.dashboard_page.cleanup()
+
+    def test_focus_control_selects_the_named_control(self, qtbot, app_state, profile_service):
+        """The deep-link must actually reveal the control, not just open the page."""
+        from ventulus.ui.pages.controls_page import ControlsPage
+
+        control = LogicalControl(
+            id="c1",
+            name="Chassis",
+            members=[ControlMember(source="openfan", member_id="openfan:ch00")],
+        )
+        profile_service.active_profile.controls = [control]
+        page = ControlsPage(state=app_state, profile_service=profile_service)
+        qtbot.addWidget(page)
+
+        assert page.focus_control("c1") is True
+        assert page._selected_control_id == "c1"
+        # An unknown or blank id is a harmless no-op, not a crash.
+        assert page.focus_control("nope") is False
+        assert page.focus_control("") is False
+
+    def test_focus_control_scrolls_the_card_into_view(self, qtbot, app_state, profile_service):
+        """setFocus alone does not scroll a QScrollArea, and ControlCard is a
+        NoFocus QFrame that draws no focus ring — so without ensureWidgetVisible a
+        Dashboard Edit on a control below the fold lands on a blank pane."""
+        from ventulus.ui.pages.controls_page import ControlsPage
+
+        controls = [
+            LogicalControl(
+                id=f"c{i}",
+                name=f"Role {i}",
+                members=[ControlMember(source="openfan", member_id=f"openfan:ch{i:02d}")],
+            )
+            for i in range(12)
+        ]
+        profile_service.active_profile.controls = controls
+        page = ControlsPage(state=app_state, profile_service=profile_service)
+        qtbot.addWidget(page)
+        page.resize(900, 400)
+        page.show()
+
+        scroll = page._controls_scroll
+        scroll.verticalScrollBar().setValue(0)
+        assert page.focus_control("c11") is True
+        # Either it scrolled, or every card already fits — both mean "visible".
+        bar = scroll.verticalScrollBar()
+        assert bar.value() > 0 or bar.maximum() == 0
+
+    def test_theme_change_reaches_the_card_previews(self, qtbot, app_state):
+        """The cards paint their curve preview themselves, so a theme switch must
+        reach them or they keep the old palette."""
+        from ventulus.ui.theme import default_dark_theme
+
+        app_state.set_connection(ConnectionState.CONNECTED)
+        page = _page(qtbot, app_state)
+        app_state.set_fans([_fan("openfan:ch00")])
+        tokens = default_dark_theme()
+        page.set_theme(tokens)
+        for card in page._fan_cards.values():
+            assert card._preview._theme is tokens

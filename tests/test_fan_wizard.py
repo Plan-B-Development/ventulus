@@ -1,0 +1,689 @@
+"""Tests for the Fan Configuration Wizard."""
+
+from __future__ import annotations
+
+import pytest
+
+from ventulus.api.models import ConnectionState, FanReading, OperationMode, SensorReading
+from ventulus.services.app_state import AppState
+from ventulus.ui.widgets.fan_wizard import (
+    DiscoveryPage,
+    FanConfigWizard,
+    IdentifyFanPage,
+    IntroPage,
+)
+
+
+def _make_wizard_state():
+    """Standalone helper for tests that don't use the fixture."""
+    state = AppState()
+    state.set_connection(ConnectionState.CONNECTED)
+    state.set_mode(OperationMode.AUTOMATIC)
+    state.set_fans(
+        [
+            FanReading(id="openfan:ch00", source="openfan", rpm=1200, age_ms=50),
+            FanReading(id="openfan:ch01", source="openfan", rpm=1100, age_ms=50),
+            FanReading(id="openfan:ch02", source="openfan", rpm=800, age_ms=50),
+        ]
+    )
+    state.set_sensors(
+        [
+            SensorReading(id="cpu", label="Tctl", kind="cpu_temp", value_c=45.0, age_ms=50),
+        ]
+    )
+    return state
+
+
+@pytest.fixture()
+def wizard_state():
+    state = AppState()
+    state.set_connection(ConnectionState.CONNECTED)
+    state.set_mode(OperationMode.AUTOMATIC)
+    state.set_fans(
+        [
+            FanReading(id="openfan:ch00", source="openfan", rpm=1200, age_ms=50),
+            FanReading(id="openfan:ch01", source="openfan", rpm=1100, age_ms=50),
+            FanReading(id="openfan:ch02", source="openfan", rpm=800, age_ms=50),
+        ]
+    )
+    state.set_sensors(
+        [
+            SensorReading(id="cpu", label="Tctl", kind="cpu_temp", value_c=45.0, age_ms=50),
+        ]
+    )
+    return state
+
+
+class TestWizardCreation:
+    def test_wizard_creates_with_targets(self, qtbot, wizard_state):
+        wizard = FanConfigWizard(wizard_state)
+        qtbot.addWidget(wizard)
+        assert len(wizard._targets) == 3
+        assert wizard._targets[0]["id"] == "openfan:ch00"
+
+    def test_wizard_has_all_pages(self, qtbot, wizard_state):
+        wizard = FanConfigWizard(wizard_state)
+        qtbot.addWidget(wizard)
+        assert wizard.page(0) is not None  # intro
+        assert wizard.page(1) is not None  # discovery
+        assert wizard.page(2) is not None  # test (single, reused for all fans)
+        assert wizard.page(3) is not None  # review
+
+
+class TestIntroPage:
+    def test_preflight_passes_when_connected(self, qtbot, wizard_state):
+        page = IntroPage(wizard_state)
+        qtbot.addWidget(page)
+        page.initializePage()
+        assert page.isComplete()
+
+    def test_preflight_fails_no_connection(self, qtbot):
+        state = AppState()
+        state.set_connection(ConnectionState.DISCONNECTED)
+        page = IntroPage(state)
+        qtbot.addWidget(page)
+        page.initializePage()
+        assert not page.isComplete()
+
+    def test_preflight_fails_no_fans(self, qtbot):
+        state = AppState()
+        state.set_connection(ConnectionState.CONNECTED)
+        # No fans set
+        page = IntroPage(state)
+        qtbot.addWidget(page)
+        page.initializePage()
+        assert not page.isComplete()
+
+    def test_preflight_fails_high_temp(self, qtbot):
+        state = AppState()
+        state.set_connection(ConnectionState.CONNECTED)
+        state.set_fans([FanReading(id="f1", source="openfan", rpm=1000, age_ms=50)])
+        state.set_sensors(
+            [
+                SensorReading(id="cpu", label="Tctl", kind="cpu_temp", value_c=90.0, age_ms=50),
+            ]
+        )
+        page = IntroPage(state)
+        qtbot.addWidget(page)
+        page.initializePage()
+        # Still complete (temp check is warning, not block) — but status shows warning
+        assert (
+            "too high" in page._status_label.text().lower() or "90.0" in page._status_label.text()
+        )
+
+
+class TestDiscoveryPage:
+    def test_all_selected_by_default(self, qtbot, wizard_state):
+        targets = [
+            {
+                "id": "f1",
+                "source": "openfan",
+                "rpm": 1000,
+                "has_tach": True,
+                "existing_label": "f1",
+            },
+            {"id": "f2", "source": "openfan", "rpm": 900, "has_tach": True, "existing_label": "f2"},
+        ]
+        page = DiscoveryPage(targets, wizard_state)
+        qtbot.addWidget(page)
+        assert page.selected_indices() == [0, 1]
+
+    def test_deselect_one(self, qtbot, wizard_state):
+        targets = [
+            {
+                "id": "f1",
+                "source": "openfan",
+                "rpm": 1000,
+                "has_tach": True,
+                "existing_label": "f1",
+            },
+            {"id": "f2", "source": "openfan", "rpm": 900, "has_tach": True, "existing_label": "f2"},
+        ]
+        page = DiscoveryPage(targets, wizard_state)
+        qtbot.addWidget(page)
+        page._checkboxes[0].setChecked(False)
+        assert page.selected_indices() == [1]
+
+
+class TestLabelPresets:
+    def test_label_presets_populated(self, qtbot, wizard_state):
+        wizard = FanConfigWizard(wizard_state)
+        qtbot.addWidget(wizard)
+        # Create a test page to check presets
+        test_page = IdentifyFanPage(wizard)
+        assert test_page._label_combo.count() > 5  # presets loaded
+
+
+class TestThermalGuard:
+    def test_thermal_safe_below_threshold(self, qtbot, wizard_state):
+        wizard = FanConfigWizard(wizard_state)
+        qtbot.addWidget(wizard)
+        assert wizard.check_thermal_safe()
+
+    def test_thermal_unsafe_above_threshold(self, qtbot):
+        state = AppState()
+        state.set_connection(ConnectionState.CONNECTED)
+        state.set_sensors(
+            [
+                SensorReading(id="cpu", label="Tctl", kind="cpu_temp", value_c=90.0, age_ms=50),
+            ]
+        )
+        state.set_fans([FanReading(id="f1", source="openfan", rpm=1000, age_ms=50)])
+        wizard = FanConfigWizard(state)
+        qtbot.addWidget(wizard)
+        assert not wizard.check_thermal_safe()
+
+
+class TestPublishedThermalLimit:
+    """`PTA-m`: the wizard's gate uses the daemon's published diagnostic limit,
+    with `THERMAL_ABORT_C` only as the fallback. Each case sits a CPU reading
+    BETWEEN the two figures, the only place the source of the limit shows."""
+
+    @staticmethod
+    def _state(cpu_c: float, limit_c: float | None, *, kind: str = "cpu_temp"):
+        from ventulus.api.models import Capabilities, Limits
+
+        state = _make_wizard_state()
+        state.set_sensors(
+            [SensorReading(id="t", label="Tctl", kind=kind, value_c=cpu_c, age_ms=50)]
+        )
+        state.set_capabilities(Capabilities(limits=Limits(diagnostic_max_temp_c=limit_c)))
+        return state
+
+    def test_a_published_lower_limit_blocks_below_the_fallback(self, qtbot):
+        from ventulus.constants import THERMAL_ABORT_C
+
+        assert THERMAL_ABORT_C > 80.0, "precondition: the reading is under the fallback"
+        state = self._state(80.0, 75.0)
+        wizard = FanConfigWizard(state)
+        qtbot.addWidget(wizard)
+        assert not wizard.check_thermal_safe()
+        page = IntroPage(state)
+        qtbot.addWidget(page)
+        page.initializePage()
+        assert "(80.0°C > 75°C)" in page._status_label.text()
+
+    def test_a_published_higher_limit_is_followed_too(self, qtbot):
+        from ventulus.constants import THERMAL_ABORT_C
+
+        assert THERMAL_ABORT_C < 90.0, "precondition: the reading is over the fallback"
+        wizard = FanConfigWizard(self._state(90.0, 95.0))
+        qtbot.addWidget(wizard)
+        assert wizard.check_thermal_safe()
+
+    def test_an_unpublished_limit_falls_back_to_the_constant(self, qtbot):
+        from ventulus.constants import THERMAL_ABORT_C
+
+        wizard = FanConfigWizard(self._state(THERMAL_ABORT_C + 1, None))
+        qtbot.addWidget(wizard)
+        assert wizard.thermal_limit_c() == THERMAL_ABORT_C
+        assert not wizard.check_thermal_safe()
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_limit_falls_back_rather_than_disabling_the_gate(self, qtbot, bad):
+        from ventulus.constants import THERMAL_ABORT_C
+
+        wizard = FanConfigWizard(self._state(THERMAL_ABORT_C + 1, bad))
+        qtbot.addWidget(wizard)
+        assert not wizard.check_thermal_safe()
+
+    def test_the_gate_stays_cpu_only(self, qtbot):
+        wizard = FanConfigWizard(self._state(99.0, 75.0, kind="gpu_temp"))
+        qtbot.addWidget(wizard)
+        assert wizard.check_thermal_safe()
+
+    def test_the_test_page_names_the_published_limit(self, qtbot):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        wizard = FanConfigWizard(state=self._state(80.0, 75.0), client=client)
+        qtbot.addWidget(wizard)
+        wizard._selected_indices = [0]
+        wizard._current_test_idx = 0
+        page = wizard._test_page
+        page.initializePage()
+        page._start_test()
+        client.fan_identify.assert_not_called()
+        assert "exceeds 75°C" in page._status_msg.text()
+
+
+# ---------------------------------------------------------------------------
+# R59 — RPM filtering, stop_fan errors, restore policy
+# ---------------------------------------------------------------------------
+
+
+class TestBuildTargetsFiltering:
+    """Detected fans page only includes fans with RPM readings (R59)."""
+
+    def test_fans_without_rpm_excluded(self, qtbot):
+        state = _make_wizard_state()
+        # Add a fan with rpm=None — should be excluded
+        state.fans.append(FanReading(id="hwmon:no_tach", source="hwmon", rpm=None, age_ms=100))
+        wizard = FanConfigWizard(state=state, parent=None)
+        qtbot.addWidget(wizard)
+
+        ids = [t["id"] for t in wizard._targets]
+        assert "hwmon:no_tach" not in ids
+
+    def test_fans_with_rpm_included(self, qtbot):
+        state = _make_wizard_state()
+        wizard = FanConfigWizard(state=state, parent=None)
+        qtbot.addWidget(wizard)
+
+        # Default _make_state has fans with rpm values
+        assert len(wizard._targets) > 0
+        for t in wizard._targets:
+            assert t["rpm"] is not None
+
+    def test_fans_with_zero_rpm_excluded(self, qtbot):
+        """Fans with rpm=0 (disconnected headers) should be excluded (R60)."""
+        state = _make_wizard_state()
+        state.fans.append(FanReading(id="hwmon:empty_slot", source="hwmon", rpm=0, age_ms=100))
+        wizard = FanConfigWizard(state=state, parent=None)
+        qtbot.addWidget(wizard)
+
+        ids = [t["id"] for t in wizard._targets]
+        assert "hwmon:empty_slot" not in ids
+
+    def test_amdgpu_hwmon_excluded(self, qtbot):
+        """amdgpu hwmon fans (not writable via pwm) should be excluded (R60)."""
+        state = _make_wizard_state()
+        state.fans.append(
+            FanReading(
+                id="hwmon:amdgpu:0000:03:00.0:pwm1:pwm1",
+                source="hwmon",
+                rpm=500,
+                age_ms=100,
+            )
+        )
+        wizard = FanConfigWizard(state=state, parent=None)
+        qtbot.addWidget(wizard)
+
+        ids = [t["id"] for t in wizard._targets]
+        assert "hwmon:amdgpu:0000:03:00.0:pwm1:pwm1" not in ids
+
+
+class TestSinglePageFanCycling:
+    """Single IdentifyFanPage page cycles through fans internally (R61)."""
+
+    def test_wizard_constructs_without_recursion(self, qtbot):
+        """Wizard construction must not trigger infinite recursion (R61 regression)."""
+        state = _make_wizard_state()
+        wizard = FanConfigWizard(state=state, parent=None)
+        qtbot.addWidget(wizard)
+        # If we get here, no RecursionError
+        assert wizard._test_page is not None
+
+    def test_advance_cycles_through_fans(self, qtbot):
+        state = _make_wizard_state()
+        wizard = FanConfigWizard(state=state, parent=None)
+        qtbot.addWidget(wizard)
+        wizard._selected_indices = [0, 1, 2]
+        wizard._current_test_idx = 0
+
+        assert wizard.current_target()["id"] == "openfan:ch00"
+        assert wizard.advance_to_next_fan() is True
+        assert wizard.current_target()["id"] == "openfan:ch01"
+        assert wizard.advance_to_next_fan() is True
+        assert wizard.current_target()["id"] == "openfan:ch02"
+        assert wizard.advance_to_next_fan() is False  # all done
+
+
+class TestStopFanErrorSurfacing:
+    """stop_fan drives the daemon identify API and surfaces failures (DEC-166)."""
+
+    def test_stop_fan_calls_identify_and_returns_none_on_success(self):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        wizard = FanConfigWizard.__new__(FanConfigWizard)
+        wizard._client = client
+        wizard._state = _make_wizard_state()
+        wizard._last_identify_mode = {}  # DEC-312: stop_fan records the daemon's mode
+
+        result = wizard.stop_fan({"id": "openfan:ch00", "source": "openfan"})
+        assert result is None
+        client.fan_identify.assert_called_once_with("openfan:ch00", "stop")
+
+    def test_stop_fan_hwmon_passes_no_lease(self):
+        """hwmon identify is daemon-owned now — addressed by fan id, no lease."""
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        wizard = FanConfigWizard.__new__(FanConfigWizard)
+        wizard._client = client
+        wizard._state = _make_wizard_state()
+        wizard._last_identify_mode = {}  # DEC-312: stop_fan records the daemon's mode
+
+        result = wizard.stop_fan({"id": "hwmon:nct6798:pwm2", "source": "hwmon"})
+        assert result is None
+        client.fan_identify.assert_called_once_with("hwmon:nct6798:pwm2", "stop")
+
+    def test_stop_fan_returns_error_on_no_client(self):
+        wizard = FanConfigWizard.__new__(FanConfigWizard)
+        wizard._client = None
+        wizard._state = _make_wizard_state()
+
+        result = wizard.stop_fan({"id": "openfan:ch00", "source": "openfan"})
+        assert result is not None
+        assert "client" in result.lower()
+
+    def test_stop_fan_returns_error_string_when_daemon_raises(self):
+        from unittest.mock import MagicMock
+
+        from ventulus.api.errors import DaemonError
+
+        client = MagicMock()
+        client.fan_identify.side_effect = DaemonError(
+            code="not_found", message="unknown fan", status=404
+        )
+        wizard = FanConfigWizard.__new__(FanConfigWizard)
+        wizard._client = client
+        wizard._state = _make_wizard_state()
+        wizard._last_identify_mode = {}  # DEC-312: stop_fan records the daemon's mode
+
+        result = wizard.stop_fan({"id": "openfan:ch09", "source": "openfan"})
+        assert result is not None
+        assert "unknown fan" in result
+
+
+class TestRestoreViaIdentify:
+    """Restore un-identifies via the daemon; the GUI replays no PWM (DEC-166)."""
+
+    def test_restore_calls_identify_restore(self):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        wizard = FanConfigWizard.__new__(FanConfigWizard)
+        wizard._client = client
+        wizard._state = _make_wizard_state()
+
+        wizard.restore_fan({"id": "openfan:ch00", "source": "openfan"})
+        client.fan_identify.assert_called_once_with("openfan:ch00", "restore")
+
+    def test_restore_noop_without_client(self):
+        wizard = FanConfigWizard.__new__(FanConfigWizard)
+        wizard._client = None
+        wizard._state = _make_wizard_state()
+        # Must not raise when there is no client.
+        wizard.restore_fan({"id": "openfan:ch00", "source": "openfan"})
+
+    def test_exit_override_restores_all_then_is_idempotent(self):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        wizard = FanConfigWizard.__new__(FanConfigWizard)
+        wizard._client = client
+        wizard._state = _make_wizard_state()
+        wizard._targets = [
+            {"id": "openfan:ch00", "source": "openfan"},
+            {"id": "openfan:ch01", "source": "openfan"},
+        ]
+        wizard._identify_active = True
+
+        wizard._exit_override()
+        assert wizard._identify_active is False
+        assert client.fan_identify.call_count == 2
+
+        # Second call is a no-op (identify no longer active).
+        client.fan_identify.reset_mock()
+        wizard._exit_override()
+        client.fan_identify.assert_not_called()
+
+
+class TestIdentifyFanPageLifecycle:
+    """Real-construction coverage for the per-fan test lifecycle (audit 2026-07-15
+    Phase 5): start / tick / end / abort / cleanup, including the thermal abort
+    mid-test — the safety-critical path."""
+
+    @staticmethod
+    def _wizard_and_page(qtbot, state, client):
+        wizard = FanConfigWizard(state=state, client=client)
+        qtbot.addWidget(wizard)
+        wizard._selected_indices = [0]
+        wizard._current_test_idx = 0
+        page = wizard._test_page
+        page.initializePage()
+        return wizard, page
+
+    @staticmethod
+    def _hot_cpu():
+        return [SensorReading(id="cpu", label="Tctl", kind="cpu_temp", value_c=120.0, age_ms=50)]
+
+    def test_start_test_stops_fan_and_runs_timer(self, qtbot, wizard_state):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        _wizard, page = self._wizard_and_page(qtbot, wizard_state, client)
+        page._start_test()
+        assert page._testing is True
+        assert page._timer.isActive()
+        client.fan_identify.assert_called_once_with("openfan:ch00", "stop")
+        page._abort_test()  # stop the running timer for a clean teardown
+
+    def test_start_test_refuses_when_cpu_hot(self, qtbot):
+        from unittest.mock import MagicMock
+
+        state = _make_wizard_state()
+        state.set_sensors(self._hot_cpu())
+        client = MagicMock()
+        _wizard, page = self._wizard_and_page(qtbot, state, client)
+        page._start_test()
+        assert page._testing is False
+        client.fan_identify.assert_not_called()
+        assert "abort" in page._status_msg.text().lower()
+
+    def test_tick_thermal_spike_aborts_and_restores(self, qtbot, wizard_state):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        _wizard, page = self._wizard_and_page(qtbot, wizard_state, client)
+        page._start_test()  # cool → fan stopped, timer running
+        assert page._testing
+        client.fan_identify.reset_mock()
+
+        wizard_state.set_sensors(self._hot_cpu())  # CPU spikes mid-test
+        page._tick()
+
+        assert page._testing is False
+        assert not page._timer.isActive()
+        client.fan_identify.assert_called_once_with("openfan:ch00", "restore")
+        assert "abort" in page._status_msg.text().lower()
+
+    def test_tick_countdown_completes_and_restores(self, qtbot, wizard_state):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        _wizard, page = self._wizard_and_page(qtbot, wizard_state, client)
+        page._start_test()
+        client.fan_identify.reset_mock()
+        page._seconds_remaining = 1  # the next tick ends the countdown
+        page._tick()
+        assert page._testing is False
+        client.fan_identify.assert_called_once_with("openfan:ch00", "restore")
+
+    def test_abort_test_restores_fan(self, qtbot, wizard_state):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        _wizard, page = self._wizard_and_page(qtbot, wizard_state, client)
+        page._start_test()
+        client.fan_identify.reset_mock()
+        page._abort_test()
+        assert page._testing is False
+        assert not page._timer.isActive()
+        client.fan_identify.assert_called_once_with("openfan:ch00", "restore")
+
+    def test_cleanup_page_aborts_active_test(self, qtbot, wizard_state):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        _wizard, page = self._wizard_and_page(qtbot, wizard_state, client)
+        page._start_test()
+        client.fan_identify.reset_mock()
+        page.cleanupPage()  # user pressed Back mid-test
+        assert page._testing is False
+        client.fan_identify.assert_called_once_with("openfan:ch00", "restore")
+
+    def test_cleanup_page_noop_when_not_testing(self, qtbot, wizard_state):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        _wizard, page = self._wizard_and_page(qtbot, wizard_state, client)
+        page.cleanupPage()  # not testing → nothing to restore
+        client.fan_identify.assert_not_called()
+
+    def test_validate_page_saves_current_label(self, qtbot, wizard_state):
+        from unittest.mock import MagicMock
+
+        wizard, page = self._wizard_and_page(qtbot, wizard_state, MagicMock())
+        page._label_combo.setCurrentText("CPU Cooler")
+        assert page.validatePage() is True
+        assert wizard._labels["openfan:ch00"] == "CPU Cooler"
+
+
+class TestPumpSafeIdentifyCopy:
+    """DEC-311 / AIO-MB Phase 1: the wizard must not tell a user their pump is
+    about to stop.
+
+    The daemon decides stop-vs-perturb from the header role; these tests pin
+    that the *copy* follows that decision, and — critically — that it does NOT
+    follow it against a daemon too old to honour it.
+    """
+
+    @staticmethod
+    def _state_with_pump(*, header_roles: bool, role: str = "pump"):
+        from ventulus.api.models import (
+            Capabilities,
+            ControlCapability,
+            HwmonHeader,
+        )
+
+        state = AppState()
+        state.set_connection(ConnectionState.CONNECTED)
+        state.set_mode(OperationMode.AUTOMATIC)
+        state.set_fans(
+            [
+                FanReading(id="hwmon:it8696:isa:pwm5:pwm5", source="hwmon", rpm=2400, age_ms=50),
+                FanReading(id="openfan:ch00", source="openfan", rpm=1200, age_ms=50),
+            ]
+        )
+        state.set_sensors(
+            [SensorReading(id="cpu", label="Tctl", kind="cpu_temp", value_c=45.0, age_ms=50)]
+        )
+        state.set_hwmon_headers(
+            [
+                HwmonHeader(
+                    id="hwmon:it8696:isa:pwm5:pwm5",
+                    label="pwm5",
+                    chip_name="it8696",
+                    pwm_index=5,
+                    role=role,
+                    role_source="user_assigned",
+                )
+            ]
+        )
+        state.set_capabilities(
+            Capabilities(
+                control=ControlCapability(
+                    autonomous_control=True,
+                    fan_identify=True,
+                    header_roles=header_roles,
+                )
+            )
+        )
+        return state
+
+    def test_pump_header_is_recognised_as_a_pump_target(self, qtbot):
+        state = self._state_with_pump(header_roles=True)
+        wiz = FanConfigWizard(state)
+        qtbot.addWidget(wiz)
+        assert wiz.is_pump_target("hwmon:it8696:isa:pwm5:pwm5") is True
+        assert wiz.identify_verb("hwmon:it8696:isa:pwm5:pwm5") == "change speed"
+
+    def test_non_pump_fans_still_stop(self, qtbot):
+        state = self._state_with_pump(header_roles=True)
+        wiz = FanConfigWizard(state)
+        qtbot.addWidget(wiz)
+        # An OpenFan channel is a pump only by an assignment the daemon reports
+        # (`ROLE-f`); this state has none.
+        assert wiz.is_pump_target("openfan:ch00") is False
+        assert wiz.identify_verb("openfan:ch00") == "stop"
+
+    def test_a_chassis_role_is_not_a_pump(self, qtbot):
+        state = self._state_with_pump(header_roles=True, role="chassis_fan")
+        wiz = FanConfigWizard(state)
+        qtbot.addWidget(wiz)
+        assert wiz.is_pump_target("hwmon:it8696:isa:pwm5:pwm5") is False
+
+    def test_an_unrecognised_role_token_is_not_treated_as_a_pump(self, qtbot):
+        # Forward-compat: a role this GUI has never heard of must not silently
+        # acquire pump semantics. Render it, do not act on it (the 273-i rule).
+        state = self._state_with_pump(header_roles=True, role="impeller")
+        wiz = FanConfigWizard(state)
+        qtbot.addWidget(wiz)
+        assert wiz.is_pump_target("hwmon:it8696:isa:pwm5:pwm5") is False
+
+    def test_without_the_capability_the_copy_stays_honest(self, qtbot):
+        """The load-bearing case.
+
+        A pre-2.28.0 daemon drives every identified fan to 0, pumps included.
+        Even though the header says `role="pump"`, promising "the pump will
+        briefly change speed" would be a LIE about what that daemon does — so
+        the wizard must keep the "stop" wording.
+        """
+        state = self._state_with_pump(header_roles=False)
+        wiz = FanConfigWizard(state)
+        qtbot.addWidget(wiz)
+        assert wiz.is_pump_target("hwmon:it8696:isa:pwm5:pwm5") is False
+        assert wiz.identify_verb("hwmon:it8696:isa:pwm5:pwm5") == "stop"
+
+    def test_missing_capabilities_object_does_not_crash(self, qtbot):
+        state = self._state_with_pump(header_roles=True)
+        state.capabilities = None
+        wiz = FanConfigWizard(state)
+        qtbot.addWidget(wiz)
+        assert wiz.is_pump_target("hwmon:it8696:isa:pwm5:pwm5") is False
+
+    def test_intro_page_pump_warning_tracks_the_capability(self, qtbot):
+        """`UDOC-i`: assert the RELATIONSHIP, not the literal.
+
+        This test previously passed `header_roles=True` and asserted the string
+        "never stopped" appeared — which is satisfied by a call site that never
+        reads the capability at all, i.e. by the exact defect it now guards
+        against. The intro label WAS unconditional, and this test was green
+        throughout. Both branches, per DEC-324 rule (1).
+        """
+        from PySide6.QtWidgets import QLabel
+
+        from ventulus.services.pump_protection import daemon_protects_pumps
+
+        for header_roles in (True, False):
+            state = self._state_with_pump(header_roles=header_roles)
+            page = IntroPage(state)
+            qtbot.addWidget(page)
+            page.initializePage()
+            text = " ".join(w.text() for w in page.findChildren(QLabel)).lower()
+            assert ("never stopped" in text) == daemon_protects_pumps(state.capabilities), text
+            if header_roles:
+                # The protected branch must still explain WHY it is safe.
+                assert "coolant keeps flowing" in text, text
+            else:
+                # The honest branch must name the version that would fix it,
+                # rather than dead-ending (the `UDOC-l` rule, same change).
+                assert "including a pump" in text, text
+                assert "2.28.0" in text, text
+
+    def test_test_page_prompt_names_the_pump_behaviour(self, qtbot):
+        state = self._state_with_pump(header_roles=True)
+        wiz = FanConfigWizard(state)
+        qtbot.addWidget(wiz)
+        # Select the pump target and initialise the identify page.
+        pump_idx = next(
+            i for i, t in enumerate(wiz._targets) if t["id"] == "hwmon:it8696:isa:pwm5:pwm5"
+        )
+        wiz._selected_indices = [pump_idx]
+        wiz._current_test_idx = 0
+        page = wiz._test_page
+        page.initializePage()
+        assert "change speed" in page._status_msg.text().lower(), page._status_msg.text()

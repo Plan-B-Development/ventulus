@@ -1,0 +1,847 @@
+"""Central application state — the single source of truth for UI binding.
+
+Services write to AppState; UI pages read from it via signals.
+AppState is a QObject so it can emit signals on the main thread.
+"""
+
+from __future__ import annotations
+
+import time
+
+from PySide6.QtCore import QObject, QTimer, Signal
+
+from ventulus.api.models import (
+    DEFAULT_DAEMON_POLL_INTERVAL_MS,
+    BoardInfo,
+    Capabilities,
+    ConnectionState,
+    CoolingDeviceInventory,
+    DaemonStatus,
+    FanReading,
+    Freshness,
+    HwmonHeader,
+    OpenFanMaintenanceSummary,
+    OpenFanRole,
+    OpenFanSilentBoardEntry,
+    OperationMode,
+    SensorReading,
+    at_least,
+)
+from ventulus.knowledge.hwmon_label_resolver import resolve_hwmon_header_label
+from ventulus.knowledge.sensor_knowledge import (
+    SensorClassification,
+    classify_reading,
+    sensor_display_name,
+)
+from ventulus.services.alerts import AlertCondition, AlertLedger
+from ventulus.services.cooling_watch import advisory_alert, pump_stall_alert, thermal_alert
+from ventulus.services.daemon_features import daemon_supports
+from ventulus.services.openfan_firmware_view import (
+    firmware_update_alert,
+    silent_board_alert,
+    suppresses_fan_staleness,
+)
+from ventulus.services.session_stats import SessionStatsTracker
+from ventulus.services.stall_hold import StallHold
+from ventulus.ui.hwmon_guidance import set_daemon_canonicalises_chip_names
+
+# DEC-459: how long the daemon must stay unreachable before the thermal alert
+# clears. The poll reports a disconnect on its FIRST failed cycle, so clearing at
+# once turned one timed-out poll into a false "recovered" line and a fresh,
+# unacknowledged alert a second later. Same span as the stall hold's off-delay.
+THERMAL_UNREACHABLE_CLEAR_MS = 5000
+
+# DEC-227: presentation suffix tagging a liquid-cooler fan in the Dashboard's
+# Sensors rail. It is a hardware fact rendered onto the row, never part of the
+# stored name — ``apply_fan_rename`` strips it back off on the way in so a
+# round-trip through an in-place editor cannot capture it into settings.
+AIO_SUFFIX = " (AIO)"
+
+# DEC-227: upper bound on a user-authored fan alias. Aliases are user-controlled,
+# persisted to app_settings.json and portable via Settings export, so an unbounded
+# string would bloat the settings file and break row layout on every surface.
+MAX_FAN_ALIAS_LEN = 64
+
+# DEC-227: id prefix of an OpenFan channel fan ("openfan:ch00"). Matched strictly —
+# anything after it that is not a plain number falls through to the raw id rather
+# than inventing a channel number.
+_OPENFAN_CH_PREFIX = "openfan:ch"
+
+
+def _stall_detail(fan: FanReading) -> str:
+    """Say what was actually observed, not what we wish had been (`WIRE-j`).
+
+    The daemon asserts `stall_detected` from `rpm == 0 && duty > STALL_PWM_THRESHOLD`.
+    For an hwmon header on daemon 3.2.0+ (DEC-458) the duty is `pwm_commanded_pct`
+    while the daemon commands the header, and otherwise the readback, once the
+    fan has been seen spinning. An older daemon uses `last_commanded_pwm`, which
+    for an hwmon header carries the poll's *readback* whenever nothing has been
+    commanded (`AIO5-a`). Either way a stall on an uncontrolled header is not a
+    command, so the old wording, "RPM=0 while PWM commanded", named a command
+    that never happened, on an `error`-level alert.
+
+    Where DEC-318's unambiguous `pwm_commanded_pct` is present the claim is
+    exact. Where it is not, the sentence describes the *reading* and says the
+    daemon cannot separate the two — an alert that overstates its evidence is
+    worse than one that qualifies it, because the user acts on it.
+    """
+    duty, approximate = fan.requested_duty()
+    if duty is None:
+        return f"Fan '{fan.id}' stall detected: RPM is 0 and the daemon reports it stalled"
+    if approximate:
+        return (
+            f"Fan '{fan.id}' stall detected: RPM is 0 while the header reports {duty}%. "
+            "This daemon does not separate the commanded duty from the hardware "
+            "readback, so the fan may not be under control at all."
+        )
+    return f"Fan '{fan.id}' stall detected: RPM is 0 while the daemon commands {duty}%"
+
+
+class AppState(QObject):
+    """Observable application state. Emits signals when data changes."""
+
+    # Signals for UI binding
+    connection_changed = Signal(ConnectionState)
+    mode_changed = Signal(OperationMode)
+    capabilities_updated = Signal(Capabilities)
+    status_updated = Signal(DaemonStatus)
+    sensors_updated = Signal(list)  # list[SensorReading]
+    fans_updated = Signal(list)  # list[FanReading]
+    headers_updated = Signal(list)  # list[HwmonHeader]
+    openfan_roles_updated = Signal(list)  # list[OpenFanRole] (`ROLE-f`)
+    # `TS-ae`: ask the poll worker to re-read `/hwmon/headers` on its next cycle.
+    # Raised after the GUI's own daemon-confirmed activation, which can change
+    # `stop_permitted` without changing the active id (DEC-384: re-applying one
+    # profile after editing which member it names a pump).
+    hwmon_headers_refresh_requested = Signal()
+    #: Ask the poll worker to re-read ``/diagnostics/hardware`` — after a write
+    #: that changes what it reports, such as the coolant limit.
+    hw_diagnostics_refresh_requested = Signal()
+    cooling_devices_updated = Signal(object)  # CoolingDeviceInventory
+    active_profile_changed = Signal(str)  # profile name
+    active_profile_id_changed = Signal(str)  # active profile id
+    # DEC-282 — two derived counts, each wired to the surface whose job it matches.
+    # This one carries the **active** count: conditions that genuinely exist, whether
+    # or not the user has acknowledged them. It is a health claim, so it drives the
+    # footer rollup, which must not report "All systems nominal" over a live stall.
+    warning_count_changed = Signal(int)
+    # The **attention** count: what has not been looked at yet, including alerts that
+    # recovered before anyone saw them. Drives the ribbon badge and status banner,
+    # which should go quiet once acknowledged. Splitting the two is what lets
+    # acknowledgement mean "seen" without it also meaning "resolved".
+    unacknowledged_count_changed = Signal(int)
+    # The alert collection's **content** changed. Any view that renders alerts must
+    # use this rather than a count: a count cannot see one condition resolving as
+    # another activates, which is exactly how a stale panel used to survive (DEC-282).
+    warnings_changed = Signal()
+    # list[AlertTransition] — onsets and recoveries only, for the event-log observer.
+    # AppState deliberately does not log them itself; DiagnosticsService already
+    # imports AppState, so the dependency can only run in that direction.
+    alert_transitions = Signal(list)
+    fan_alias_changed = Signal(str, str)  # fan_id, display_name
+    sensor_class_override_changed = Signal(str, str)  # sensor_id, source_class ("" = cleared)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+
+        # Current state
+        self.connection = ConnectionState.DISCONNECTED
+        self.mode = OperationMode.READ_ONLY
+        self.capabilities: Capabilities | None = None
+        self.daemon_status: DaemonStatus | None = None
+        self.sensors: list[SensorReading] = []
+        self.fans: list[FanReading] = []
+        #: The daemon's running poll interval, which every freshness judgement
+        #: scales with (`GET /config`, refreshed with the capabilities).
+        self.daemon_poll_interval_ms: int = DEFAULT_DAEMON_POLL_INTERVAL_MS
+        # DEC-482: the update the daemon reported in the poll that delivered
+        # `fans` — what the stand-in for their staleness reads (`set_fans`).
+        self._fans_update: OpenFanMaintenanceSummary | None = None
+        #: DEC-484: the silent OpenFAN board reported with the fans, as above.
+        self._fans_silent: OpenFanSilentBoardEntry | None = None
+        self.hwmon_headers: list[HwmonHeader] = []
+        # `ROLE-f` (DEC-475): each OpenFan channel's role and pump protection,
+        # on the capabilities interval and after a role write. Empty when the
+        # daemon has no such route (`control.openfan_header_roles`).
+        self.openfan_roles: list[OpenFanRole] = []
+        # AIO-MB Phase 6: cooling-device topology, refreshed on the
+        # capabilities interval. `None` means "not fetched yet or this
+        # daemon has no such route" — distinct from an inventory with an
+        # empty device list, which means "asked, and there are none".
+        self.cooling_devices: CoolingDeviceInventory | None = None
+        self.active_profile_name: str = ""
+        self.active_profile_id: str = ""
+        # DEC-282: the ledger owns occurrence identity, first-seen times, recovery and
+        # acknowledgement. What used to be a set of permanently-suppressed keys and a
+        # parallel first-seen dict are both gone — an occurrence carries its own.
+        self.alerts = AlertLedger()
+        # Legacy row shape [{timestamp, level, source, message, _key}] that the warnings
+        # view renders. Named for exactly what it holds: UNACKNOWLEDGED occurrences.
+        # It is deliberately NOT the same length as ``warning_count`` — that is the
+        # ACTIVE count, and a condition that is acknowledged but still happening
+        # appears in the count and not in this list. Two different questions.
+        self.unacknowledged_warnings: list[dict] = []
+        self._external_warnings: list[dict] = []  # ad-hoc warnings from services
+        # Last emitted values, so each signal fires on a genuine change rather than on
+        # every poll. Content changes are tracked separately (see _update_warnings).
+        self._last_active_count = 0
+        self._last_unack_count = 0
+
+        # Fan aliases: fan_id -> display name (GUI-owned)
+        self.fan_aliases: dict[str, str] = {}
+
+        # DEC-176: fan_id -> user-assigned physical zone name (GUI-owned).
+        # Opt-in overlay on the dashboard's role/source grouping; unassigned
+        # fans fell back to role/source grouping. DEC-222 removed the zone UI;
+        # this map is retained dormant (no reader) so saved assignments and the
+        # settings schema are preserved.
+        self.fan_zones: dict[str, str] = {}
+
+        # DEC-156: user sensor-classification overrides (sensor_id ->
+        # source_class, only "coolant" today). GUI-owned policy; the daemon
+        # stays hardware-truthful. Lets the user force a coolant sensor the
+        # conservative auto-classifier missed.
+        self.sensor_class_overrides: dict[str, str] = {}
+
+        # DMI board info supplied by /diagnostics/hardware, written only by
+        # ``DiagnosticsService.set_hw_diagnostics``. Used by
+        # ``hwmon_label_resolver`` to apply per-board fallback labels (A3) when
+        # no /etc/sensors.d entry matches and the daemon's sysfs label is either
+        # empty *or* a synthesised ``pwmN`` placeholder — the latter is the
+        # common case and the one DEC-229 exists for, so a non-empty label does
+        # not mean this is unused.
+        self.board_info: BoardInfo = BoardInfo()
+
+        # Per-sensor session min/max tracker (resets on reconnect)
+        self.session_stats = SessionStatsTracker()
+
+        # `TS-bg`: the one answer to "is this fan stalled?", holding a stall through
+        # a missing `stall_detected`. Every consumer reads `stalled_fan_ids`, never
+        # the raw flag. `_clock` is the monotonic clock the hold is measured on;
+        # tests replace it.
+        self._stall_hold = StallHold()
+        self._clock = time.monotonic
+
+        # DEC-459: the thermal alert is dropped once the daemon has been
+        # unreachable for THERMAL_UNREACHABLE_CLEAR_MS — a flag the timer sets,
+        # not a clock comparison, so timer jitter cannot leave it standing.
+        self._thermal_unreachable = False
+        self._thermal_clear_timer = QTimer(self)
+        self._thermal_clear_timer.setSingleShot(True)
+        self._thermal_clear_timer.setInterval(THERMAL_UNREACHABLE_CLEAR_MS)
+        self._thermal_clear_timer.timeout.connect(self._on_thermal_unreachable)
+
+        # Monotonic timestamp of the last successful poll / demo tick, for the
+        # dashboard status strip's "Updated Xs ago" indicator (DEC-176/177).
+        # None until the first success; deliberately NOT reset on disconnect so
+        # the age keeps growing to signal staleness.
+        self.last_poll_monotonic: float | None = None
+
+    def mark_poll_success(self, now: float | None = None) -> None:
+        """Record the time of the latest successful poll (or demo tick).
+
+        Uses a monotonic clock so the dashboard can show time-since-last-update;
+        tests pass an explicit ``now`` to avoid real timing.
+        """
+        self.last_poll_monotonic = now if now is not None else time.monotonic()
+
+    def set_connection(self, state: ConnectionState) -> None:
+        if state != self.connection:
+            self.connection = state
+            self.connection_changed.emit(state)
+            # DEC-459: the thermal alert describes the daemon's state now, so it
+            # clears once the daemon has been gone THERMAL_UNREACHABLE_CLEAR_MS —
+            # not at once, which made one timed-out poll a false recovery.
+            if state == ConnectionState.DISCONNECTED:
+                self._thermal_clear_timer.start()
+            else:
+                self._thermal_clear_timer.stop()
+                self._thermal_unreachable = False
+            self._update_warnings()
+
+    def _on_thermal_unreachable(self) -> None:
+        # No poll arrives while disconnected, so this reconcile is the only one
+        # that can clear the alert.
+        self._thermal_unreachable = True
+        self._update_warnings()
+
+    def set_mode(self, mode: OperationMode) -> None:
+        if mode != self.mode:
+            self.mode = mode
+            self.mode_changed.emit(mode)
+
+    def set_capabilities(self, caps: Capabilities) -> None:
+        self.capabilities = caps
+        # DEC-442: the one writer of the it87-rename wording switch, set before
+        # the signal so every page that re-renders on it already sees the new
+        # answer.
+        set_daemon_canonicalises_chip_names(daemon_supports("canonical_chip_names", caps) is True)
+        self.capabilities_updated.emit(caps)
+
+    def set_status(self, status: DaemonStatus) -> None:
+        self.daemon_status = status
+        self._reflect_daemon_active_profile(status)
+        self.status_updated.emit(status)
+
+    def _reflect_daemon_active_profile(self, status: DaemonStatus) -> None:
+        """Mirror the daemon's active profile off a poll status (DEC-194, `CTRL-d`).
+
+        The name drives the status banner; the id (routed by main_window →
+        ``ProfileService.set_active``) drives the id-based combo selection and
+        the Controls page's viewed profile. Cheap: both setters are
+        edge-triggered, so a signal fires only on change.
+
+        Three cases, and the third is what `CTRL-d` added. ``has_active_profile``
+        is the daemon's *authoritative* answer; the id and name are omitted from
+        the wire whenever nothing is active, so on their own they cannot say
+        whether that absence means "nothing is active" or "this daemon predates
+        the mirror" (DEC-194 chose the latter, which is why a deactivation used
+        to leave a stale profile named in the UI until the GUI reconnected).
+        """
+        if status.has_active_profile is False:
+            # Authoritative: the daemon is running no profile. Clear both, so the
+            # sidebar and the banner stop naming one. Only reachable on a daemon
+            # that actually reports the field.
+            self.set_active_profile_id("")
+            self.set_active_profile("")
+            return
+        # `True` (id + name are present and current) or `None` (older daemon —
+        # leave the slow /profile/active fallback authoritative rather than
+        # clobbering it with a blank).
+        if status.active_profile_id is not None:
+            self.set_active_profile_id(status.active_profile_id)
+        if status.active_profile_name is not None:
+            self.set_active_profile(status.active_profile_name)
+
+    def set_sensors(self, sensors: list[SensorReading]) -> None:
+        self.sensors = sensors
+        self.session_stats.update_batch([(s.id, s.value_c) for s in sensors])
+        self.sensors_updated.emit(sensors)
+        self._update_warnings()
+
+    def reset_session_stats(self) -> None:
+        """Reset session statistics (call on reconnect)."""
+        self.session_stats.reset()
+
+    @property
+    def stalled_fan_ids(self) -> frozenset[str]:
+        """The fans stalled right now, held through a missing flag (`TS-bg`)."""
+        return self._stall_hold.stalled
+
+    def set_fans(self, fans: list[FanReading]) -> None:
+        self.fans = fans
+        # DEC-482: a poll applies its status before its fans, and `set_sensors`
+        # reconciles in between. Judged against the newest status, the previous
+        # poll's paused readings raised every OpenFAN channel's staleness in the
+        # poll that ended an update, until that poll's fresh readings arrived.
+        ds = self.daemon_status
+        self._fans_update = ds.openfan_maintenance if ds else None
+        self._fans_silent = ds.openfan_silent_board if ds else None
+        # Before the signal, so a `fans_updated` slot reads this poll's answer.
+        self._stall_hold.update(fans, self._clock())
+        self.fans_updated.emit(fans)
+        self._update_warnings()
+
+    def set_hwmon_headers(self, headers: list[HwmonHeader]) -> None:
+        self.hwmon_headers = headers
+        self.headers_updated.emit(headers)
+
+    def request_hw_diagnostics_refresh(self) -> None:
+        """Ask the live poll worker to re-read ``/diagnostics/hardware``.
+
+        A request, like :meth:`request_hwmon_headers_refresh`: the worker reads it
+        on its own thread. Nothing listens in demo mode.
+        """
+        self.hw_diagnostics_refresh_requested.emit()
+
+    def set_daemon_poll_interval(self, interval_ms: int) -> None:
+        """Record the daemon's running poll interval (from ``GET /config``)."""
+        if isinstance(interval_ms, bool) or not isinstance(interval_ms, int) or interval_ms <= 0:
+            return
+        if interval_ms == self.daemon_poll_interval_ms:
+            return
+        self.daemon_poll_interval_ms = interval_ms
+        self._update_warnings()
+
+    def reading_freshness(self, reading: SensorReading | FanReading) -> Freshness:
+        """A reading's freshness by its own age, at the daemon's cadence.
+
+        What a staleness alert or a chart annotation asks: has *this* reading
+        stopped refreshing? It ignores the connection, which has its own alert.
+        """
+        return reading.freshness_at(self.daemon_poll_interval_ms)
+
+    def display_freshness(self, reading: SensorReading | FanReading) -> Freshness:
+        """The freshness to *show* beside a reading.
+
+        As :meth:`reading_freshness`, but never "fresh" while the daemon is not
+        connected: no poll is arriving, so a figure on screen is the last one seen,
+        not a live one (`docs/08`: a stale value is never presented as live). Its
+        ``age_ms`` cannot say so — it froze with the last poll.
+        """
+        freshness = self.reading_freshness(reading)
+        if self.connection != ConnectionState.CONNECTED:
+            return at_least(freshness, Freshness.STALE)
+        return freshness
+
+    def request_hwmon_headers_refresh(self) -> None:
+        """Ask the live poll worker for a fresh ``/hwmon/headers`` (`TS-ae`).
+
+        A request, not a fetch: nothing listens in demo mode, and in live mode
+        the worker reads the headers on its own thread, off the UI loop.
+        """
+        self.hwmon_headers_refresh_requested.emit()
+
+    def set_openfan_roles(self, roles: list[OpenFanRole]) -> None:
+        self.openfan_roles = roles
+        self.openfan_roles_updated.emit(roles)
+
+    def openfan_role(self, fan_id: str) -> OpenFanRole | None:
+        """The reported role of one OpenFan channel, or ``None``."""
+        return next((r for r in self.openfan_roles if r.fan_id == fan_id), None)
+
+    def set_cooling_devices(self, inventory: CoolingDeviceInventory) -> None:
+        self.cooling_devices = inventory
+        self.cooling_devices_updated.emit(inventory)
+
+    def set_active_profile(self, name: str) -> None:
+        if name != self.active_profile_name:
+            self.active_profile_name = name
+            self.active_profile_changed.emit(name)
+
+    def set_active_profile_id(self, profile_id: str) -> None:
+        if profile_id != self.active_profile_id:
+            self.active_profile_id = profile_id
+            self.active_profile_id_changed.emit(profile_id)
+
+    @staticmethod
+    def _set_or_clear(mapping: dict[str, str], key: str, value: str) -> str:
+        """Store the stripped *value* under *key*, or drop the key when the value
+        is empty/whitespace-only. Returns the cleaned value so callers can emit
+        their own signal from it (or from a derived payload)."""
+        cleaned = value.strip() if value else ""
+        if cleaned:
+            mapping[key] = cleaned
+        else:
+            mapping.pop(key, None)
+        return cleaned
+
+    def set_fan_alias(self, fan_id: str, alias: str) -> None:
+        """Set or clear a fan alias. Empty/whitespace-only string clears.
+
+        Capped at ``MAX_FAN_ALIAS_LEN`` here rather than at each call site, so
+        every writer (fan wizard, the DEC-227 rename surfaces) is bounded.
+        """
+        if alias:
+            # Strip before capping so the limit counts characters of actual name,
+            # not leading whitespace that _set_or_clear is about to discard.
+            alias = alias.strip()[:MAX_FAN_ALIAS_LEN]
+        self._set_or_clear(self.fan_aliases, fan_id, alias)
+        self.fan_alias_changed.emit(fan_id, self.fan_display_name(fan_id))
+
+    def apply_fan_rename(self, fan_id: str, text: str) -> None:
+        """Apply a user rename of *fan_id* from any surface (DEC-227).
+
+        Shared by every rename affordance — the Dashboard Sensors rail, the
+        read-only fan cards and the Overview fan table — so they cannot drift
+        apart. Qt-free, so the rule is unit-testable without a widget.
+
+        Empty text clears the alias. So does text equal to the fan's *fallback*
+        name: an in-place ``QTreeWidgetItem`` editor opens pre-filled with the
+        already-resolved label (Qt aliases ``EditRole`` to ``DisplayRole``), so
+        without this rule merely pressing Enter on an unchanged row would mint an
+        alias — and ``fan_display.filter_displayable_fans`` reads "has an alias"
+        as "the user wants this fan visible", which would silently pin a 0-RPM
+        header on screen forever.
+
+        The presentation-only ``(AIO)`` tag is stripped back off for the same
+        reason. Consequence: a fan cannot be named literally "Front (AIO)".
+        """
+        cleaned = (text or "").strip()
+        if cleaned.endswith(AIO_SUFFIX):
+            cleaned = cleaned[: -len(AIO_SUFFIX)].strip()
+        cleaned = cleaned[:MAX_FAN_ALIAS_LEN]
+        if cleaned == self.fan_fallback_name(fan_id):
+            cleaned = ""
+        self.set_fan_alias(fan_id, cleaned)
+
+    def set_sensor_class_override(self, sensor_id: str, source_class: str) -> None:
+        """Force (or clear) a sensor's display classification (DEC-156).
+
+        ``source_class == "coolant"`` marks the sensor as coolant; an empty
+        string clears the override (revert to auto-classification). GUI-owned
+        user policy — the daemon stays hardware-truthful.
+        """
+        cleaned = self._set_or_clear(self.sensor_class_overrides, sensor_id, source_class)
+        self.sensor_class_override_changed.emit(sensor_id, cleaned)
+
+    def classify_sensor(self, sensor: SensorReading) -> SensorClassification:
+        """The one way a surface classifies a sensor for display (``DC-g``).
+
+        Supplies both inputs a bare ``classify_sensor`` call can silently omit:
+        the board vendor (from ``board_info``, which never downgrades on a blank
+        rescan — DEC-229) and the user's class overrides (DEC-156). Every
+        GUI surface that shows a sensor's class or confidence reads it here, so
+        the Overview table, its summary, the Sensor Detail dialog and the
+        Dashboard tooltip cannot disagree about the same sensor.
+        """
+        return classify_reading(
+            sensor,
+            board_vendor=self.board_info.vendor,
+            overrides=self.sensor_class_overrides,
+        )
+
+    def fan_display_name(self, fan_id: str) -> str:
+        """Return the best display name for a fan.
+
+        Priority:
+            1. user alias (``fan_aliases``)
+            2. everything else — see :meth:`fan_fallback_name`
+        """
+        if fan_id in self.fan_aliases:
+            return self.fan_aliases[fan_id]
+        return self.fan_fallback_name(fan_id)
+
+    def member_display_name(self, member_id: str, member_label: str = "") -> str:
+        """Display name for a profile member — the control-surface counterpart of
+        :meth:`fan_display_name` (DEC-228).
+
+        Control cards, fan-role chips and the member editor render a member's
+        *cached* ``member_label``, which is a snapshot taken when the member was
+        added. A later rename updated ``fan_aliases`` and left that snapshot
+        stale, so the same fan showed two different names depending on which page
+        you were looking at. A live alias therefore wins here.
+
+        Note the tiers cannot be collapsed to ``fan_display_name(id) or label``:
+        ``fan_display_name`` falls back to a synthesised name and so is *never*
+        empty, which would make the cached label unreachable.
+        """
+        if member_id in self.fan_aliases:
+            return self.fan_aliases[member_id]
+        if member_label:
+            return member_label
+        return self.fan_fallback_name(member_id)
+
+    def fan_fallback_name(self, fan_id: str) -> str:
+        """Return the best display name for a fan *ignoring* any user alias.
+
+        Priority:
+            1. GPU model name (for ``amd_gpu:`` / ``intel_gpu:`` / ``nvidia_gpu:``)
+            2. OpenFan channel label (``openfan:ch00`` -> ``OpenFan CH0``)
+            3. ``hwmon_label_resolver`` (hwmon fans) — the daemon-supplied
+               sysfs ``HwmonHeader.label``, then ``/etc/sensors.d``, then the
+               in-repo board fallback table (A3), then raw ``pwmN``. A label
+               the daemon merely synthesised from the node id is skipped
+               rather than treated as authoritative (DEC-229)
+            4. raw ``fan_id`` as a last resort
+
+        Split out of :meth:`fan_display_name` for DEC-227: ``apply_fan_rename``
+        compares the user's typed text against this to tell "they renamed it"
+        from "they pressed Enter on the name already shown".
+        """
+        if fan_id.startswith("amd_gpu:"):
+            if self.capabilities and self.capabilities.amd_gpu.present:
+                return f"{self.capabilities.amd_gpu.display_label} Fan"
+            return "D-GPU Fan"
+        if fan_id.startswith("intel_gpu:"):
+            if self.capabilities and self.capabilities.intel_gpu.present:
+                return f"{self.capabilities.intel_gpu.display_label} Fan"
+            return "Intel D-GPU Fan"
+        if fan_id.startswith("nvidia_gpu:"):
+            if self.capabilities and self.capabilities.nvidia_gpu.present:
+                return f"{self.capabilities.nvidia_gpu.display_label} Fan"
+            return "NVIDIA D-GPU Fan"
+        # DEC-227: an OpenFan channel has no label source at all — the daemon
+        # reports only a channel count, and no hwmon header carries an
+        # "openfan:" id — so without this every unnamed channel rendered as its
+        # raw daemon id. Presentation only: this is never written into
+        # fan_aliases, so it cannot make filter_displayable_fans treat an
+        # unnamed 0-RPM channel as one the user asked to keep visible.
+        if fan_id.startswith(_OPENFAN_CH_PREFIX):
+            channel = fan_id[len(_OPENFAN_CH_PREFIX) :]
+            # isdecimal, not isdigit: isdigit accepts superscripts and other
+            # Unicode digit forms that int() then rejects with a ValueError, on a
+            # path called once per fan per poll. The daemon only ever mints ASCII
+            # channel ids, so this is belt-and-braces rather than a live crash.
+            if channel.isdecimal():
+                return f"OpenFan CH{int(channel)}"
+        for h in self.hwmon_headers:
+            if h.id == fan_id:
+                # DEC-229: the resolver owns tiers 2-5, including whether the
+                # daemon's label is real or a synthesised "pwmN" placeholder.
+                # A short-circuit on `h.label` here would defeat that — the
+                # placeholder is non-empty, so it used to win over the board
+                # table that knew the header was CPU_FAN.
+                return resolve_hwmon_header_label(
+                    sysfs_label=h.label,
+                    chip_name=h.chip_name,
+                    sysfs_chip_name=h.sysfs_chip_name,
+                    pwm_index=h.pwm_index,
+                    board_vendor=self.board_info.vendor,
+                    board_name=self.board_info.name,
+                )
+        return fan_id
+
+    @property
+    def warning_count(self) -> int:
+        """Conditions that genuinely exist right now (ACTIVE + ACKNOWLEDGED).
+
+        A **health** number, deliberately not quietened by acknowledgement — a user
+        cannot make a fan spin by clicking a button. Kept under its original name
+        because the support bundle and the footer rollup both read it (DEC-282).
+        """
+        return self.alerts.active_count()
+
+    @property
+    def unacknowledged_count(self) -> int:
+        """What the user has not yet looked at, including alerts that recovered before
+        anyone saw them. An **attention** number (DEC-282)."""
+        return self.alerts.unacknowledged_count()
+
+    def add_warning(self, level: str, source: str, message: str, key: str = "") -> None:
+        """Add an ad-hoc warning from a service (e.g. a profile-load or daemon-poll failure).
+
+        Reconciles the ledger immediately rather than waiting for the next polling
+        tick — callers signalling a transient daemon problem expect the UI to reflect
+        it without a 1 s delay.
+
+        Re-adding a key whose condition is already present is a no-op refresh: it stays
+        one occurrence, so it neither re-emits nor re-logs. Re-adding it *after* it has
+        recovered mints a genuinely new occurrence, which does alert again even if the
+        earlier one was acknowledged (DEC-282).
+        """
+        if not key:
+            key = f"{source}:{message}"
+        self._external_warnings = [w for w in self._external_warnings if w.get("_key") != key]
+        self._external_warnings.append(
+            {"level": level, "source": source, "message": message, "_key": key}
+        )
+        self._update_warnings()
+
+    def remove_warning(self, key: str) -> None:
+        """Remove an ad-hoc warning by key (e.g. when the condition clears).
+
+        This closes the occurrence rather than deleting it: it becomes recovered
+        history and, if it was never acknowledged, stays visible as such.
+        """
+        self._external_warnings = [w for w in self._external_warnings if w.get("_key") != key]
+        self._update_warnings()
+
+    def acknowledge_all(self) -> None:
+        """Mark every outstanding alert as seen.
+
+        This is acknowledgement, not resolution: a condition that is still happening
+        stays in ``warning_count`` and keeps its ACKNOWLEDGED occurrence open. Nothing
+        is suppressed and nothing is destroyed — a later recurrence of the same
+        condition is a new occurrence and will alert again (DEC-282, replacing the
+        ``clear_warnings`` that added the key to a permanent suppression set).
+        """
+        if self.alerts.acknowledge_all(time.time()):
+            self._refresh_warning_rows()
+            self._emit_warning_signals(content_changed=True)
+
+    def acknowledge(self, key: str) -> None:
+        """Mark one alert (by condition key) as seen. Same semantics as
+        :meth:`acknowledge_all`, scoped to a single condition."""
+        if self.alerts.acknowledge(key, time.time()):
+            self._refresh_warning_rows()
+            self._emit_warning_signals(content_changed=True)
+
+    def _current_conditions(self) -> list[AlertCondition]:
+        """Everything that is wrong *right now*, as the ledger's per-tick input.
+
+        Note this reads both ``self.sensors`` and ``self.fans`` regardless of which
+        setter called it. That is deliberate: ``set_sensors`` and ``set_fans`` each
+        reconcile, and a condition absent only because its half of the state has not
+        been written yet would otherwise register as a spurious recovery.
+        """
+        conditions: list[AlertCondition] = []
+
+        peers = [p.id for p in self.sensors]
+        for s in self.sensors:
+            freshness = self.reading_freshness(s)
+            if freshness != Freshness.FRESH:
+                label = sensor_display_name(s.id, s.label, peers=peers)
+                conditions.append(
+                    AlertCondition(
+                        key=f"sensor_stale:{s.id}",
+                        level="warning",
+                        source="sensor",
+                        component=label,
+                        # The freshness word belongs in the title, not only the detail:
+                        # _content_signature compares titles, so a stale→invalid
+                        # escalation must be visible there to trigger a re-render.
+                        title=f"Sensor '{label}' {freshness.name.lower()}",
+                        detail=(f"Sensor '{label}' is {freshness.name.lower()} (age {s.age_ms}ms)"),
+                    )
+                )
+
+        ds = self.daemon_status
+        # DEC-482: while the daemon reports an OpenFAN firmware update — running, or
+        # one that left the board needing recovery — one alert stands in for the
+        # OpenFAN fans' staleness warnings, whose cause is that update. Every other
+        # alert stands, a stall on those same fans included. Not once the daemon has
+        # been unreachable long enough that nothing current is known (DEC-459).
+        # A reading is judged against the update reported with it (`set_fans`).
+        update = ds.openfan_maintenance if ds and not self._thermal_unreachable else None
+        fans_update = None if self._thermal_unreachable else self._fans_update
+        # DEC-484: a board that does not answer, the same way: its one alert
+        # stands in for its channels' staleness.
+        silent = ds.openfan_silent_board if ds and not self._thermal_unreachable else None
+        fans_silent = None if self._thermal_unreachable else self._fans_silent
+        for f in self.fans:
+            fan_freshness = self.reading_freshness(f)
+            if fan_freshness != Freshness.FRESH and not suppresses_fan_staleness(
+                fans_update, f.id, fans_silent
+            ):
+                conditions.append(
+                    AlertCondition(
+                        key=f"fan_stale:{f.id}",
+                        level="warning",
+                        source="fan",
+                        component=f.id,
+                        title=f"Fan '{f.id}' telemetry {fan_freshness.name.lower()}",
+                        detail=(f"Fan '{f.id}' is {fan_freshness.name.lower()} (age {f.age_ms}ms)"),
+                    )
+                )
+            if f.id in self.stalled_fan_ids:
+                conditions.append(
+                    AlertCondition(
+                        key=f"fan_stall:{f.id}",
+                        level="error",
+                        source="fan",
+                        component=f.id,
+                        title=f"{f.id} stall",
+                        detail=_stall_detail(f),
+                    )
+                )
+
+        # DEC-443: the daemon's cooling watch. Read off the last status, which the
+        # poll delivers before the sensors and fans whose setters reconcile here.
+        cooling = (
+            [pump_stall_alert(self.fan_display_name(p.header_id), p) for p in ds.pump_stalls]
+            if ds
+            else []
+        )
+        cooling += [advisory_alert(a) for a in ds.advisories] if ds else []
+        watch = [(c, "cooling") for c in cooling]
+        # DEC-459: a non-normal thermal state is an alert until the daemon has
+        # been unreachable long enough that nothing current is known about it.
+        if ds and not self._thermal_unreachable:
+            thermal = thermal_alert(ds.thermal_state, ds.emergency_causes)
+            if thermal is not None:
+                watch.append((thermal, "thermal"))
+        update_alert = firmware_update_alert(update)
+        if update_alert is not None:
+            watch.append((update_alert, "openfan"))
+        silent_alert = silent_board_alert(silent)
+        if silent_alert is not None:
+            watch.append((silent_alert, "openfan"))
+        for c, source in watch:
+            conditions.append(
+                AlertCondition(
+                    key=c.key,
+                    level=c.level,
+                    source=source,
+                    component=c.title,
+                    title=c.title,
+                    detail=c.detail,
+                )
+            )
+
+        for w in self._external_warnings:
+            key = w.get("_key", "")
+            message = w.get("message", "")
+            source = w.get("source", "")
+            conditions.append(
+                AlertCondition(
+                    key=key,
+                    level=w.get("level", "warning"),
+                    source=source,
+                    component=source,
+                    title=message,
+                    detail=message,
+                )
+            )
+
+        return conditions
+
+    def _refresh_warning_rows(self) -> None:
+        """Rebuild the legacy row list the warnings view renders, from the ledger.
+
+        These rows are everything the user has not yet looked at, which includes
+        occurrences that **already recovered** — the whole point of DEC-282 is that an
+        alert which cleared before anyone saw it does not simply vanish. Such a row
+        carries ``recovered=True`` and its recovery time so the view can say so rather
+        than presenting a resolved condition as if it were still happening.
+
+        Kept 1:1 with ``unacknowledged_count`` so the badge never points at an empty
+        list.
+        """
+        self.unacknowledged_warnings = [
+            {
+                "timestamp": occ.activation_epoch,
+                "level": occ.level,
+                "source": occ.source,
+                # A recovered row takes the short title, not the detail: the detail is
+                # written in the present tense ("Sensor 'S1' is stale") and reads as a
+                # live claim next to a RECOVERED marker. §8's recovered rows are
+                # labels, not sentences.
+                "message": occ.title if occ.recovered_at is not None else occ.detail,
+                "_key": occ.key,
+                "recovered": occ.recovered_at is not None,
+                "recovered_at": occ.recovered_at,
+            }
+            for occ in self.alerts.unacknowledged()
+        ]
+
+    def _emit_warning_signals(self, *, content_changed: bool) -> None:
+        """Emit whichever of the three warning signals actually changed.
+
+        The counts are gated on their own value so the footer and ribbon are not
+        re-rendered every poll. ``warnings_changed`` is gated on *content*, which is
+        the whole point: a condition resolving as another activates leaves both counts
+        identical, and that used to mean no signal at all and a panel showing an alert
+        that had already gone.
+        """
+        active = self.alerts.active_count()
+        unack = self.alerts.unacknowledged_count()
+        if content_changed:
+            self.warnings_changed.emit()
+        if active != self._last_active_count:
+            self._last_active_count = active
+            self.warning_count_changed.emit(active)
+        if unack != self._last_unack_count:
+            self._last_unack_count = unack
+            self.unacknowledged_count_changed.emit(unack)
+
+    def _content_signature(self) -> tuple:
+        """A comparable summary of everything an alert view renders.
+
+        Deliberately built from ``title`` and not ``detail``: a staleness detail
+        restates a growing age and so differs on *every* poll, and treating that as a
+        content change would rebuild the warnings list once a second — collapsing any
+        raw-detail expander the user had opened. ``title`` carries the freshness word,
+        so the meaningful stale→invalid transition still registers while the ticking
+        age does not. Recovered occurrences are keyed by activation epoch, which is
+        what distinguishes one occurrence of a condition from the next.
+        """
+        return (
+            tuple((o.key, o.level, o.title, o.state) for o in self.alerts.present()),
+            tuple((o.key, o.activation_epoch, o.state) for o in self.alerts.recovered()),
+        )
+
+    def _update_warnings(self) -> None:
+        """Fold the current conditions into the ledger and publish what changed.
+
+        REWRITE (DEC-282): this used to rebuild a flat list and emit only when its
+        *length* moved. It now reconciles occurrences, so a swap at constant length is
+        a content change like any other, and onsets/recoveries are surfaced as
+        transitions for the event log instead of vanishing.
+        """
+        before = self._content_signature()
+        transitions = self.alerts.reconcile(self._current_conditions(), time.time())
+        self._refresh_warning_rows()
+        self._emit_warning_signals(content_changed=self._content_signature() != before)
+        if transitions:
+            self.alert_transitions.emit(transitions)

@@ -1,0 +1,28 @@
+post_install() {
+    cat <<'EOF'
+:: ventulus installed.
+
+   Launch:        ventulus  (or via your application menu)
+   Demo mode:     ventulus --demo
+
+   The GUI requires ventulusd to be running. If it isn't yet:
+     sudo systemctl enable --now ventulusd
+
+   Documentation:
+     man ventulus
+     /usr/share/doc/ventulus/manual/setup-checklist.md
+     /usr/share/doc/ventulus/manual/getting-started.md
+
+   Coming from Control-OFC? Close it and open Ventulus: your settings,
+   profiles, themes and saved PWM Test Reports are copied across the first
+   time it starts. The old folders are left in place.
+EOF
+}
+
+post_upgrade() {
+    cat <<'EOF'
+:: ventulus upgraded. Restart any running instance to pick up the new
+   version. Release notes:
+     /usr/share/doc/ventulus/CHANGELOG.md
+EOF
+}

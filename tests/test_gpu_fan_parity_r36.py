@@ -1,0 +1,183 @@
+"""R36: AMD dGPU fan parity — control loop, dashboard, diagnostics, source routing.
+
+Covers: control loop GPU write routing, sensor panel GPU fan group, diagnostics
+GPU fan entries, GPU Status event log button, fan role source compatibility.
+"""
+
+from __future__ import annotations
+
+from ventulus.api.models import (
+    DEFAULT_DAEMON_POLL_INTERVAL_MS,
+    AmdGpuCapability,
+    Capabilities,
+    ConnectionState,
+    FanReading,
+    OperationMode,
+)
+from ventulus.services.app_state import AppState
+from ventulus.services.diagnostics_service import DiagnosticsService
+from ventulus.services.overview_view import build_fan_rows
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_state() -> AppState:
+    state = AppState()
+    state.set_connection(ConnectionState.CONNECTED)
+    state.set_mode(OperationMode.AUTOMATIC)
+    return state
+
+
+def _gpu_fan() -> FanReading:
+    return FanReading(
+        id="amd_gpu:0000:2d:00.0",
+        source="amd_gpu",
+        rpm=1450,
+        last_commanded_pwm=65,
+        age_ms=200,
+    )
+
+
+def _gpu_caps(present: bool = True) -> Capabilities:
+    return Capabilities(
+        daemon_version="0.3.0",
+        amd_gpu=AmdGpuCapability(
+            present=present,
+            model_name="RX 9070 XT",
+            display_label="9070XT",
+            pci_id="0000:2d:00.0",
+            fan_control_method="pmfw_curve",
+            pmfw_supported=True,
+            fan_rpm_available=True,
+            fan_write_supported=True,
+            is_discrete=True,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sensor panel GPU fan group
+# ---------------------------------------------------------------------------
+
+
+class TestSensorPanelGpuFanGroup:
+    """Sensor series panel groups GPU fans under 'Fans — D-GPU'."""
+
+    def test_gpu_fan_group_label_exists(self):
+        from ventulus.ui.widgets.sensor_series_panel import _GROUP_LABELS
+
+        assert "fans_gpu" in _GROUP_LABELS
+        assert "D-GPU" in _GROUP_LABELS["fans_gpu"]
+
+    def test_gpu_fan_group_in_order(self):
+        from ventulus.ui.widgets.sensor_series_panel import _GROUP_ORDER
+
+        assert "fans_gpu" in _GROUP_ORDER
+        # GPU fans should appear before hwmon fans
+        gpu_idx = _GROUP_ORDER.index("fans_gpu")
+        hwmon_idx = _GROUP_ORDER.index("fans_hwmon")
+        assert gpu_idx < hwmon_idx
+
+
+# ---------------------------------------------------------------------------
+# GPU fan → fan-row parity (re-vehicled onto the live Overview view-model)
+# ---------------------------------------------------------------------------
+
+
+class TestDiagnosticsGpuFanTable:
+    """A GPU fan yields a fan row whose source column reads 'amd_gpu'."""
+
+    def test_gpu_fan_in_fan_table(self):
+        # Re-vehicled off the retired Diagnostics fan table onto the live
+        # Overview builder (services.overview_view.build_fan_rows); the page only
+        # rendered these rows into a QTableWidget.
+        rows = build_fan_rows([_gpu_fan()], [], None, display_name=lambda i: i)
+        assert len(rows) == 1
+        assert rows[0].source == "amd_gpu"
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics service GPU formatting
+# ---------------------------------------------------------------------------
+
+
+class TestDiagnosticsServiceGpuFormat:
+    """format_gpu_status produces truthful, labeled output."""
+
+    def test_gpu_present_shows_details(self):
+        state = _make_state()
+        state.set_capabilities(_gpu_caps())
+        svc = DiagnosticsService(state)
+        text = svc.format_gpu_status()
+        assert "Detected: Yes" in text
+        assert "RX 9070 XT" in text
+        assert "pmfw_curve" in text
+        assert "PCI ID: 0000:2d:00.0" in text
+
+    def test_gpu_absent_shows_message(self):
+        state = _make_state()
+        state.set_capabilities(_gpu_caps(present=False))
+        svc = DiagnosticsService(state)
+        text = svc.format_gpu_status()
+        assert "Detected: No" in text
+
+    def test_gpu_fan_state_shown(self):
+        state = _make_state()
+        state.set_capabilities(_gpu_caps())
+        state.set_fans([_gpu_fan()])
+        svc = DiagnosticsService(state)
+        text = svc.format_gpu_status()
+        assert "1450 RPM" in text
+        assert "65%" in text
+
+    def test_no_state_returns_message(self):
+        svc = DiagnosticsService(state=None)
+        text = svc.format_gpu_status()
+        assert "no application state" in text.lower()
+
+    def test_includes_source_attribution(self):
+        state = _make_state()
+        state.set_capabilities(_gpu_caps())
+        svc = DiagnosticsService(state)
+        text = svc.format_gpu_status()
+        assert "source:" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Fan source compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestFanSourceCompatibility:
+    """GPU fan entries work with existing fan infrastructure."""
+
+    def test_gpu_fan_reading_freshness(self):
+        from ventulus.api.models import Freshness
+
+        fan = _gpu_fan()
+        assert fan.freshness_at(DEFAULT_DAEMON_POLL_INTERVAL_MS) == Freshness.FRESH
+
+    def test_gpu_fan_stale(self):
+        from ventulus.api.models import Freshness
+
+        fan = FanReading(
+            id="amd_gpu:0000:2d:00.0",
+            source="amd_gpu",
+            rpm=0,
+            age_ms=5000,
+        )
+        assert fan.freshness_at(DEFAULT_DAEMON_POLL_INTERVAL_MS) == Freshness.STALE
+
+    def test_gpu_fan_id_format(self):
+        fan = _gpu_fan()
+        assert fan.id.startswith("amd_gpu:")
+        # PCI BDF follows the prefix
+        bdf = fan.id.removeprefix("amd_gpu:")
+        parts = bdf.split(":")
+        assert len(parts) == 3  # domain:bus:dev.func
+
+    def test_gpu_fan_source_is_amd_gpu(self):
+        fan = _gpu_fan()
+        assert fan.source == "amd_gpu"

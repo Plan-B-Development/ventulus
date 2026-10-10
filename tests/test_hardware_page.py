@@ -1,0 +1,419 @@
+"""DEC-212: HardwarePage — rendering + re-pointed action routing + probe.
+
+Constructs the page directly and drives `_on_readiness_ok` (no worker threads);
+the probe/worker paths are monkeypatched. Mirrors `test_system_state_page.py`.
+"""
+
+from __future__ import annotations
+
+from PySide6.QtGui import QShowEvent
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QWidget
+
+from ventulus.api.models import (
+    Capabilities,
+    ConnectionState,
+    ControlCapability,
+    HardwareReadiness,
+    HwmonHeader,
+    ReadinessItem,
+    ReadinessRollup,
+    SuperIoChip,
+    SuperIoRecommendation,
+    SuperIoReport,
+)
+from ventulus.services.app_state import AppState
+from ventulus.services.diagnostics_service import DiagnosticsService
+from ventulus.ui.components.badges import StatusPill
+from ventulus.ui.pages.hardware_page import HardwarePage
+
+
+def _hw(overall="warning", items=None, superio=None, **kw) -> HardwareReadiness:
+    return HardwareReadiness(
+        overall=overall,
+        rollup=ReadinessRollup(overall=overall, top_summary=kw.pop("top", None) or None),
+        items=items if items is not None else [],
+        superio=superio if superio is not None else SuperIoReport(arch_supported=True),
+        **kw,
+    )
+
+
+def _unbound_chip(name="it8688") -> SuperIoChip:
+    return SuperIoChip(
+        chip_name=name,
+        vendor="ite",
+        confidence="medium",
+        expected_module="it87",
+        hwmon_present=False,
+        recommendation=SuperIoRecommendation(
+            module="it87",
+            in_mainline=False,
+            load_hint="sudo modprobe it87",
+            reason="No driver bound.",
+        ),
+    )
+
+
+def _page(qtbot, *, client=None):
+    s = AppState()
+    s.set_connection(ConnectionState.CONNECTED)
+    page = HardwarePage(state=s, diagnostics_service=DiagnosticsService(s), client=client)
+    qtbot.addWidget(page)
+    return page, s
+
+
+# ── Rendering ────────────────────────────────────────────────────────────
+
+
+def test_checklist_renders_grouped_rows(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(
+        _hw(
+            items=[
+                ReadinessItem(code="cpu_sensor_present", severity="ok", summary="CPU temp OK"),
+                ReadinessItem(
+                    code="no_pwm_controls",
+                    severity="warning",
+                    summary="No writable PWM headers",
+                    detail="Load a Super-I/O driver.",
+                ),
+            ]
+        )
+    )
+    assert page.findChild(QWidget, "Hardware_Check_cpu_sensor_present") is not None
+    assert page.findChild(QWidget, "Hardware_Check_no_pwm_controls") is not None
+    # a detail-bearing row has a Details collapsible; a plain ok row does not
+    assert page.findChild(QWidget, "Hardware_CheckDetail_no_pwm_controls") is not None
+    assert page.findChild(QWidget, "Hardware_CheckDetail_cpu_sensor_present") is None
+
+
+def test_verdict_and_summary_bar(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(
+        _hw(
+            overall="warning",
+            items=[
+                ReadinessItem(code="cpu_sensor_present", severity="ok"),
+                ReadinessItem(code="no_pwm_controls", severity="warning", summary="x"),
+            ],
+        )
+    )
+    assert page._verdict_pill.text() == "HARDWARE NEEDS ATTENTION"
+    pills = page._summary_bar.findChildren(StatusPill)
+    texts = [p.text() for p in pills]
+    assert any("PASS" in t for t in texts) and any("WARN" in t for t in texts)
+
+
+def test_readiness_detail_rendered_as_plaintext(qtbot):
+    """Daemon-supplied readiness detail is rendered PlainText, so an HTML-ish
+    daemon string cannot inject markup into the checklist (audit 2026-07-15
+    Phase 5)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QLabel
+
+    page, _ = _page(qtbot)
+    daemon_detail = "<b>Load</b> the it87 driver & reboot"
+    page._on_readiness_ok(
+        _hw(
+            items=[
+                ReadinessItem(
+                    code="no_pwm_controls",
+                    severity="warning",
+                    summary="No writable PWM headers",
+                    detail=daemon_detail,
+                ),
+            ]
+        )
+    )
+    section = page.findChild(QWidget, "Hardware_CheckDetail_no_pwm_controls")
+    assert section is not None
+    detail_labels = [lbl for lbl in section.findChildren(QLabel) if lbl.text() == daemon_detail]
+    assert detail_labels, "daemon detail label not found in the collapsible section"
+    assert all(lbl.textFormat() == Qt.TextFormat.PlainText for lbl in detail_labels)
+
+
+# ── Action routing (re-pointed to the migrated pages) ──────────────────────
+
+
+def test_cpu_action_emits_preferred_sensors(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(
+        _hw(items=[ReadinessItem(code="cpu_sensor_missing", severity="critical", summary="x")])
+    )
+    btn = page.findChild(QPushButton, "Hardware_Do_cpu_sensor_missing")
+    with qtbot.waitSignal(page.open_preferred_sensors) as blocker:
+        btn.click()
+    assert blocker.args == ["cpu"]
+
+
+def test_pwm_action_scrolls_to_in_page_diagnostics(qtbot):
+    """AIO-MB Phase 6 §7: Hardware is the PRIMARY entry point for PWM testing.
+
+    This action used to deep-link to System State (which is why the test was
+    named for that signal). It now lands in this page's own Hardware
+    Diagnostics section; System State keeps its controls as an advanced
+    shortcut, reachable from the button asserted below.
+    """
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(
+        _hw(items=[ReadinessItem(code="pwm_control_unverified", severity="warning", summary="x")])
+    )
+    btn = page.findChild(QPushButton, "Hardware_Do_pwm_control_unverified")
+    assert btn is not None
+    calls: list = []
+    page._scroll.ensureWidgetVisible = lambda w, *a, **k: calls.append(w)  # type: ignore[method-assign]
+    btn.click()
+    assert calls == [page._diagnostics_card], "the action must reveal the in-page section"
+
+
+def test_system_state_remains_reachable_as_advanced_shortcut(qtbot):
+    """§8: the System State entry point may remain, and does — explicitly."""
+    page, _ = _page(qtbot)
+    btn = page.findChild(QPushButton, "Hardware_Btn_advanced")
+    assert btn is not None
+    with qtbot.waitSignal(page.open_system_state, timeout=1000):
+        btn.click()
+
+
+def test_sensors_action_emits_open_overview(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(
+        _hw(items=[ReadinessItem(code="sensors_unavailable", severity="warning", summary="x")])
+    )
+    btn = page.findChild(QPushButton, "Hardware_Do_sensors_unavailable")
+    with qtbot.waitSignal(page.open_overview, timeout=1000):
+        btn.click()
+
+
+def test_read_only_pwm_action_opens_system_state_not_the_pwm_test(qtbot):
+    """DC-ag: a read-only header cannot be tested. Its button must reach System
+    State (the driver guidance), and must not scroll to the PWM-test section."""
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(
+        _hw(items=[ReadinessItem(code="pwm_read_only", severity="warning", summary="x")])
+    )
+    btn = page.findChild(QPushButton, "Hardware_Do_pwm_read_only")
+    assert btn is not None
+    scrolled: list = []
+    page._scroll.ensureWidgetVisible = lambda w, *a, **k: scrolled.append(w)  # type: ignore[method-assign]
+    with qtbot.waitSignal(page.open_system_state, timeout=1000):
+        btn.click()
+    assert scrolled == [], "the action must navigate away, not scroll within the page"
+
+
+def test_superio_action_scrolls_without_crash(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(
+        _hw(items=[ReadinessItem(code="no_pwm_controls", severity="warning", summary="x")])
+    )
+    btn = page.findChild(QPushButton, "Hardware_Do_no_pwm_controls")
+    btn.click()  # target "superio" → in-surface scroll, must not raise
+
+
+# ── Super-I/O table ────────────────────────────────────────────────────────
+
+
+def test_superio_table_real_columns(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(
+        _hw(superio=SuperIoReport(arch_supported=True, chips=[_unbound_chip("it8696")]))
+    )
+    table = page.findChild(QWidget, "Hardware_Table_superio")
+    assert table is not None
+    assert table.rowCount() == 1  # one chip, no fabricated per-channel rows
+    # Index from the module's own constant, not a literal: WIRE-w inserted an
+    # Evidence column before Health and this line silently addressed the wrong
+    # cell, which is the whole argument against hardcoding a column number.
+    from ventulus.ui.pages.hardware_page import _SIO_HEALTH
+
+    holder = table.cellWidget(0, _SIO_HEALTH)
+    assert holder.findChild(StatusPill) is not None
+    assert page.findChild(QWidget, "Hardware_ChipHow_it8696") is not None
+
+
+def test_copy_command_to_clipboard(qtbot):
+    from PySide6.QtWidgets import QApplication
+
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(
+        _hw(superio=SuperIoReport(arch_supported=True, chips=[_unbound_chip("it8696")]))
+    )
+    btn = page.findChild(QPushButton, "Hardware_CmdCopy_it8696")
+    btn.click()
+    assert QApplication.clipboard().text() == "sudo modprobe it87"
+
+
+# ── Probe / lifecycle ──────────────────────────────────────────────────────
+
+
+def test_probe_confirm_emits_only_on_yes(qtbot, monkeypatch):
+    page, _ = _page(qtbot, client=object())
+    page._ensure_readiness_worker = lambda: True  # type: ignore[method-assign]  # no real thread
+    fired: list[int] = []
+    page._readiness_probe_request.connect(lambda: fired.append(1))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    page._confirm_probe()
+    assert fired == [1]
+    fired.clear()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    page._confirm_probe()
+    assert fired == []
+
+
+def test_probe_consent_names_the_writes_and_the_refusal(qtbot, monkeypatch):
+    """DC-w (DEC-433): the dialog is a consent point, and the daemon's probe
+    writes a vendor unlock and exit where nothing answers — it must not be
+    described as read-only, and it must say the probe is refused while a
+    Super-I/O driver it recognises is bound."""
+    page, _ = _page(qtbot, client=object())
+    asked: list[str] = []
+
+    def question(_parent, _title, text, *a, **k):
+        asked.append(text)
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+    page._confirm_probe()
+    assert len(asked) == 1
+    text = asked[0]
+    assert "not read-only" in text
+    assert "unlock" in text
+    assert "is read-only" not in text
+    assert "refuses" in text and "recognises is bound" in text
+
+
+def test_showevent_lazy_fetch_once(qtbot):
+    page, _ = _page(qtbot)
+    calls: list[int] = []
+    page._fetch_readiness = lambda *a, **k: calls.append(1)  # type: ignore[method-assign]
+    page.showEvent(QShowEvent())
+    page.showEvent(QShowEvent())
+    assert calls == [1]  # latched → single fetch
+
+
+def test_showevent_skips_when_unsupported(qtbot):
+    page, _ = _page(qtbot)
+    page._readiness_unsupported = True
+    calls: list[int] = []
+    page._fetch_readiness = lambda *a, **k: calls.append(1)  # type: ignore[method-assign]
+    page.showEvent(QShowEvent())
+    assert calls == []
+
+
+def test_unsupported_error_latches(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_error("unsupported", "old daemon")
+    assert page._readiness_unsupported is True
+    assert not page._status_label.isHidden()
+
+
+def test_probe_ok_rerenders_superio(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(_hw(superio=SuperIoReport(arch_supported=True, chips=[])))
+    page._on_readiness_probe_ok(SuperIoReport(arch_supported=True, chips=[_unbound_chip("it8696")]))
+    assert page.findChild(QWidget, "Hardware_Table_superio") is not None
+
+
+def test_set_theme_rerenders(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(
+        _hw(items=[ReadinessItem(code="no_pwm_controls", severity="warning", summary="x")])
+    )
+    page.set_theme(None)
+    assert page._verdict_pill.text() == "HARDWARE NEEDS ATTENTION"
+
+
+def test_no_objectname_leak(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(_hw(superio=SuperIoReport(arch_supported=True, chips=[_unbound_chip()])))
+    for child in page.findChildren(QWidget):
+        name = child.objectName()
+        assert not name.startswith("Diagnostics_"), name
+        assert not name.startswith("CoolingReadiness_"), name
+
+
+def test_cleanup_safe_without_worker(qtbot):
+    page, _ = _page(qtbot)
+    page.cleanup()  # never fetched → no worker; must not raise
+    assert page._readiness_worker is None
+
+
+def test_fetch_without_client_sets_status(qtbot):
+    page, _ = _page(qtbot)  # client None
+    page._fetch_readiness()
+    assert "no daemon connection" in page._status_label.text()
+
+
+def test_refresh_forces_fetch(qtbot):
+    page, _ = _page(qtbot)
+    calls: list = []
+    page._fetch_readiness = lambda *a, **k: calls.append(k.get("force"))  # type: ignore[method-assign]
+    page._refresh_readiness()
+    assert calls == [True]
+
+
+def test_generic_error_shows_message_without_latching(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_error("error", "boom")
+    assert "boom" in page._status_label.text()
+    assert page._readiness_unsupported is False
+
+
+def test_superio_non_x86_and_empty_render(qtbot):
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(_hw(superio=SuperIoReport(arch_supported=False)))
+    assert page.findChild(QWidget, "Hardware_Label_superioNote") is not None
+    page._on_readiness_ok(
+        _hw(superio=SuperIoReport(arch_supported=True, chips=[], notes=["a note"]))
+    )
+    assert page.findChild(QWidget, "Hardware_Label_superioNote") is not None
+    assert page.findChild(QWidget, "Hardware_Label_superioNotes") is not None
+
+
+# ── Header cards after the page is shown ─────────────────────────────────
+
+
+def _header(pwm_index: int, label: str) -> HwmonHeader:
+    return HwmonHeader(
+        id=f"hwmon:nct6799:isa-0a20:pwm{pwm_index}:{label}",
+        label=label,
+        chip_name="nct6799",
+        device_id="isa-0a20",
+        pwm_index=pwm_index,
+        supports_enable=True,
+        rpm_available=True,
+        is_writable=True,
+    )
+
+
+def _shown_page(qtbot):
+    page, s = _page(qtbot)
+    s.set_capabilities(Capabilities(control=ControlCapability(header_roles=True)))
+    page.resize(1200, 900)
+    page.show()
+    qtbot.waitExposed(page)
+    return page, s
+
+
+def test_header_cards_visible_when_headers_arrive_after_show(qtbot):
+    """The GUI restores the Hardware page on launch, so it is on screen before the
+    first poll publishes the headers. FlowLayout.insertWidget once skipped
+    addChildWidget, leaving every card created then hidden for good."""
+    page, s = _shown_page(qtbot)
+    assert page._header_cards == {}
+    s.set_hwmon_headers([_header(1, "CPU_FAN"), _header(2, "SYS_FAN1")])
+    QApplication.processEvents()
+    cards = list(page._header_cards.values())
+    assert len(cards) == 2
+    assert all(card.isVisibleTo(page) for card in cards)
+
+
+def test_header_cards_visible_when_headers_arrive_before_show(qtbot):
+    page, s = _page(qtbot)
+    s.set_capabilities(Capabilities(control=ControlCapability(header_roles=True)))
+    s.set_hwmon_headers([_header(1, "CPU_FAN"), _header(2, "SYS_FAN1")])
+    page.resize(1200, 900)
+    page.show()
+    qtbot.waitExposed(page)
+    cards = list(page._header_cards.values())
+    assert len(cards) == 2
+    assert all(card.isVisibleTo(page) for card in cards)

@@ -1,0 +1,579 @@
+"""Tests for the readiness verdict, "To fix" guidance, report, and combo arrow (DEC-113)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtWidgets import QTextBrowser
+
+from tests.severity_invariants import is_actionable_severity, is_high_severity
+from ventulus.api.models import (
+    AcpiConflictInfo,
+    BoardInfo,
+    GpuDiagnosticsInfo,
+    HardwareDiagnosticsResult,
+    HwmonChipInfo,
+    HwmonDiagnostics,
+    KernelModuleInfo,
+    ModuleCollisionInfo,
+    ThermalSafetyInfo,
+)
+from ventulus.services.duty_drift import NO_DRIFT
+from ventulus.ui.hwmon_guidance import (
+    VendorQuirk,
+    format_bound_driver_status,
+    severity_display,
+)
+from ventulus.ui.widgets import readiness_report
+from ventulus.ui.widgets.readiness_report import (
+    ReadinessReportDialog,
+    board_identity_line,
+    board_notes,
+    build_fix_guidance_html,
+    build_readiness_report_html,
+    chip_rows,
+    detect_readiness_problems,
+    header_summary_line,
+    module_rows,
+    readiness_verdict,
+    thermal_line,
+)
+
+
+def _healthy(**ov) -> HardwareDiagnosticsResult:
+    defaults = dict(
+        hwmon=HwmonDiagnostics(
+            chips_detected=[
+                HwmonChipInfo(
+                    chip_name="nct6779",
+                    expected_driver="nct6775",
+                    in_mainline_kernel=True,
+                    header_count=5,
+                ),
+            ],
+            total_headers=5,
+            writable_headers=5,
+        ),
+        board=BoardInfo(vendor="", name="Generic"),
+        kernel_modules=[KernelModuleInfo(name="nct6775", loaded=True, in_mainline=True)],
+        thermal_safety=ThermalSafetyInfo(state="normal", cpu_sensor_found=True),
+    )
+    defaults.update(ov)
+    return HardwareDiagnosticsResult(**defaults)
+
+
+class TestVerdict:
+    def test_healthy_is_success(self):
+        text, cls = readiness_verdict(_healthy(), duty_drift=NO_DRIFT)
+        assert cls == "SuccessChip"
+        assert "System ready" in text
+        assert "5" in text
+
+    def test_all_readonly_is_problem(self):
+        text, cls = readiness_verdict(
+            _healthy(hwmon=HwmonDiagnostics(total_headers=3, writable_headers=0)),
+            duty_drift=NO_DRIFT,
+        )
+        assert cls in ("WarningChip", "CriticalChip")
+        assert "attention" in text
+
+    def test_singular_grammar(self):
+        # Exactly one problem → "1 issue needs attention". Chips present (so
+        # 'no_chips' does not also fire), but all headers read-only.
+        diag = _healthy(
+            hwmon=HwmonDiagnostics(
+                chips_detected=[
+                    HwmonChipInfo(chip_name="nct6779", expected_driver="nct6775", header_count=5)
+                ],
+                total_headers=3,
+                writable_headers=0,
+            )
+        )
+        problems = detect_readiness_problems(diag, duty_drift=NO_DRIFT)
+        assert len(problems) == 1
+        text, _ = readiness_verdict(diag, duty_drift=NO_DRIFT)
+        assert "1 issue needs attention" in text
+
+    def test_heavy_revert_is_action_required_not_critical(self):
+        """DEC-357 / Q1: CRITICAL is reserved for risk of damaging hardware.
+
+        A reclaim means the BIOS took fan control back and the watchdog took it
+        again — the user must act, but nothing is harmed. The second arm is what
+        makes this a test rather than a blanket demotion: a mechanism that CAN
+        damage hardware must still reach CriticalChip from the same function.
+        """
+        reclaimed = _healthy(
+            hwmon=HwmonDiagnostics(
+                chips_detected=[
+                    HwmonChipInfo(chip_name="nct6779", expected_driver="nct6775", header_count=5)
+                ],
+                total_headers=5,
+                writable_headers=5,
+                enable_revert_counts={"pwm1": 25},
+            )
+        )
+        text, cls = readiness_verdict(reclaimed, duty_drift=NO_DRIFT)
+        assert "attention" in text, "it is still a condition, just not a critical one"
+        assert cls == "WarningChip"
+
+        collided = _healthy(
+            module_collisions=[
+                ModuleCollisionInfo(
+                    module_a="nct6687",
+                    module_b="nct6775",
+                    severity="critical",
+                    summary="overlapping chip id",
+                    remediation="blacklist one",
+                )
+            ]
+        )
+        assert readiness_verdict(collided, duty_drift=NO_DRIFT)[1] == "CriticalChip"
+
+
+class TestDetectProblems:
+    def test_info_quirk_not_counted(self):
+        # ASUS + NCT6798 yields an info-level asus_ec_sensors quirk; it must
+        # NOT register as a problem needing attention.
+        diag = _healthy(
+            board=BoardInfo(vendor="ASUS", name="ProArt X670"),
+            hwmon=HwmonDiagnostics(
+                chips_detected=[
+                    HwmonChipInfo(chip_name="nct6798", expected_driver="nct6775", header_count=5)
+                ],
+                total_headers=5,
+                writable_headers=5,
+            ),
+        )
+        keys = {p["key"] for p in detect_readiness_problems(diag, duty_drift=NO_DRIFT)}
+        assert "vendor_quirk" not in keys
+
+    def test_acpi_detected(self):
+        diag = _healthy(
+            acpi_conflicts=[
+                AcpiConflictInfo(io_range="0x290", claimed_by="ACPI", conflicts_with_driver="it87")
+            ]
+        )
+        keys = {p["key"] for p in detect_readiness_problems(diag, duty_drift=NO_DRIFT)}
+        assert "acpi" in keys
+
+    def test_module_collision_is_critical(self):
+        diag = _healthy(
+            module_collisions=[
+                ModuleCollisionInfo(
+                    module_a="nct6687",
+                    module_b="nct6775",
+                    severity="critical",
+                    summary="race",
+                    remediation="blacklist one",
+                )
+            ]
+        )
+        problems = detect_readiness_problems(diag, duty_drift=NO_DRIFT)
+        coll = [p for p in problems if p["key"] == "module_collision"]
+        assert coll and coll[0]["severity"] == "critical"
+        # DC-x (DEC-433): the daemon keeps writing through a collision, so the
+        # card's fix names the step that stops it, and points at the per-pair
+        # remediation where the card renders it (its detail, below the fix) —
+        # not at the "alert" the redesign retired.
+        assert "deactivate the active profile" in coll[0]["fix"]
+        # The fix names both routes: the sidebar's Stop (DEC-462) and the tray's.
+        assert "Stop under the sidebar's profile selector" in coll[0]["fix"]
+        assert "Stop profile control" in coll[0]["fix"]
+        assert "alert" not in coll[0]["fix"]
+
+    def test_gpu_ppfeaturemask_detected(self):
+        diag = _healthy(
+            gpu=GpuDiagnosticsInfo(
+                pci_bdf="0000:03:00.0",
+                model_name="9070XT",
+                fan_control_method="read_only",
+                ppfeaturemask="0xabcd",
+                ppfeaturemask_bit14_set=False,
+            )
+        )
+        keys = {p["key"] for p in detect_readiness_problems(diag, duty_drift=NO_DRIFT)}
+        assert "gpu_ppfeaturemask" in keys
+
+
+class TestFixGuidance:
+    def test_none_when_healthy(self):
+        assert build_fix_guidance_html(_healthy(), duty_drift=NO_DRIFT) is None
+
+    def test_has_disclaimer_and_link_when_problem(self):
+        diag = _healthy(hwmon=HwmonDiagnostics(total_headers=3, writable_headers=0))
+        html = build_fix_guidance_html(diag, duty_drift=NO_DRIFT)
+        assert html is not None
+        assert "To fix" in html
+        assert "at your own risk" in html  # disclaimer
+        assert 'href="' in html  # clickable link
+        assert "color:" in html  # link has an explicit colour for contrast
+
+
+class TestReport:
+    def test_contains_sections_and_links(self):
+        diag = _healthy(
+            hwmon=HwmonDiagnostics(
+                chips_detected=[
+                    HwmonChipInfo(chip_name="it8689", expected_driver="it87", header_count=2)
+                ],
+                total_headers=2,
+                writable_headers=0,
+            )
+        )
+        html = build_readiness_report_html(diag, duty_drift=NO_DRIFT)
+        assert "Summary" in html
+        assert "Detected hardware" in html
+        assert "To fix" in html
+        assert 'href="' in html
+
+    def test_escapes_daemon_strings(self):
+        # DEC-106: a hostile chip name must not inject markup into the report.
+        diag = _healthy(
+            hwmon=HwmonDiagnostics(
+                chips_detected=[
+                    HwmonChipInfo(
+                        chip_name="<script>evil</script>",
+                        expected_driver="it87",
+                        header_count=1,
+                    )
+                ],
+                total_headers=1,
+                writable_headers=1,
+            )
+        )
+        html = build_readiness_report_html(diag, duty_drift=NO_DRIFT)
+        assert "<script>evil</script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_advisories_section_mirrors_panel(self):
+        # DEC-158/DEC-115: the report gains an Advisories section deriving from
+        # the same advisory_rows + severity_display the inline panel uses, so the
+        # two cannot drift. Gigabyte IT8696E matches a HIGH SmartFan quirk.
+        diag = _healthy(
+            board=BoardInfo(vendor="Gigabyte Technology Co., Ltd.", name="X870E AORUS MASTER"),
+            hwmon=HwmonDiagnostics(
+                chips_detected=[
+                    HwmonChipInfo(chip_name="it8696", expected_driver="it87", header_count=5)
+                ],
+                total_headers=5,
+                writable_headers=5,
+            ),
+        )
+        html = build_readiness_report_html(diag, duty_drift=NO_DRIFT)
+        assert "Advisories" in html
+        assert "HIGH" in html
+        assert "SmartFan" in html
+
+    def test_no_advisories_section_when_none(self):
+        # A board with no matching quirk shows no Advisories heading.
+        html = build_readiness_report_html(_healthy(), duty_drift=NO_DRIFT)
+        assert "Advisories" not in html
+
+
+class TestSharedFormatters:
+    """DEC-115: the card and the report build their section bodies from one set
+    of pure formatters, so the report regained the chip Status + module Mainline
+    columns it had silently dropped."""
+
+    def test_chip_rows_fields(self):
+        diag = _healthy(
+            hwmon=HwmonDiagnostics(
+                chips_detected=[
+                    HwmonChipInfo(
+                        chip_name="it8689",
+                        expected_driver="it87",
+                        in_mainline_kernel=False,
+                        header_count=2,
+                    )
+                ],
+                total_headers=2,
+                writable_headers=2,
+            ),
+            kernel_modules=[KernelModuleInfo(name="it87", loaded=True, in_mainline=False)],
+        )
+        rows = chip_rows(diag)
+        assert len(rows) == 1
+        r = rows[0]
+        assert (r.chip, r.driver, r.mainline, r.headers) == (
+            "it8689",
+            "it87",
+            "No (out-of-tree)",
+            "2",
+        )
+        assert r.status  # format_driver_status produced a status string
+
+    def test_chip_rows_prefer_the_observed_bound_driver(self):
+        # DEC-469 (`BRD-g`): driver and status follow `bound_driver`; the
+        # status carries the bound-driver line, not the name-keyed one.
+        diag = _healthy(
+            hwmon=HwmonDiagnostics(
+                chips_detected=[
+                    HwmonChipInfo(
+                        chip_name="nct6687",
+                        expected_driver="nct6687",
+                        bound_driver="nct6683",
+                        in_mainline_kernel=True,
+                        header_count=8,
+                    )
+                ],
+                total_headers=8,
+                writable_headers=0,
+            ),
+            kernel_modules=[KernelModuleInfo(name="nct6683", loaded=True, in_mainline=True)],
+        )
+        (r,) = chip_rows(diag)
+        assert r.driver == "nct6683"
+        assert r.status == format_bound_driver_status("nct6687", "nct6683", True, {"nct6683"})
+        assert r.mainline == "Yes"
+
+    def test_module_rows_fields(self):
+        diag = _healthy(
+            kernel_modules=[
+                KernelModuleInfo(name="nct6775", loaded=True, in_mainline=True),
+                KernelModuleInfo(name="it87", loaded=False, in_mainline=False),
+            ]
+        )
+        rows = module_rows(diag)
+        assert (rows[0].name, rows[0].loaded, rows[0].mainline) == ("nct6775", "Loaded", "Yes")
+        assert (rows[1].name, rows[1].loaded, rows[1].mainline) == ("it87", "Not loaded", "No")
+
+    def test_board_identity_and_summary(self):
+        diag = _healthy(board=BoardInfo(vendor="ASUS", name="X670E", bios_version="1654"))
+        assert board_identity_line(diag) == "ASUS — X670E — BIOS 1654"
+        assert header_summary_line(diag.hwmon) == "5 PWM header(s) detected, 5 writable"
+
+    def test_board_identity_none_when_empty(self):
+        assert board_identity_line(_healthy(board=BoardInfo(vendor="", name=""))) is None
+
+    def test_thermal_line(self):
+        diag = _healthy(
+            thermal_safety=ThermalSafetyInfo(
+                state="normal",
+                cpu_sensor_found=True,
+                emergency_threshold_c=105.0,
+                release_threshold_c=80.0,
+            )
+        )
+        line = thermal_line(diag.thermal_safety)
+        assert "normal" in line
+        assert "105°C" in line
+        assert "80°C" in line
+
+    def test_report_regains_status_and_mainline_columns(self):
+        diag = _healthy(
+            hwmon=HwmonDiagnostics(
+                chips_detected=[
+                    HwmonChipInfo(
+                        chip_name="nct6779",
+                        expected_driver="nct6775",
+                        in_mainline_kernel=True,
+                        header_count=5,
+                    )
+                ],
+                total_headers=5,
+                writable_headers=5,
+            ),
+            kernel_modules=[KernelModuleInfo(name="nct6775", loaded=True, in_mainline=True)],
+        )
+        html = build_readiness_report_html(diag, duty_drift=NO_DRIFT)
+        assert ">Status<" in html  # chip table regained its Status column
+        assert html.count(">Mainline<") == 2  # one Mainline header per table
+
+
+class TestDialog:
+    def test_dialog_basics(self, qtbot):
+        dlg = ReadinessReportDialog("<div>hello</div>")
+        qtbot.addWidget(dlg)
+        assert dlg.objectName() == "ReadinessReport_Dialog"
+        browser = dlg.findChild(QTextBrowser, "ReadinessReport_Browser")
+        assert browser is not None
+        assert browser.openExternalLinks() is True
+        assert "hello" in browser.toPlainText()
+
+    def test_set_html_replaces_content(self, qtbot):
+        dlg = ReadinessReportDialog("<div>first</div>")
+        qtbot.addWidget(dlg)
+        dlg.set_html("<div>second</div>")
+        browser = dlg.findChild(QTextBrowser, "ReadinessReport_Browser")
+        assert "second" in browser.toPlainText()
+        assert "first" not in browser.toPlainText()
+
+
+class TestComboArrow:
+    def test_svg_generated_with_color(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        from ventulus.ui.theme import combo_arrow_svg_path
+
+        path = combo_arrow_svg_path("#abcdef")
+        assert path is not None
+        content = Path(path).read_text(encoding="utf-8")
+        assert "<svg" in content
+        assert "#abcdef" in content  # colour is baked into the stroke
+
+    def test_svg_written_under_canonical_cache_dir(self, tmp_path, monkeypatch):
+        # Regression: theme.py used to hardcode its own cache directory,
+        # bypassing paths.cache_dir(). It must agree with the one canonical
+        # cache dir (~/.cache/ventulus/) so every cache consumer matches.
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        from ventulus.paths import cache_dir
+        from ventulus.ui.theme import combo_arrow_svg_path
+
+        path = combo_arrow_svg_path("#abcdef")
+        assert path is not None
+        assert Path(path).parent == cache_dir()
+        assert Path(path).parent == tmp_path / "ventulus"
+
+    def test_stylesheet_includes_down_arrow_rule(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        from ventulus.ui.theme import build_stylesheet, default_dark_theme
+
+        css = build_stylesheet(default_dark_theme())
+        assert "QComboBox::down-arrow" in css
+        assert "image: url(" in css
+
+    def test_returns_none_when_cache_unwritable(self, tmp_path, monkeypatch):
+        # Point the cache root at a regular file so mkdir() raises OSError;
+        # the helper must degrade gracefully rather than crash theming.
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("x")
+        monkeypatch.setenv("XDG_CACHE_HOME", str(blocker))
+        from ventulus.ui.theme import combo_arrow_svg_path
+
+        assert combo_arrow_svg_path("#123456") is None
+
+
+class TestUnknownSeverityRendersConsistently:
+    """DOC-g: one advisory must not read INFO on one surface and WARN on another.
+
+    ``severity_display`` degrades an unrecognised severity to the calm INFO
+    presentation, but ``detect_readiness_problems`` used to classify actionable
+    quirks with ``severity != "info"`` — a *string* test. An unknown tier is not
+    the literal string ``"info"``, so it passed that test, became "actionable",
+    and was rolled up as WARN on the problem card while the inline advisory panel
+    showed it as INFO. The split is now ranked off the same display metadata both
+    surfaces render from, so the two cannot disagree.
+    """
+
+    def test_genuinely_unknown_severity_is_not_actionable(self):
+        # An unrecognised tier renders as INFO, so it must not be counted as a
+        # problem — that mismatch is the whole defect.
+        assert is_actionable_severity("info") is False
+        assert is_actionable_severity("some-future-tier") is False
+
+    def test_known_problem_tiers_remain_actionable(self):
+        # "low" is included deliberately: it ships on a Gigabyte X870 quirk that
+        # tells the user their secondary chip needs mmio=on to be controllable.
+        # Fixing the render mismatch must NOT silence it — the first attempt at
+        # this fix made "low" non-actionable and would have dropped that advice
+        # from the problem card entirely.
+        for sev in ("critical", "high", "warn", "medium", "low"):
+            assert is_actionable_severity(sev) is True, f"{sev} must still raise a problem"
+
+    def test_low_is_ranked_between_info_and_medium(self):
+        assert (
+            severity_display("info").rank
+            < severity_display("low").rank
+            < severity_display("medium").rank
+        )
+
+    def test_low_does_not_render_as_info(self):
+        # It is calm, but it is not the same thing as an FYI note.
+        assert severity_display("low").word == "LOW"
+        assert severity_display("low").css_class != severity_display("info").css_class
+
+    def test_only_critical_and_high_escalate_the_rollup(self):
+        assert is_high_severity("critical") is True
+        assert is_high_severity("high") is True
+        for sev in ("warn", "medium", "info", "low", "some-future-tier"):
+            assert is_high_severity(sev) is False, f"{sev} must not escalate to critical"
+
+    def test_no_production_module_can_reach_the_tier_predicates(self):
+        """`SSN-k`/DEC-357: they live in tests so they cannot regain a caller.
+
+        ``is_high_severity``'s last caller was the ``vendor_quirk`` rollup, which
+        made any HIGH-or-above advisory paint the System State health card
+        CRITICAL on a board where nothing had been observed at all — a quirk
+        matches on board identity, so the tier is a statement about the advisory
+        and never evidence about the machine. Moving both out of ``src/`` is what
+        makes that unrepeatable; this asserts the move held.
+
+        Comment lines are excluded deliberately: ``hwmon_guidance.py`` names both
+        predicates in the warning it keeps at the definition site, and a
+        source-scanning guard that matches its own explanation is a known trap
+        (the project rulebook § Hard-won lessons).
+        """
+        src = Path(__file__).resolve().parent.parent / "src" / "ventulus"
+        offenders = [
+            f"{path.relative_to(src)}:{i}"
+            for path in sorted(src.rglob("*.py"))
+            for i, line in enumerate(path.read_text().splitlines(), 1)
+            if ("is_high_severity" in line or "is_actionable_severity" in line)
+            and not line.lstrip().startswith("#")
+        ]
+        assert offenders == [], (
+            "an advisory's TIER must not reach a render path — these predicates "
+            f"belong in tests/severity_invariants.py (SSN-k): {offenders}"
+        )
+
+    def test_detect_readiness_problems_does_not_escalate_an_unknown_tier(self, monkeypatch):
+        """The CALL SITE, not the helper.
+
+        Testing ``is_actionable_severity`` alone proves nothing about
+        ``detect_readiness_problems``, which is where the string compare lived —
+        this test was green against the unfixed code until it went through the
+        real function (the project rulebook § Hard-won lessons: extracting a rule into a
+        testable function does NOT test the call site).
+
+        Injected rather than driven off a real board because every board
+        carrying the shipped ``severity="low"`` quirk also carries a ``high``
+        one, which would emit the problem regardless and mask the defect.
+        """
+        quirk = VendorQuirk(
+            vendor_pattern="acme",
+            chip_prefix="xyz",
+            severity="not-a-tier-we-ship",
+            summary="Injected advisory with an unrecognised severity",
+            details=["Renders as INFO in the advisory panel."],
+        )
+        monkeypatch.setattr(readiness_report, "lookup_vendor_quirks", lambda *a, **k: [quirk])
+        problems = detect_readiness_problems(_healthy(), duty_drift=NO_DRIFT)
+        assert "vendor_quirk" not in {p["key"] for p in problems}, (
+            "an advisory the panel paints as INFO was rolled up as a problem — "
+            "the two surfaces disagree about the same quirk"
+        )
+
+    def test_a_known_tier_is_still_surfaced_as_a_board_note(self, monkeypatch):
+        """Guard the other direction: the fix must not silence real advice.
+
+        DEC-357 moved the destination — a quirk is a board note, not a rolled-up
+        condition — but not the guarantee. An actionable tier must still reach a
+        surface the user can read, carrying the tier it was authored at.
+        """
+        quirk = VendorQuirk(
+            vendor_pattern="acme",
+            chip_prefix="xyz",
+            severity="medium",
+            summary="Injected medium-severity advisory",
+            details=["Actionable."],
+        )
+        monkeypatch.setattr(readiness_report, "lookup_vendor_quirks", lambda *a, **k: [quirk])
+        notes = {n.quirk.summary: n for n in board_notes(_healthy())}
+        assert quirk.summary in notes
+        note = notes[quirk.summary]
+        assert note.quirk.severity == quirk.severity
+        assert is_actionable_severity(note.quirk.severity) is True
+        # The tier it renders at comes from the map both surfaces derive from,
+        # so the panel and the pop-out report cannot disagree (DEC-115/158).
+        assert severity_display(note.quirk.severity).css_class == "CautionChip"
+
+    def test_the_two_predicates_agree_with_the_rendered_presentation(self):
+        # The actual coupling under test: anything the panel paints as INFO must
+        # not be counted as a problem by the card, for every severity either
+        # surface can see — including ones neither was written for.
+        for sev in ("critical", "high", "warn", "medium", "info", "low", "not-a-tier", ""):
+            painted_as_info = severity_display(sev).css_class == "InfoChip"
+            assert is_actionable_severity(sev) is not painted_as_info, (
+                f"severity {sev!r} paints as "
+                f"{severity_display(sev).css_class} but is_actionable_severity="
+                f"{is_actionable_severity(sev)} — the surfaces disagree"
+            )

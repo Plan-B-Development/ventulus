@@ -1,0 +1,118 @@
+# Maintainer: Plan-B-Development <https://github.com/Plan-B-Development>
+pkgname=ventulus
+pkgver=4.3.0
+pkgrel=1
+pkgdesc="PySide6 desktop GUI for the Ventulus fan control daemon"
+arch=('any')
+url="https://github.com/Plan-B-Development/ventulus"
+license=('MIT' 'OFL-1.1')
+# python-colorama: required transitive runtime dep — pyqtgraph imports
+# `colorama.win32`/`colorama.winterm` unconditionally at module load
+# (the platform check happens after the import). Arch's
+# `python-pyqtgraph` package omits the dep upstream; declaring it here
+# is load-bearing on clean systems. See DEC-103. Do not remove.
+# ventulusd floor tracks the README pairing (≥ v3.0.0 — the daemon
+# that canonicalises it87 v2.0 chip names, DEC-442: this GUI stores fan ids
+# under the canonical chip name, which an older daemon on a renamed chip does
+# not publish). This is what the GUI *requires*, not the ship-time pairing —
+# bump only when that floor moves.
+depends=('ventulusd>=3.0.0' 'python' 'pyside6' 'python-httpx'
+         'python-pyqtgraph' 'python-numpy' 'python-colorama'
+         'hicolor-icon-theme')
+# The Ventulus rename (DEC-493): this package is control-ofc-gui renamed, and
+# `pacman -Syu` swaps it in. Settings, profiles and saved reports are imported
+# from the old directories at first start.
+replaces=('control-ofc-gui')
+conflicts=('control-ofc-gui')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools' 'scdoc')
+install=ventulus.install
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+# Self-referential by construction: the tarball GitHub generates for the tag
+# CONTAINS this file, so any sha256 written here changes the tree, the tag, and
+# therefore the hash it claims to pin. SKIP is the only honest value. Integrity
+# of the published package comes from the GPG signature + Sigstore attestation
+# on the pacman-repo asset, not from this line. (The value that sat here was
+# frozen at v1.26.0 and had failed `makepkg` closed ever since.)
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    python -m build --wheel --no-isolation
+
+    # Render man page from scdoc source.
+    scdoc < man/ventulus.1.scd > ventulus.1
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    # Byte-compilation only (2026-07-21 audit PKG-4): the full pytest suite
+    # (2600+ tests) runs in ci.yml with QT_QPA_PLATFORM=offscreen. The
+    # makepkg build container installs only base-devel + build tooling, not
+    # PySide6/pytest/httpx/pyqtgraph/numpy, so a headless test run is not
+    # available here — compileall is the buildable smoke check.
+    python -m compileall -q src/
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    # Install Python package (creates /usr/bin/ventulus from entry point)
+    python -m installer --destdir="$pkgdir" dist/*.whl
+
+    # Desktop entry
+    install -Dm644 packaging/ventulus.desktop "$pkgdir/usr/share/applications/ventulus.desktop"
+
+    # Application icon
+    install -Dm644 assets/branding/app_icon/app_icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/ventulus.svg"
+
+    # Branding assets — runtime-loaded by the in-app About dialog and sidebar
+    install -Dm644 assets/branding/app_icon/app_icon.svg "$pkgdir/usr/share/ventulus/assets/branding/app_icon/app_icon.svg"
+
+    # Man page (rendered in build()).
+    install -Dm644 ventulus.1 \
+        "$pkgdir/usr/share/man/man1/ventulus.1"
+
+    # Shell completions — installed unconditionally; missing shells ignore them.
+    install -Dm644 completions/ventulus.bash \
+        "$pkgdir/usr/share/bash-completion/completions/ventulus"
+    install -Dm644 completions/_ventulus \
+        "$pkgdir/usr/share/zsh/site-functions/_ventulus"
+    install -Dm644 completions/ventulus.fish \
+        "$pkgdir/usr/share/fish/vendor_completions.d/ventulus.fish"
+
+    # User-facing documentation — README, CHANGELOG, and the full user manual.
+    # The post_install message points users at /usr/share/doc/ventulus/,
+    # so the directory needs to actually contain something useful.
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 CHANGELOG.md "$pkgdir/usr/share/doc/$pkgname/CHANGELOG.md"
+    for guide in manual/*.md; do
+        install -Dm644 "$guide" \
+            "$pkgdir/usr/share/doc/$pkgname/manual/$(basename "$guide")"
+    done
+
+    # Hardware/sensor reference docs (docs/19–24) — the manual pages link to
+    # them via ../docs/… relative paths, so ship them alongside the manual to
+    # keep the installed copy's links resolving (DEC-145).
+    # docs/24 joined the set with `UDOC-f`, which added the manual's first links
+    # to it: a relative link the package does not ship is `UDOC-d` all over again.
+    for refdoc in docs/19_*.md docs/20_*.md docs/21_*.md docs/22_*.md docs/23_*.md \
+        docs/24_*.md; do
+        install -Dm644 "$refdoc" \
+            "$pkgdir/usr/share/doc/$pkgname/docs/$(basename "$refdoc")"
+    done
+
+    # License
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    # DEC-260: ship NOTICE.md beside LICENSE. It records the dependencies whose
+    # licences are not permissive and what obligations they carry — a document
+    # written for recipients, which until now never reached one: it existed only
+    # in the git tree, not in the installed package.
+    install -Dm644 NOTICE.md "$pkgdir/usr/share/licenses/$pkgname/NOTICE.md"
+
+    # Bundled font licences — DM Sans + Space Grotesk ship inside the wheel;
+    # OFL-1.1 §2 wants the licence carried alongside the fonts (DEC-208).
+    install -Dm644 src/ventulus/ui/fonts/OFL-DMSans.txt \
+        "$pkgdir/usr/share/licenses/$pkgname/OFL-DMSans.txt"
+    install -Dm644 src/ventulus/ui/fonts/OFL-SpaceGrotesk.txt \
+        "$pkgdir/usr/share/licenses/$pkgname/OFL-SpaceGrotesk.txt"
+}

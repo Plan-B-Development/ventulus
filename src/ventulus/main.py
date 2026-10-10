@@ -1,0 +1,396 @@
+"""Application entry point."""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import signal
+import sys
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+
+from ventulus.api.client import DaemonClient
+from ventulus.constants import APP_NAME, APP_VERSION, DEFAULT_SOCKET_PATH
+from ventulus.paths import ensure_dirs, set_path_overrides, themes_dir
+from ventulus.services.app_settings_service import AppSettingsService
+from ventulus.services.app_state import AppState
+from ventulus.services.diagnostics_service import DiagnosticsService
+from ventulus.services.history_store import HistoryStore
+from ventulus.services.legacy_import import import_legacy_user_dirs
+from ventulus.services.polling import PollingService
+from ventulus.services.profile_service import ProfileService
+from ventulus.services.single_instance import SingleInstance, default_key, raise_window
+from ventulus.ui.fonts import register_bundled_fonts
+from ventulus.ui.main_window import MainWindow
+from ventulus.ui.theme import (
+    BUILTIN_DEFAULT_THEME_NAME,
+    ThemeTokens,
+    apply_theme,
+    default_dark_theme,
+    ensure_bundled_themes_installed,
+    load_theme,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
+log = logging.getLogger(__name__)
+
+
+def _resolve_demo_mode(cli_demo: bool, demo_on_disconnect: bool, daemon_reachable: bool) -> bool:
+    """Decide whether to start in demo mode (DEC-139).
+
+    Demo is forced by ``--demo``; otherwise it is the fallback when the user
+    enabled "start in demo mode when daemon is unavailable" and the daemon did
+    not answer a launch-time probe.
+    """
+    if cli_demo:
+        return True
+    return demo_on_disconnect and not daemon_reachable
+
+
+def _probe_daemon(socket_path: str, timeout: float = 1.5) -> bool:
+    """Return True if the daemon answers a cheap GET /status within *timeout*.
+
+    A connection failure (socket missing/refused) means the daemon is not
+    running → not reachable. A timeout or server error means it is present but
+    slow; we treat that as reachable so a sluggish daemon never silently drops
+    the user into demo mode and disables real control.
+    """
+    from ventulus.api.errors import DaemonError, DaemonUnavailable
+
+    client = DaemonClient(socket_path=socket_path, timeout=timeout)
+    try:
+        client.status()
+        return True
+    except DaemonUnavailable:
+        return False
+    except DaemonError:
+        return True
+    finally:
+        client.close()
+
+
+# Wired up in main() once the diagnostics service exists, so the last-resort
+# exception hook can drop a breadcrumb into the support bundle. Stays None in
+# tests (which never call main()) and until diagnostics is constructed.
+_diagnostics: DiagnosticsService | None = None
+
+
+def _set_uncaught_diagnostics(diag: DiagnosticsService) -> None:
+    """Register the diagnostics service used by ``_handle_uncaught``."""
+    global _diagnostics
+    _diagnostics = diag
+
+
+def _handle_uncaught(exc_type, exc, tb) -> None:
+    """Last-resort hook for exceptions that escape a Qt slot or worker thread.
+
+    Daemon-disconnect handling proper lives in the API client (transport errors
+    → ``DaemonUnavailable``) and the polling workers. This net
+    exists so a *future* uncaught exception surfaces in the log and the support
+    bundle instead of silently killing a worker thread — PySide6 routes
+    unhandled slot exceptions through ``sys.excepthook``. ``KeyboardInterrupt``
+    and ``SystemExit`` are delegated to the default hook so Ctrl+C and clean
+    exits are unaffected. Must never raise.
+    """
+    if issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
+        sys.__excepthook__(exc_type, exc, tb)
+        return
+    log.critical("Uncaught exception", exc_info=(exc_type, exc, tb))
+    if _diagnostics is not None:
+        try:
+            _diagnostics.log_event(
+                "error",
+                "gui",
+                f"Uncaught exception: {exc_type.__name__}: {exc}",
+                fields={"exception": exc_type.__name__, "detail": str(exc)},
+            )
+        except Exception:
+            log.debug("Failed to record uncaught exception in diagnostics", exc_info=True)
+
+
+def _resolve_startup_theme(theme_name: str) -> ThemeTokens:
+    """Return the persisted theme by name, or the default dark theme.
+
+    Resolution order:
+      1. Empty name or ``BUILTIN_DEFAULT_THEME_NAME`` — bundled default tokens,
+         with no file scan (the picker's built-in entry, DEC-431)
+      2. Any matching JSON file in ``themes_dir()`` whose loaded
+         ``ThemeTokens.name`` equals ``theme_name`` — **including** "Default
+         Dark": an edited copy saved under that name is what the user asked
+         for (DEC-431, `DC-r`). Deleting that file restores the bundled one.
+      3. Fallback to default dark if no file matches or the folder is missing
+
+    Failures are logged but never raise: a corrupted theme must not prevent
+    the GUI from starting. The user can re-pick a theme from Settings if
+    their persisted choice is no longer loadable.
+    """
+    if not theme_name or theme_name == BUILTIN_DEFAULT_THEME_NAME:
+        return default_dark_theme()
+    td = themes_dir()
+    if td.exists():
+        for path in sorted(td.glob("*.json")):
+            try:
+                tokens = load_theme(path)
+            except (OSError, ValueError, KeyError) as exc:
+                log.warning("Skipping unreadable theme %s on startup: %s", path, exc)
+                continue
+            if tokens.name == theme_name:
+                return tokens
+    if theme_name != "Default Dark":
+        log.info("Persisted theme %r not found in %s; falling back to Default Dark", theme_name, td)
+    return default_dark_theme()
+
+
+def main() -> int:
+    # Control-OFC 4.x settings and reports come across once (DEC-493), before
+    # anything below writes into the new directories.
+    import_legacy_user_dirs()
+    ensure_dirs()
+
+    # Defense-in-depth: a last-resort exception hook so nothing fails silently
+    # on a worker thread, plus routing Qt's own log messages into Python
+    # logging. The primary daemon-disconnect handling is in the API client and
+    # the polling workers (see _handle_uncaught). Installed
+    # before QApplication so even early startup errors are captured.
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+    sys.excepthook = _handle_uncaught
+    _qt_log_levels = {
+        QtMsgType.QtDebugMsg: logging.DEBUG,
+        QtMsgType.QtInfoMsg: logging.INFO,
+        QtMsgType.QtWarningMsg: logging.WARNING,
+        QtMsgType.QtCriticalMsg: logging.ERROR,
+        QtMsgType.QtFatalMsg: logging.CRITICAL,
+    }
+
+    def _qt_message_handler(mode, _context, message) -> None:
+        logging.getLogger("Qt").log(_qt_log_levels.get(mode, logging.INFO), message)
+
+    qInstallMessageHandler(_qt_message_handler)
+
+    qt_app = QApplication(sys.argv)
+    qt_app.setApplicationName(APP_NAME)
+    qt_app.setApplicationVersion(APP_VERSION)
+
+    # Arguments are parsed here — before any settings, theme or profile I/O —
+    # only so the single-instance check below can run early and, when this is a
+    # duplicate launch, exit without having done that work at all. Nothing
+    # between here and the check depends on `args`.
+    parser = argparse.ArgumentParser(description="Ventulus desktop fan control GUI")
+    parser.add_argument("--socket", default=DEFAULT_SOCKET_PATH, help="Daemon socket path")
+    parser.add_argument("--demo", action="store_true", help="Run in demo mode")
+    args = parser.parse_args()
+
+    # One window per user, per mode (DEC-352).
+    #
+    # The tray opens the GUI on a left click, and the StatusNotifierItem
+    # protocol has no double-click — Plasma delivers `Activate` twice — so
+    # without this a double click starts two complete applications. Demo and
+    # live keep separate keys: refusing `--demo` because a live GUI is open,
+    # and raising that live window instead, would be wrong.
+    #
+    # The key is keyed on `args.demo` — what the user ASKED for — and not on the
+    # resolved mode computed further down, which can become demo via DEC-139's
+    # demo-on-disconnect fallback. That is deliberate: keying on the resolved
+    # mode would mean a plain `ventulus` that fell back to demo holds the
+    # demo key, so a second plain `ventulus` (with the daemon now up)
+    # would take the live key and open a second window. Two launches of the same
+    # command must always collapse into one.
+    instance = SingleInstance(default_key(demo=args.demo, socket_path=args.socket))
+    if not instance.acquire():
+        if instance.notify_existing():
+            log.info("Ventulus is already running — raising the existing window")
+            instance.close()
+            return 0
+        # Rather than leave the user with nothing, fall through and open a
+        # second window.
+        #
+        # This branch is genuinely reachable as of `T1-j`'s fix: the primary
+        # writes an ack once it has actually read the request, so
+        # `notify_existing` returns False for a primary that is alive but not
+        # running its event loop — previously it waited only for the kernel to
+        # take the bytes, which such a process also satisfies, so the branch was
+        # dead code.
+        #
+        # Residual, deliberately not addressed here: when the primary is HEALTHY
+        # but in another graphical session, it acks and raises its own window, so
+        # this does not fire and the user in the second session sees nothing.
+        # That is the per-user (not per-session) key granularity, which is a
+        # design choice rather than a defect — see `T1-j` in the register.
+        log.warning("Another instance is running but did not respond; opening a new window")
+
+    # Register the bundled OFL fonts (Space Grotesk / DM Sans) before any theme
+    # stylesheet or app font is applied, so the theme's font tokens resolve
+    # (DEC-208). Best-effort — missing files fall back to the system font.
+    register_bundled_fonts()
+
+    # Load settings early so directory overrides apply before profiles/themes load
+    settings_service = AppSettingsService()
+    settings_service.load()
+
+    # Apply user-configured directory overrides before loading profiles/themes
+    s = settings_service.settings
+    set_path_overrides(
+        profiles_dir=s.profiles_dir_override,
+        themes_dir=s.themes_dir_override,
+        export_dir=s.export_default_dir,
+    )
+
+    # Install bundled presets (Classic Blue, Solar Light, Noctua Dark) on first run so they
+    # show up in the Settings → Theme selector. Existing files are left alone
+    # so a user who has edited a preset doesn't lose their changes.
+    installed = ensure_bundled_themes_installed(themes_dir())
+    for path in installed:
+        log.info("Installed bundled theme preset: %s", path.name)
+
+    # Resolve the persisted theme (or fall back to Default Dark) and apply it
+    # *after* themes_dir is correct so the selection actually loads from the
+    # right location. apply_theme registers the active theme — so widgets that
+    # don't carry a parent reference can look up live tokens via active_theme()
+    # — and pushes all three application channels: palette, stylesheet, font
+    # (DEC-226).
+    theme = _resolve_startup_theme(s.theme_name)
+    apply_theme(theme)
+
+    socket_path = args.socket
+    # DEC-139: when the user opted into demo-on-disconnect, probe the daemon
+    # once at launch and fall back to demo mode if it is unreachable.
+    daemon_reachable = True
+    if not args.demo and s.demo_on_disconnect:
+        daemon_reachable = _probe_daemon(socket_path)
+        if not daemon_reachable:
+            log.info("Daemon unreachable at startup — starting in demo mode (demo_on_disconnect)")
+    demo_mode = _resolve_demo_mode(args.demo, s.demo_on_disconnect, daemon_reachable)
+
+    # Core services. In live mode the daemon client is created up-front so the
+    # ProfileService can use the daemon-owned profile store (control migration);
+    # demo mode keeps client=None and the service stays purely local.
+    state = AppState()
+    history = HistoryStore()
+    client: DaemonClient | None = None
+    if not demo_mode:
+        client = DaemonClient(socket_path=socket_path)
+    # DEC-431: demo reads the real profiles but never writes or removes one.
+    profile_service = ProfileService(client=client, persist=not demo_mode)
+
+    # DEC-111: a single DiagnosticsService is shared between the polling
+    # service, main window, and diagnostics page so every emitter writes into
+    # the same in-process event deque.
+    diagnostics = DiagnosticsService(
+        state=state,
+        settings_service=settings_service,
+        profile_service=profile_service,
+    )
+    diagnostics.log_event("info", "gui", f"GUI started v{APP_VERSION}")
+    # Now that diagnostics exists, let the last-resort exception hook record an
+    # uncaught error into the support bundle (set after the early hook install).
+    _set_uncaught_diagnostics(diagnostics)
+
+    # DEC-282: every alert onset and recovery now writes itself into the event feed.
+    # Attach before the first warning is raised below, or that warning's onset goes
+    # unlogged — the very failure this wiring exists to prevent.
+    diagnostics.attach_alert_source(state)
+
+    profile_load_errors = profile_service.load()
+    for path, reason in profile_load_errors:
+        # Surface per-profile load failures to Diagnostics so a corrupted
+        # profile is obviously broken, not silently missing from the UI.
+        #
+        # DEC-111 established the principle here — record the failure in the event log
+        # too, so the support bundle carries it even after the user acknowledges the
+        # warning — and implemented it as a hand-written second call at this one site.
+        # DEC-282 generalises it: the alert ledger logs every onset, so the manual
+        # dual-write is gone and keeping it would double-log. The source is "profile"
+        # rather than the old "profile_service" precisely so the logged line is
+        # byte-identical to the one this used to emit by hand.
+        state.add_warning(
+            level="warning",
+            source="profile",
+            message=f"Failed to load profile '{os.path.basename(path)}': {reason}",
+            key=f"profile_load_fail:{path}",
+        )
+
+    # Wire history recording to state updates
+    state.sensors_updated.connect(history.record_sensors)
+    state.fans_updated.connect(history.record_fans)
+
+    # Polling (only in live mode); the client was created above. The daemon is
+    # the authoritative fan-control engine now (DEC-165) — the GUI runs no
+    # control loop and holds no hwmon lease.
+    polling: PollingService | None = None
+    if not demo_mode:
+        polling = PollingService(state, socket_path, history=history, diagnostics=diagnostics)
+        # Profile-search-dir registration runs inside the polling worker
+        # thread on first successful poll and after every reconnect
+        # (see PollingService._PollWorker._register_profile_search_dir).
+        # Kept off the Qt main thread so a slow daemon cannot stall the UI.
+
+    # Set app icon
+    from ventulus.ui.branding import load_app_icon
+
+    icon = load_app_icon()
+    if icon:
+        qt_app.setWindowIcon(icon)
+
+    # Main window
+    window = MainWindow(
+        state=state,
+        history=history,
+        profile_service=profile_service,
+        settings_service=settings_service,
+        client=client if not demo_mode else None,
+        diagnostics_service=diagnostics,
+        demo_mode=demo_mode,
+    )
+    window.show()
+
+    # A later launch (tray click, app-menu entry, second terminal) asks this
+    # window to come forward instead of starting its own application.
+    instance.activated.connect(lambda: raise_window(window))
+
+    # Allow Ctrl+C to exit cleanly.
+    #
+    # DEC-257: `close()`, not `quit()`. `qt_app.quit()` tears the event loop down
+    # without ever delivering a close event, so every closeEvent-driven save —
+    # window geometry, splitter sizes, chart range, log filters (DEC-245) — was
+    # silently skipped. Ctrl+C is a normal way to stop a desktop app from a
+    # terminal, and it should not be the one exit path that loses your layout.
+    # `close()` runs the same teardown the window-manager close button does; the
+    # app then quits because it is the last window (quitOnLastWindowClosed).
+    signal.signal(signal.SIGINT, lambda *_: window.close())
+    _sigint_timer = QTimer()
+    _sigint_timer.timeout.connect(lambda: None)
+    _sigint_timer.start(200)
+
+    # Start services after window is visible
+    if polling:
+        polling.start()
+
+    exit_code = qt_app.exec()
+
+    # DEC-111: record the exit so a support bundle saved on the way out
+    # still has a closing breadcrumb. Logged before service shutdown so the
+    # message lands while diagnostics is still owned by the main thread.
+    diagnostics.log_event("info", "gui", "GUI exiting")
+
+    # Cleanup
+    if polling:
+        polling.shutdown()
+    if client:
+        client.close()
+    # Released last, and deliberately after the client: the worker-teardown
+    # order above is load-bearing (see tests/test_worker_teardown_p2_2.py) and
+    # nothing here should be inserted into it.
+    instance.close()
+
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()

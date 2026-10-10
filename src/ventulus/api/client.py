@@ -1,0 +1,1352 @@
+"""Synchronous HTTP client for the ventulusd Unix socket API."""
+
+from __future__ import annotations
+
+import contextlib
+from collections.abc import Callable
+from typing import Any
+from urllib.parse import quote
+
+import httpx
+
+from ventulus.api.errors import DaemonError, DaemonTimeout, DaemonUnavailable
+from ventulus.api.models import (
+    ActiveProfileInfo,
+    Capabilities,
+    CharacterizationRun,
+    ConfigWriteResult,
+    ControlPathRun,
+    ControlPathStatus,
+    CoolingDeviceInventory,
+    DaemonConfig,
+    DaemonStatus,
+    FanReading,
+    GpuFanResetResult,
+    GpuVerifyResult,
+    HardwareDiagnosticsResult,
+    HardwareReadiness,
+    HeaderRoleResult,
+    HwmonHeader,
+    HwmonInventory,
+    HwmonVerifyResult,
+    IdentifyResult,
+    OpenFanCalibrationRun,
+    OpenFanDevice,
+    OpenFanFirmwareStaged,
+    OpenFanMaintenanceCancel,
+    OpenFanMaintenanceRecord,
+    OpenFanRole,
+    OverrideGrant,
+    OverrideReleaseResult,
+    OverrideRenewResult,
+    PreferredSensorResult,
+    PreflightReport,
+    ProfileActivateResult,
+    ProfileDeactivateResult,
+    ProfileSearchDirsResult,
+    SensorHistory,
+    SensorReading,
+    StallProbeRun,
+    SuperIoReport,
+    ValidationSession,
+    ValidationSessionIndexEntry,
+    parse_active_profile,
+    parse_capabilities,
+    parse_characterization_run,
+    parse_config_write,
+    parse_control_path_run,
+    parse_control_path_status,
+    parse_cooling_devices,
+    parse_daemon_config,
+    parse_fans,
+    parse_gpu_fan_reset,
+    parse_gpu_verify_result,
+    parse_hardware_diagnostics,
+    parse_hardware_readiness,
+    parse_header_role,
+    parse_hwmon_headers,
+    parse_hwmon_inventory,
+    parse_hwmon_verify_result,
+    parse_identify_result,
+    parse_openfan_calibration_run,
+    parse_openfan_device,
+    parse_openfan_firmware_staged,
+    parse_openfan_maintenance_record,
+    parse_openfan_roles,
+    parse_override_grant,
+    parse_override_release,
+    parse_override_renew,
+    parse_preferred_sensor,
+    parse_preflight_report,
+    parse_profile_activate,
+    parse_profile_deactivate,
+    parse_profile_search_dirs,
+    parse_sensor_history,
+    parse_sensors,
+    parse_stall_probe_run,
+    parse_status,
+    parse_superio_report,
+    parse_validation_session,
+    parse_validation_session_index,
+)
+from ventulus.constants import (
+    API_TIMEOUT_S,
+    DEFAULT_SOCKET_PATH,
+    OPENFAN_DEVICE_TIMEOUT_S,
+    OPENFAN_RESCAN_TIMEOUT_S,
+    VERIFY_TIMEOUT_S,
+)
+
+BASE_URL = "http://localhost"
+
+#: ``(method, path, http_status, body)`` — see :meth:`DaemonClient._observe`.
+ResponseObserver = Callable[[str, str, int, Any], None]
+
+
+def _seg(value: object) -> str:
+    """One path segment, percent-encoded so the daemon sees the exact id.
+
+    Ids reach paths from sysfs labels (``System Fan #1`` on nct6687 boards) and
+    from imported profile files, and the daemon accepts ``#``, ``?``, ``%`` and
+    spaces in both. Sent raw, httpx reads ``#`` as a fragment and drops the rest,
+    ``?`` as a query, and passes ``%xx`` through, so the request named a
+    different header or profile — ``DELETE /profiles/a?x`` deleted ``a``. axum
+    decodes the segment after routing, so this round-trips every id; ``/`` is
+    encoded too. ``:`` is left as is: it is legal in a path segment (RFC 3986
+    ``pchar``) and keeps hwmon ids readable in logs and error messages.
+
+    A whole segment of ``.`` or ``..`` is a dot segment, which httpx removes
+    (RFC 3986 § 5.2.4): ``GET /profiles/.`` became ``GET /profiles``, the list.
+    ``quote`` never encodes ``.``, so those two are spelled ``%2E``, which httpx
+    leaves alone and axum decodes back. Both sides accept such an id.
+    """
+    encoded = quote(str(value), safe=":")
+    if encoded in (".", ".."):
+        encoded = encoded.replace(".", "%2E")
+    return encoded
+
+
+class DaemonClient:
+    """Synchronous client that talks to ventulusd over a Unix socket.
+
+    Usage::
+
+        client = DaemonClient()
+        caps = client.capabilities()
+        sensors = client.sensors()
+        client.close()
+    """
+
+    #: Class-level default so a client built without ``__init__`` (several tests
+    #: stub the transport that way) still reads as "no observer".
+    _response_observer: ResponseObserver | None = None
+
+    def __init__(
+        self,
+        socket_path: str = DEFAULT_SOCKET_PATH,
+        timeout: float = API_TIMEOUT_S,
+        *,
+        response_observer: ResponseObserver | None = None,
+    ):
+        transport = httpx.HTTPTransport(uds=socket_path)
+        self._client = httpx.Client(transport=transport, base_url=BASE_URL, timeout=timeout)
+        self._socket_path = socket_path
+        self._response_observer = response_observer
+
+    @property
+    def socket_path(self) -> str:
+        return self._socket_path
+
+    def close(self) -> None:
+        self._client.close()
+
+    # -- helpers --
+    #
+    # ``timeout`` is per-call: pass an explicit value for endpoints whose
+    # daemon-side latency is known to exceed the global default (verify waits
+    # 6 s between its write and the readback, plus IPC). Per-call timeouts
+    # reuse the connection pool — see HTTPX docs:
+    #   https://www.python-httpx.org/advanced/timeouts/
+    # ``httpx.TimeoutException`` is now mapped to ``DaemonTimeout`` so the
+    # UI can distinguish "daemon is slow" from "daemon is gone" — a verify
+    # call that times out client-side may still have completed on the daemon.
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+        content: bytes | None = None,
+    ) -> dict[str, Any]:
+        """Issue one request and map transport faults to daemon errors.
+
+        Dispatches via ``httpx.Client.request`` so a DELETE can carry a body
+        (override release sends ``override_token``) and every verb shares one
+        code path. The error mapping is identical for all verbs:
+
+        - ``TimeoutException`` -> ``DaemonTimeout`` ("daemon is slow" — a verify
+          that times out client-side may still have completed daemon-side).
+        - ``ConnectError`` and every other ``RequestError`` -> ``DaemonUnavailable``
+          ("the daemon is gone", retryable). ``RequestError`` is httpx's
+          documented base for any fault raised while issuing a request — a
+          ``RemoteProtocolError`` on mid-body death (the common case when the
+          daemon is SIGKILLed/restarts) or a partial-I/O ``ReadError``/
+          ``WriteError`` — so it routes into the same disconnect/reconnect
+          handling as ``ConnectError``: the control-loop write worker emits
+          ``OUTCOME_UNAVAILABLE`` and drops the client for a clean reconnect.
+          ``InvalidURL`` and other non-``RequestError`` httpx faults are our own
+          bugs and surface raw.
+        """
+        try:
+            kwargs: dict[str, Any] = {}
+            if json is not None:
+                kwargs["json"] = json
+            if params is not None:
+                kwargs["params"] = params
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            if content is not None:
+                # A raw body (the firmware upload), never mixed with ``json``.
+                kwargs["content"] = content
+                kwargs["headers"] = {"Content-Type": "application/octet-stream"}
+            resp = self._client.request(method, path, **kwargs)
+        except httpx.TimeoutException as e:
+            raise DaemonTimeout(message=str(e), endpoint=path, method=method) from e
+        except httpx.ConnectError as e:
+            raise DaemonUnavailable(message=str(e), endpoint=path, method=method) from e
+        except httpx.RequestError as e:
+            raise DaemonUnavailable(message=str(e), endpoint=path, method=method) from e
+        if self._response_observer is not None:
+            self._observe(method, path, resp)
+        return self._handle(resp, method, path)
+
+    def _observe(self, method: str, path: str, resp: httpx.Response) -> None:
+        """Hand the observer the body exactly as the daemon sent it.
+
+        The PWM Test Report keeps every daemon response verbatim as evidence
+        (DEC-404), and the typed methods return parsed models, which drop any
+        field this GUI does not model yet. The observer sees the body BEFORE
+        parsing, error bodies included — a ``409`` or a blocked preflight is
+        evidence too.
+
+        An observer fault must never fail the request it is watching, so it is
+        contained here; a non-JSON body is reported as ``None``.
+        """
+        try:
+            body: Any = resp.json()
+        except ValueError:
+            body = None
+        observer = self._response_observer
+        if observer is None:
+            return
+        # Never fail the request being watched — see the docstring.
+        with contextlib.suppress(Exception):
+            observer(method, path, resp.status_code, body)
+
+    def _get(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self._request("GET", path, params=params, timeout=timeout)
+
+    def _post(
+        self,
+        path: str,
+        json: dict[str, Any] | None = None,
+        *,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self._request("POST", path, json=json, params=params, timeout=timeout)
+
+    def _put(
+        self,
+        path: str,
+        json: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self._request("PUT", path, json=json, timeout=timeout)
+
+    def _delete(
+        self,
+        path: str,
+        json: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self._request("DELETE", path, json=json, timeout=timeout)
+
+    @staticmethod
+    def _handle(resp: httpx.Response, method: str, path: str) -> dict[str, Any]:
+        try:
+            data: dict[str, Any] = resp.json()
+        except ValueError as exc:
+            raise DaemonError(
+                code="parse_error",
+                message=f"Non-JSON response from {method} {path}: {resp.text[:200]}",
+                retryable=True,
+                source="internal",
+                status=resp.status_code,
+                details=None,
+                endpoint=path,
+                method=method,
+            ) from exc
+        if resp.status_code >= 400:
+            err = data.get("error", {})
+            raise DaemonError(
+                code=err.get("code", "unknown"),
+                message=err.get("message", resp.text),
+                retryable=err.get("retryable", False),
+                source=err.get("source", ""),
+                status=resp.status_code,
+                details=err.get("details"),
+                endpoint=path,
+                method=method,
+            )
+        return data
+
+    # -- read endpoints --
+
+    def capabilities(self) -> Capabilities:
+        return parse_capabilities(self._get("/capabilities"))
+
+    def status(self) -> DaemonStatus:
+        return parse_status(self._get("/status"))
+
+    def sensors(self) -> list[SensorReading]:
+        return parse_sensors(self._get("/sensors"))
+
+    def fans(self) -> list[FanReading]:
+        return parse_fans(self._get("/fans"))
+
+    def hwmon_headers(self) -> list[HwmonHeader]:
+        return parse_hwmon_headers(self._get("/hwmon/headers"))
+
+    def poll(self) -> tuple[DaemonStatus, list[SensorReading], list[FanReading]]:
+        """Batch read: status + sensors + fans in one call."""
+        data = self._get("/poll")
+        status = parse_status(data.get("status", {}))
+        sensors = parse_sensors(data)
+        fans = parse_fans(data)
+        return status, sensors, fans
+
+    def sensor_history(self, entity_id: str, last: int = 250) -> SensorHistory:
+        """GET /sensors/history — retrieve recent history for a sensor.
+
+        ``entity_id`` is a sysfs-derived string (``hwmon:{chip}:{device}:{label}``)
+        and may contain query-special characters, so it is passed via httpx
+        ``params=`` (percent-encoded) rather than interpolated into the path.
+        """
+        data = self._get("/sensors/history", params={"id": entity_id, "last": last})
+        return parse_sensor_history(data)
+
+    # -- write endpoints --
+
+    def hwmon_rescan(self) -> list[HwmonHeader]:
+        """POST /hwmon/rescan — re-enumerate hwmon devices and return fresh headers.
+
+        The daemon also flags its sensor polling loop to rebuild the cached
+        descriptor set on the next tick (DEC-133), so newly loaded sensor
+        chips appear through the normal 1 Hz poll within ~2 s. PWM *control*
+        hardware added after daemon startup still requires a daemon restart.
+        Removed as dead code in v1.14.1; restored for the Diagnostics
+        "Rescan Hardware" button (DEC-147).
+        """
+        data = self._post("/hwmon/rescan")
+        return parse_hwmon_headers(data)
+
+    def openfan_rescan(self) -> dict:
+        """POST /fans/openfan/rescan — adopt an OpenFanController found now.
+
+        The daemon adopts its controller during startup. A device that
+        enumerated a moment too late, or that failed its identity handshake
+        once, therefore left the daemon with no OpenFan backend for the rest of
+        the process — and, because the thermal emergency reaches OpenFan
+        fans through that same backend, without its OpenFan leg either. This
+        recovers both without a daemon restart (DEC-265).
+
+        Returns the daemon's payload: ``adopted`` (bool), ``already_connected``
+        (bool), ``port`` (str, present only when newly adopted) and a
+        human-readable ``message``. Rescanning while connected is a no-op
+        success, not an error.
+
+        Gate on ``capabilities.control.openfan_rescan`` — an older daemon has no
+        such route and returns ``404 not_found``.
+
+        Carries its own timeout (DEC-266): serial probing is blocking and scales
+        with the number of candidate ports, so the 5 s default aborted legitimate
+        scans on hosts with a few unresponsive USB-serial devices attached.
+        """
+        return self._post("/fans/openfan/rescan", timeout=OPENFAN_RESCAN_TIMEOUT_S)
+
+    def activate_profile(
+        self,
+        profile_path: str | None = None,
+        *,
+        profile_id: str | None = None,
+    ) -> ProfileActivateResult:
+        """POST /profile/activate — activate a profile by path or id.
+
+        Exactly one of ``profile_path`` or ``profile_id`` must be provided.
+        The GUI normally passes ``profile_path`` (canonical for on-disk
+        profiles); ``profile_id`` is resolved by the daemon as a filename
+        stem across every registered profile search dir (the daemon store
+        under ``/var/lib/ventulus/profiles/`` first) — there is no
+        separate "bundled" profile set.
+        """
+        if (profile_path is None) == (profile_id is None):
+            raise ValueError("activate_profile requires exactly one of profile_path or profile_id")
+        payload = (
+            {"profile_path": profile_path}
+            if profile_path is not None
+            else {"profile_id": profile_id}
+        )
+        return parse_profile_activate(self._post("/profile/activate", json=payload))
+
+    def set_startup_delay(self, delay_secs: int) -> ConfigWriteResult:
+        """POST /config/startup-delay — set daemon startup delay (takes effect on restart).
+
+        Parsed with the shared DEC-243 setter parser so this key can go through
+        the Settings page's single ``_write_daemon_key`` write path like every
+        other daemon config key. A daemon older than 2.23.0 omits ``key`` and
+        ``value`` from its reply (it predates that shape) — harmless, because the
+        caller supplies the key and only reads ``note``.
+        """
+        return parse_config_write(
+            self._post("/config/startup-delay", json={"delay_secs": delay_secs})
+        )
+
+    def update_profile_search_dirs(
+        self,
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+    ) -> ProfileSearchDirsResult:
+        """POST /config/profile-search-dirs — edit the daemon's profile search path.
+
+        Pass ``add`` and/or ``remove``; at least one is required. The daemon
+        applies removals first, so ``add=[new], remove=[old]`` is a single
+        "move" — which is what stops the list growing by one dead entry every
+        time the user repoints their profiles directory.
+
+        ``remove`` requires daemon ≥ 2.23.0. **Gate on
+        ``capabilities.control.profile_search_dir_remove`` before sending it**:
+        an older daemon does not 404, it parses only ``add`` and silently
+        ignores the rest, so an ungated call reports success having pruned
+        nothing.
+        """
+        if add is None and remove is None:
+            raise ValueError("update_profile_search_dirs requires add and/or remove")
+        payload: dict[str, list[str]] = {}
+        if add is not None:
+            payload["add"] = add
+        if remove is not None:
+            payload["remove"] = remove
+        return parse_profile_search_dirs(self._post("/config/profile-search-dirs", json=payload))
+
+    def get_daemon_config(self) -> DaemonConfig:
+        """GET /config — the daemon's effective configuration (DEC-243).
+
+        Raises ``DaemonError`` with ``.status == 404`` on a pre-2.16.0 daemon;
+        callers degrade to the write-only behaviour rather than showing an error
+        (same precedent as the DEC-200 preferred-sensor endpoints).
+        """
+        return parse_daemon_config(self._get("/config"))
+
+    def set_poll_interval(self, poll_interval_ms: int) -> ConfigWriteResult:
+        """POST /config/poll-interval — 250..2000 ms. Takes effect on restart."""
+        return parse_config_write(
+            self._post("/config/poll-interval", json={"poll_interval_ms": poll_interval_ms})
+        )
+
+    def set_serial_port(self, port: str | None) -> ConfigWriteResult:
+        """POST /config/serial-port — a path under /dev/, or ``None`` to
+        auto-detect. Takes effect on restart."""
+        return parse_config_write(self._post("/config/serial-port", json={"port": port}))
+
+    def set_serial_timeout(self, timeout_ms: int) -> ConfigWriteResult:
+        """POST /config/serial-timeout — 50..1000 ms. Takes effect on restart."""
+        return parse_config_write(
+            self._post("/config/serial-timeout", json={"timeout_ms": timeout_ms})
+        )
+
+    def set_exit_floor(self, exit_floor_pct: int) -> ConfigWriteResult:
+        """POST /config/exit-floor — 0..100 % (DEC-388). Applies at once.
+
+        The lowest speed a clean stop leaves a fan the daemon cannot hand back
+        to firmware at; 0 leaves them as they are. Gate on
+        ``capabilities.control.exit_floor`` — an older daemon 404s this.
+        """
+        return parse_config_write(
+            self._post("/config/exit-floor", json={"exit_floor_pct": exit_floor_pct})
+        )
+
+    def set_coolant_limit(self, coolant_limit_c: int) -> ConfigWriteResult:
+        """POST /config/coolant-limit — whole °C, 40..70 (DEC-443). Applies at once.
+
+        The coolant temperature at which the daemon forces every fan and pump to
+        100 %, released 5 °C below. Gate on
+        ``capabilities.control.cooling_failure_detection`` — an older daemon 404s
+        this and has no coolant emergency at all.
+        """
+        return parse_config_write(
+            self._post("/config/coolant-limit", json={"coolant_limit_c": coolant_limit_c})
+        )
+
+    def set_allow_port_probe(self, enabled: bool) -> ConfigWriteResult:
+        """POST /config/allow-port-probe — the DEC-203 opt-in.
+
+        Persisting ``True`` is only half of enabling the probe; it also needs the
+        ``CAP_SYS_RAWIO`` systemd drop-in, which no API can install. The result's
+        ``requires_privilege`` carries that caveat — surface it.
+        """
+        return parse_config_write(self._post("/config/allow-port-probe", json={"enabled": enabled}))
+
+    def set_nvidia_telemetry(self, enabled: bool) -> ConfigWriteResult:
+        """POST /config/nvidia-telemetry — the DEC-204 opt-in. Same drop-in
+        caveat as :meth:`set_allow_port_probe` (``/dev/nvidia*``)."""
+        return parse_config_write(self._post("/config/nvidia-telemetry", json={"enabled": enabled}))
+
+    def hardware_diagnostics(self) -> HardwareDiagnosticsResult:
+        """GET /diagnostics/hardware — hardware readiness and driver diagnostics."""
+        return parse_hardware_diagnostics(self._get("/diagnostics/hardware"))
+
+    def inventory_hwmon(self) -> HwmonInventory:
+        """GET /inventory/hwmon — classified temp sensors, the default-CPU
+        recommendation, and the persisted preferred-sensor selections (DEC-200).
+
+        Additive/read-only. Raises ``DaemonError`` with ``.status == 404`` on a
+        daemon that predates the endpoint — callers hide the new UI in that case.
+        """
+        return parse_hwmon_inventory(self._get("/inventory/hwmon"))
+
+    def hardware_readiness(self, refresh: bool = False) -> HardwareReadiness:
+        """GET /inventory/hardware-readiness — the combined readiness + Super-I/O
+        snapshot for the merged "Cooling Hardware Readiness" page (DEC-207), all
+        from ONE shared daemon scan. ``refresh`` — named for the query key it
+        becomes, register row ``WIRE-ab``; it was ``force``, which was correct
+        today and invited a future edit that renamed one and not the other —
+        (the page's "Refresh hardware
+        assessment" action) requests a fresh scan via ``?refresh=true``; otherwise
+        the daemon serves its cached assessment. Read-only. Raises ``DaemonError``
+        with ``.status == 404`` on a daemon that predates the endpoint — the page
+        shows an "unavailable" state in that case.
+        """
+        params = {"refresh": "true"} if refresh else None
+        return parse_hardware_readiness(self._get("/inventory/hardware-readiness", params=params))
+
+    def superio_probe(self) -> SuperIoReport:
+        """POST /inventory/superio/probe — the opt-in ACTIVE Super-I/O probe
+        (DEC-203). A deliberate one-shot `/dev/port` read that identifies an
+        unbound chip. Off by default daemon-side: when disabled it returns the
+        normal report with ``port_probe_available == False`` (it does not error).
+        404 on daemons predating the endpoint.
+        """
+        return parse_superio_report(self._post("/inventory/superio/probe", json={}))
+
+    def set_preferred_cpu_sensor(self, sensor_id: str | None) -> PreferredSensorResult:
+        """POST /config/preferred-cpu-sensor — pin (id) or clear (``None``) the
+        preferred CPU temperature sensor (DEC-200). Validated daemon-side against
+        the live sensor set (unknown id → 400); advisory only."""
+        return parse_preferred_sensor(
+            self._post("/config/preferred-cpu-sensor", json={"sensor_id": sensor_id})
+        )
+
+    def set_preferred_mb_sensor(self, sensor_id: str | None) -> PreferredSensorResult:
+        """POST /config/preferred-mb-sensor — pin (id) or clear (``None``) the
+        preferred motherboard temperature sensor (DEC-200)."""
+        return parse_preferred_sensor(
+            self._post("/config/preferred-mb-sensor", json={"sensor_id": sensor_id})
+        )
+
+    def set_header_role(self, header_id: str, role: str | None) -> HeaderRoleResult:
+        """POST /config/header-role — assign (token) or clear (None) what a PWM
+        header DRIVES (DEC-311, daemon >= 2.28.0; capability control.header_roles).
+
+        This is the only evidence a pump exists on a board whose Super-I/O publishes
+        no pwmN_label files, where every header is inferred unknown. The
+        assignment earns that header the 30% floor, the stop-snap exemption,
+        pump-safe identify and the role-aware verify duty.
+
+        role is sent as an explicit null to clear — the daemon requires the
+        KEY to be present and treats a missing one as a 400, distinct from a null.
+        Tokens are exact-case ("pump", not "PUMP") and are NOT normalised
+        here: an unrecognised token must surface the daemon's 400 rather than being
+        silently coerced into something weaker.
+
+        Takes effect immediately (no restart) and persists to runtime.toml.
+        Raises on 400 (unknown token, unknown header id on a set) and 503
+        (persistence_failed — persist-first, so nothing changed daemon-side).
+
+        Note the daemon releases any live identify hold on a header it is told is a
+        pump, so an identify "stop" in progress ends when this returns.
+        """
+        return parse_header_role(
+            self._post("/config/header-role", json={"header_id": header_id, "role": role})
+        )
+
+    def openfan_roles(self) -> list[OpenFanRole]:
+        """GET /fans/openfan/roles — every OpenFan channel's role and pump
+        protection (`ROLE-f`, DEC-475; capability control.openfan_header_roles).
+
+        A role is assigned with :meth:`set_header_role`, passing the channel's
+        fan id (``openfan:ch03``).
+        """
+        return parse_openfan_roles(self._get("/fans/openfan/roles"))
+
+    def get_cooling_devices(self) -> CoolingDeviceInventory:
+        """GET /inventory/cooling-devices — the configured cooling assemblies
+        (DEC-316, daemon >= 2.31.0; capability control.cooling_devices).
+
+        Metadata only: the daemon's profile engine never reads a cooling device,
+        so nothing here changes what a fan does. Also returns every device policy
+        the daemon ships, so the GUI offers the real choices rather than a
+        hardcoded list that drifts from the binary.
+
+        Gate on capabilities.control.cooling_devices — an older daemon 404s this
+        route, which is indistinguishable from a genuine not_found.
+        """
+        return parse_cooling_devices(self._get("/inventory/cooling-devices"))
+
+    def set_cooling_device(
+        self,
+        device_id: str,
+        *,
+        name: str = "",
+        kind: str = "",
+        pump_member: str | None = None,
+        radiator_members: list[str] | None = None,
+        auxiliary_members: list[str] | None = None,
+        preferred_sensor: str | None = None,
+        fallback_sensor: str | None = None,
+        coolant_sensor: str | None = None,
+        device_policy_id: str | None = None,
+    ) -> dict:
+        """POST /config/cooling-device — create or replace one device by id.
+
+        Persists to runtime.toml and takes effect immediately.
+
+        This does NOT confer pump protection. Naming a header as `pump_member`
+        is a description; the 30% floor and pump-safe identify come from
+        `set_header_role(..., "pump")`, which is a separate call the AIO flow
+        makes first. Do not present this as protecting a pump.
+
+        Safety numbers are not settable here by design: a policy is selected by
+        `device_policy_id` and the values it names are compiled into the daemon.
+        A payload carrying `minimum_safe_pwm` (or any sibling) is REJECTED with
+        400 rather than ignored, so a caller cannot believe it tightened a floor
+        it did not.
+
+        Raises on 400 (bad id/kind/policy id, unknown header id, a duplicate
+        member), 409 (device limit reached) and 503 (persistence_failed —
+        persist-first, so nothing changed daemon-side).
+        """
+        payload: dict = {"id": device_id}
+        if name:
+            payload["name"] = name
+        if kind:
+            payload["kind"] = kind
+        if pump_member:
+            payload["pump_member"] = pump_member
+        if radiator_members:
+            payload["radiator_members"] = radiator_members
+        if auxiliary_members:
+            payload["auxiliary_members"] = auxiliary_members
+        if preferred_sensor:
+            payload["preferred_sensor"] = preferred_sensor
+        if fallback_sensor:
+            payload["fallback_sensor"] = fallback_sensor
+        if coolant_sensor:
+            payload["coolant_sensor"] = coolant_sensor
+        if device_policy_id:
+            payload["device_policy_id"] = device_policy_id
+        return self._post("/config/cooling-device", json=payload)
+
+    def delete_cooling_device(self, device_id: str) -> dict:
+        """DELETE /config/cooling-device/{id} — remove one cooling device.
+
+        Raises on 404 (no such device) and 503 (persistence_failed).
+        """
+        return self._delete(f"/config/cooling-device/{_seg(device_id)}")
+
+    # ------------------------------------------------------------------
+    # Validation sessions (AIO-MB Phase 5, daemon >= 2.32.0)
+    # ------------------------------------------------------------------
+    #
+    # Gate every call below on ``capabilities.control.validation_sessions`` — an
+    # older daemon 404s these routes from the route fallback, which is
+    # indistinguishable from a genuine "no such session" without inspecting
+    # ``error.code``.
+
+    def start_validation_session(
+        self,
+        cooling_device_id: str,
+        *,
+        kind: str | None = None,
+        diagnostics: list[str] | None = None,
+        sweep_members: list[str] | None = None,
+        metadata: dict[str, str] | None = None,
+        stop_when_diagnostics_complete: bool = False,
+    ) -> ValidationSession:
+        """POST /validation/session — begin recording against a cooling device.
+
+        ``diagnostics`` names what the session should RUN — an empty or omitted
+        list is a legitimate passive recording session, and yields ``not_tested``
+        rather than ``pass``. ``sweep_members`` names which members those
+        diagnostics sweep; omitted, the daemon defaults to the pump member.
+
+        Nothing here is pre-clamped or pre-validated beyond shape. The **daemon**
+        decides what a diagnostic may drive: it owns the pump floor, the thermal
+        refusal and the hwmon lease, and a client-side copy of any of them would
+        be a second definition of a safety rule that would then drift (DEC-252).
+
+        ``stop_when_diagnostics_complete`` asks the daemon to finalise the
+        session as soon as the orchestrated diagnostics finish (`P8-az`). Without
+        it a session records until it is stopped, or until the daemon's two-hour
+        sample cap — which is the whole reason this option exists. **Send it only
+        when ``control.validation_auto_stop`` is true**: an older daemon has the
+        session routes and drops the unknown field rather than rejecting it, so
+        the request returns 200 and the session then runs to the cap while the UI
+        says it will stop itself. Read the accepted value back off the returned
+        session's ``stop_when_diagnostics_complete``, never off this argument.
+
+        Raises 409 ``already_exists`` when a session is already recording, 404
+        for an unknown device, and 503 ``persistence_failed``. 400
+        ``validation_error`` covers an unknown diagnostic, a member that does not
+        belong to the named device, ``stop_when_diagnostics_complete`` with an
+        empty ``diagnostics`` (there would be nothing to complete), **and every
+        bound**: more than 8 ``sweep_members``, more than 16 ``metadata`` keys, a
+        metadata **key** over 128 bytes, or a metadata **value** over 512 bytes.
+        The key bound is the one that reads as a technicality and is not: a
+        single oversized key can push the stored document past the store's read
+        cap, and since DEC-320 an over-cap session is pruned — so it destroys the
+        operator's evidence rather than merely wasting disk (``P8-at``).
+        """
+        body: dict[str, Any] = {"cooling_device_id": cooling_device_id}
+        if kind is not None:
+            body["kind"] = kind
+        if diagnostics is not None:
+            body["diagnostics"] = diagnostics
+        if sweep_members is not None:
+            body["sweep_members"] = sweep_members
+        if metadata is not None:
+            body["metadata"] = metadata
+        # Sent only when asked for. An older daemon ignores an unknown field, so
+        # a default-false key would be harmless — but omitting it keeps the
+        # request byte-identical to a pre-`P8-az` client's, which is what makes a
+        # capability-gated caller's traffic indistinguishable from the old one.
+        if stop_when_diagnostics_complete:
+            body["stop_when_diagnostics_complete"] = True
+        return parse_validation_session(self._post("/validation/session", json=body))
+
+    def validation_session(self) -> ValidationSession | None:
+        """GET /validation/session — the current or most recent session.
+
+        ``None`` when the daemon has never run one (``404``), which is a normal
+        state and not an error. Every other failure still raises.
+        """
+        try:
+            return parse_validation_session(self._get("/validation/session"))
+        except DaemonError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def stop_validation_session(self) -> ValidationSession:
+        """POST /validation/session/stop — finalise and compute the summary."""
+        return parse_validation_session(self._post("/validation/session/stop"))
+
+    def cancel_validation_session(self) -> ValidationSession:
+        """DELETE /validation/session — finalise, and record it as cancelled.
+
+        **The name is the daemon's, not a description** (`P8-bc`). This does not
+        discard anything and it is not the opposite of `stop_validation_session`:
+        `cancel()` is `finish(STATE_CANCELLED)`, and `finish` runs
+        `finalise_in_place` unconditionally — so the session gets the same
+        findings, the same steady-state result, the same startup fingerprints and
+        the same samples, and is persisted exactly as a stopped one is. The only
+        difference is the `state` token on the saved session.
+
+        This docstring said "end without finalising" until `P8-bc`, in company
+        with `docs/08` and the daemon's own comment. It was wrong in all of them.
+        """
+        return parse_validation_session(self._delete("/validation/session"))
+
+    def add_validation_marker(
+        self, detail: str | None = None, member_id: str | None = None
+    ) -> dict:
+        """POST /validation/session/event — place a user marker on the timeline."""
+        body: dict[str, Any] = {}
+        if detail is not None:
+            body["detail"] = detail
+        if member_id is not None:
+            body["member_id"] = member_id
+        return self._post("/validation/session/event", json=body)
+
+    def add_validation_measurement(
+        self,
+        kind: str,
+        value: float,
+        *,
+        unit: str = "",
+        member_id: str | None = None,
+        note: str | None = None,
+    ) -> dict:
+        """POST /validation/session/measurement — attach an external reading.
+
+        Explicitly untrusted: the daemon stores and returns these, and no control
+        or safety path consults one. This exists so a future manual-entry UI has
+        somewhere to put a meter reading, not so the daemon can act on it.
+        """
+        body: dict[str, Any] = {"kind": kind, "value": value}
+        if unit:
+            body["unit"] = unit
+        if member_id is not None:
+            body["member_id"] = member_id
+        if note is not None:
+            body["note"] = note
+        return self._post("/validation/session/measurement", json=body)
+
+    def validation_sessions(self) -> list[ValidationSessionIndexEntry]:
+        """GET /validation/sessions — the retained index, newest first."""
+        return parse_validation_session_index(self._get("/validation/sessions"))
+
+    def validation_session_by_id(self, session_id: str) -> ValidationSession | None:
+        """GET /validation/sessions/{id} — one completed session in full.
+
+        ``None`` when there is no such session; every other failure raises.
+        """
+        try:
+            return parse_validation_session(self._get(f"/validation/sessions/{_seg(session_id)}"))
+        except DaemonError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def verify_hwmon_pwm(self, header_id: str) -> HwmonVerifyResult:
+        """POST /hwmon/{header_id}/verify — test PWM write effectiveness (~6s).
+
+        Daemon-performed (DEC-165): the daemon pauses its engine, force-takes a
+        short-lived internal "verify" lease, drives the test write + readback,
+        and restores — the GUI no longer holds or passes an hwmon lease (the
+        endpoint takes no body). The daemon sleeps ``VERIFY_WAIT_SECONDS = 6 s``
+        between the test write and the readback (DEC-101); worst-case round-trip
+        under load is ~7.5 s, so we send a 12 s per-call timeout regardless of
+        the global default. See DEC-098 / DEC-101 / DEC-165.
+        """
+        data = self._post(f"/hwmon/{_seg(header_id)}/verify", timeout=VERIFY_TIMEOUT_S)
+        return parse_hwmon_verify_result(data)
+
+    def start_characterization(
+        self,
+        header_id: str,
+        *,
+        points_pct: list[int] | None = None,
+        settle_seconds: int | None = None,
+        bidirectional: bool | None = None,
+        stability_seconds: int | None = None,
+    ) -> CharacterizationRun:
+        """POST /hwmon/{header_id}/characterize — start a PWM/RPM sweep.
+
+        Returns as soon as the daemon has accepted the run (``202``); the sweep
+        itself runs daemon-side and is read back with
+        :meth:`characterization_status`. Gate the call on
+        ``capabilities.control.pwm_characterization`` — an older daemon 404s this
+        route, the same *status* it returns for an unknown header id. They differ
+        only in ``error.code``, and feature detection must not be coupled to that;
+        a probe would also need a valid header id to aim at first.
+
+        ``points_pct`` and ``settle_seconds`` are advisory: the **daemon** clamps
+        both, and a pump-protected header is never swept below its 30% floor
+        whatever is sent. Do not pre-clamp here — a client-side floor would be a
+        second copy of a safety rule the daemon already owns, and the two would
+        drift (DEC-252's discipline).
+
+        ``bidirectional`` and ``stability_seconds`` are AIO Phase 8 Batch 2
+        (DEC-334) and need ``capabilities.control.pwm_behaviour_characterization``
+        — a **separate** flag. An older daemon ignores them rather than
+        rejecting them, so sending them ungated yields a plain ascending sweep
+        with no hysteresis or stability data, and a UI that had promised both.
+        Both are advisory in the same way: the daemon chooses which duties carry
+        a dwell and clamps its length, so the run's cost is bounded server-side
+        regardless of what is asked for.
+
+        A body is always sent, even when empty, matching the calibrate endpoint:
+        the daemon's extractor requires JSON.
+        """
+        body: dict[str, Any] = {}
+        if points_pct is not None:
+            body["points_pct"] = points_pct
+        if settle_seconds is not None:
+            body["settle_seconds"] = settle_seconds
+        if bidirectional is not None:
+            body["bidirectional"] = bidirectional
+        if stability_seconds is not None:
+            body["stability_seconds"] = stability_seconds
+        return parse_characterization_run(
+            self._post(f"/hwmon/{_seg(header_id)}/characterize", json=body)
+        )
+
+    def characterization_status(self) -> CharacterizationRun | None:
+        """GET /diagnostics/characterization — the current or most recent run.
+
+        ``None`` when the daemon has never run one (``404``), which is a normal
+        state and not an error. Every other failure still raises.
+        """
+        try:
+            return parse_characterization_run(self._get("/diagnostics/characterization"))
+        except DaemonError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def cancel_characterization(self) -> CharacterizationRun:
+        """DELETE /diagnostics/characterization — ask the running sweep to stop.
+
+        Cooperative: the daemon finishes the point it is settling on, then
+        restores the header's original duty. The restore is the daemon's job on
+        every exit path on which nothing else owns the header, so a GUI that dies
+        mid-sweep does not strand it — which is why the sequence lives
+        daemon-side at all. Where the restore IS skipped (a thermal force, or
+        daemon shutdown) the run says so in `restore_outcome`, and the header is
+        left high rather than low.
+        """
+        return parse_characterization_run(self._delete("/diagnostics/characterization"))
+
+    # ── AIO Phase 8 Batch 1: preflight + control-path discovery ──────────
+
+    def diagnostic_preflight(self, header_id: str, diagnostic: str) -> PreflightReport:
+        """GET /diagnostics/preflight — the daemon's safety verdict for one
+        header and one diagnostic.
+
+        **Read-only, and it reserves nothing.** A ``ready`` verdict is a
+        statement about *now*; the diagnostic's own POST still runs its own
+        guards, so a preflight is advice to the operator rather than an
+        authorisation. Calling it does not take the single-flight slot, so it is
+        safe to call while deciding whether to start a run.
+
+        **Probing is correct here, and this is the route where it is.** The
+        sibling capability entries in ``docs/08`` say to gate on the flag rather
+        than probe, and this docstring used to say so too — but their shared
+        rationale is that a ``404`` from the route fallback (an older daemon)
+        cannot be told from a handler's own ``404`` without reading
+        ``error.code``, and that ambiguity does not exist on this route.
+        ``preflight_handler`` returns only ``200`` or ``400``, so the fallback is
+        the **only** source of a ``404`` and mapping it to "no preflight
+        available" cannot misfire.
+
+        Gating would not be free either: it adds a second thing that has to stay
+        true — the version floor in ``DAEMON_FEATURE_MINIMUMS`` — to a path whose
+        correctness presently depends on nothing but the daemon's own answer, and
+        it buys no user-visible difference, since the advisory reports the same
+        unavailability either way. The rule was stated, never followed, and the
+        code was the half that was right (``P8-as``).
+
+        The GUI must NOT re-derive the verdict from the rows: the daemon owns
+        the roll-up (the spec's §6.1 is explicit that the GUI reflects daemon
+        decisions), and ``blocking`` already names the rows that caused a block.
+        """
+        return parse_preflight_report(
+            self._get(
+                f"/diagnostics/preflight?header={quote(header_id, safe='')}"
+                f"&diagnostic={quote(diagnostic, safe='')}"
+            )
+        )
+
+    def start_control_path_discovery(
+        self,
+        header_id: str,
+        *,
+        delta_pct: int | None = None,
+        cycles: int | None = None,
+        window_seconds: int | None = None,
+    ) -> ControlPathRun:
+        """POST /hwmon/{header_id}/discover-control-path — establish which tach
+        channel(s) this PWM output actually drives.
+
+        Returns as soon as the daemon accepts the run (``202``); the sweep runs
+        daemon-side and is read back with :meth:`control_path_status`. Gate on
+        ``capabilities.control.control_path_discovery``.
+
+        Every tuning argument is **advisory**: the daemon clamps the
+        perturbation size, the cycle count and the observation window, and
+        chooses the perturbation direction itself. Do not pre-clamp here — a
+        client-side floor would be a second copy of a safety rule the daemon
+        owns, and the two would drift. In particular the GUI must never compute
+        a target duty: 0% is unreachable through this endpoint for any header,
+        and a pump-protected one never crosses its floor, because the daemon
+        enforces both.
+        """
+        body: dict[str, Any] = {}
+        if delta_pct is not None:
+            body["delta_pct"] = delta_pct
+        if cycles is not None:
+            body["cycles"] = cycles
+        if window_seconds is not None:
+            body["window_seconds"] = window_seconds
+        return parse_control_path_run(
+            self._post(f"/hwmon/{_seg(header_id)}/discover-control-path", json=body)
+        )
+
+    def control_path_status(self) -> ControlPathStatus | None:
+        """GET /diagnostics/control-path — the current or most recent run, plus
+        every persisted relationship.
+
+        ``None`` when the daemon has never run one and holds no records
+        (``404``), which is a normal state and not an error. Every other failure
+        still raises.
+
+        The ``records`` are daemon-persisted and survive a restart; the daemon
+        drops one whose header id no longer appears in discovery, so the GUI can
+        show "Last validated" without owning any invalidation rule of its own.
+        """
+        try:
+            return parse_control_path_status(self._get("/diagnostics/control-path"))
+        except DaemonError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def cancel_control_path_discovery(self) -> ControlPathRun:
+        """DELETE /diagnostics/control-path — ask the running sweep to stop.
+
+        Cooperative, exactly like cancelling a characterisation: the daemon
+        finishes the window it is holding, then restores the header. Where the
+        restore is deliberately skipped (a thermal force, or daemon shutdown)
+        the run says so in ``restore_outcome`` and the header is left high
+        rather than low.
+        """
+        return parse_control_path_run(self._delete("/diagnostics/control-path"))
+
+    # ── DEC-407: the stall/restart probe below 20 % ──────────────────────
+
+    def start_stall_probe(self, header_id: str, *, acknowledge_below_floor: bool) -> StallProbeRun:
+        """POST /hwmon/{header_id}/stall-probe — start the below-20 % probe.
+
+        Returns the ``202`` snapshot; the run proceeds daemon-side and is read
+        back with :meth:`stall_probe_status`. Gate on
+        ``capabilities.control.stall_probe``.
+
+        **There are no tunables, and that is the safety design, not an
+        omission.** Every duty, step, dwell and budget is derived by the daemon
+        from the header's own measurements, and the daemon rejects unknown
+        fields. The one field is the explicit acknowledgement: the daemon refuses
+        the request (400) unless it is ``true``. Callers pass it only after the
+        user's own per-header confirmation (DEC-404 S4-2) — it is keyword-only
+        and has no default so no call site can send it by accident.
+        """
+        return parse_stall_probe_run(
+            self._post(
+                f"/hwmon/{_seg(header_id)}/stall-probe",
+                json={"acknowledge_below_floor": bool(acknowledge_below_floor)},
+            )
+        )
+
+    def stall_probe_status(self) -> StallProbeRun | None:
+        """GET /diagnostics/stall-probe — the current or most recent run.
+
+        ``None`` when no probe has run since the daemon started (``404``): the
+        result is kept in memory only. Every other failure raises.
+        """
+        try:
+            return parse_stall_probe_run(self._get("/diagnostics/stall-probe"))
+        except DaemonError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def cancel_stall_probe(self) -> StallProbeRun:
+        """DELETE /diagnostics/stall-probe — stop the running probe.
+
+        Honoured within about half a second, and always followed by the 100 %
+        recovery kick and then the restore (except while the daemon is shutting
+        down). ``409`` when no probe is running.
+        """
+        return parse_stall_probe_run(self._delete("/diagnostics/stall-probe"))
+
+    # ── DEC-452: OpenFan calibration, 202 + poll ─────────────────────────
+
+    def start_openfan_calibration(
+        self, channel: int, *, acknowledge_below_floor: bool
+    ) -> OpenFanCalibrationRun:
+        """POST /fans/openfan/{channel}/calibration — start a calibration walk.
+
+        Returns the ``202`` snapshot; the run proceeds daemon-side and is read
+        back with :meth:`openfan_calibration_status`. Gate on
+        ``capabilities.control.openfan_calibration``.
+
+        The walk reaches 0 %, and the daemon holds no pump evidence for an
+        OpenFan channel (`PTR-i`), so it refuses (400) unless the
+        acknowledgement is ``true``. Callers pass it only after the user has
+        confirmed the channel powers no pump — it is keyword-only with no
+        default so no call site can send it by accident. ``hold_seconds`` is
+        never sent: the daemon's default applies (DEC-453).
+        """
+        return parse_openfan_calibration_run(
+            self._post(
+                f"/fans/openfan/{int(channel)}/calibration",
+                json={"acknowledge_below_floor": bool(acknowledge_below_floor)},
+            )
+        )
+
+    def openfan_calibration_status(self) -> OpenFanCalibrationRun | None:
+        """GET /diagnostics/openfan-calibration — the current or most recent run.
+
+        ``None`` when no calibration has run since the daemon started (``404``):
+        the result is kept in memory only. Every other failure raises.
+        """
+        try:
+            return parse_openfan_calibration_run(self._get("/diagnostics/openfan-calibration"))
+        except DaemonError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def cancel_openfan_calibration(self) -> OpenFanCalibrationRun:
+        """DELETE /diagnostics/openfan-calibration — stop the running calibration.
+
+        Honoured within about half a second during the walk; a kick or restore
+        already under way runs to its end, and a kick owed after the cancel runs
+        too. ``409`` when none is running.
+        """
+        return parse_openfan_calibration_run(self._delete("/diagnostics/openfan-calibration"))
+
+    # ── DEC-481: the OpenFan firmware update, 202 + poll ─────────────────
+
+    def openfan_device(self) -> OpenFanDevice:
+        """GET /fans/openfan/device — the controller's identity, the firmware's
+        own information blocks, and whether an update could start now.
+
+        Gate on ``capabilities.control.openfan_firmware_maintenance``. The
+        daemon reads the information blocks from the board (reusing a recent
+        answer), so this carries its own timeout.
+        """
+        return parse_openfan_device(
+            self._get("/fans/openfan/device", timeout=OPENFAN_DEVICE_TIMEOUT_S)
+        )
+
+    def stage_openfan_firmware(self, data: bytes) -> OpenFanFirmwareStaged:
+        """PUT /fans/openfan/firmware — hand the daemon the checked file's bytes
+        (DEC-483). Its answer says whether it would write the file itself, and it
+        keeps the file only then. Touches no hardware.
+
+        Gate on ``capabilities.control.openfan_firmware_write``.
+        """
+        return parse_openfan_firmware_staged(
+            self._request("PUT", "/fans/openfan/firmware", content=data)
+        )
+
+    def start_openfan_maintenance(
+        self,
+        expected_usb_serial: str,
+        firmware: dict,
+        *,
+        daemon_write: bool = False,
+        board: str = "connected",
+    ) -> str:
+        """POST /fans/openfan/maintenance — start a firmware update; returns its run id.
+
+        *firmware* is :meth:`ventulus.services.uf2.Uf2Inspection.claim` of the
+        checked file. With *daemon_write* the daemon writes the file it was last
+        given by :meth:`stage_openfan_firmware` itself (DEC-483); without it the
+        body carries no ``write`` and the user copies the file, as every daemon
+        reads it. *board* ``"silent"`` updates the OpenFAN board on USB that does
+        not answer (DEC-484; gate on ``control.openfan_firmware_silent_update``);
+        the connected board's start carries no ``board``, as every daemon reads
+        it. The daemon re-checks every condition atomically and answers ``409``
+        with ``details.reason`` when one fails; the run then proceeds
+        daemon-side and is read back with :meth:`openfan_maintenance_status`.
+        """
+        body: dict[str, Any] = {"expected_usb_serial": expected_usb_serial, "firmware": firmware}
+        if daemon_write:
+            body["write"] = "daemon"
+        if board != "connected":
+            body["board"] = board
+        data = self._post("/fans/openfan/maintenance", json=body)
+        run_id = data.get("run_id")
+        return run_id if isinstance(run_id, str) else ""
+
+    def openfan_maintenance_status(self) -> OpenFanMaintenanceRecord | None:
+        """GET /fans/openfan/maintenance — the current or most recent run.
+
+        ``None`` when the daemon has never run one (``404``). The daemon keeps
+        the last run in its journal, so a restart does not lose it.
+        """
+        try:
+            return parse_openfan_maintenance_record(self._get("/fans/openfan/maintenance"))
+        except DaemonError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def cancel_openfan_maintenance(self) -> OpenFanMaintenanceCancel:
+        """DELETE /fans/openfan/maintenance — cancel before the board is asked to
+        enter update mode. ``409`` (``details.reason: not_cancellable``) after
+        that; ``404`` when nothing is running."""
+        data = self._delete("/fans/openfan/maintenance")
+        run_id = data.get("run_id")
+        return OpenFanMaintenanceCancel(
+            run_id=run_id if isinstance(run_id, str) else "",
+            cancel_requested=data.get("cancel_requested") is True,
+        )
+
+    def active_profile(self) -> ActiveProfileInfo | None:
+        """GET /profile/active — query the daemon's currently active profile."""
+        data = self._get("/profile/active")
+        return parse_active_profile(data)
+
+    def deactivate_profile(self) -> ProfileDeactivateResult:
+        """POST /profile/deactivate — clear the daemon's active profile.
+
+        Idempotent: deactivating when no profile is active is a success
+        no-op. Returns the previously-active profile id/name (both None
+        when there was nothing to deactivate). Until a new profile is
+        activated the daemon evaluates no curve: it hands back the motherboard
+        headers it took (DEC-382), and its thermal emergency still acts on
+        its own.
+        See DEC-097.
+        """
+        return parse_profile_deactivate(self._post("/profile/deactivate", json={}))
+
+    def create_profile(self, document: dict[str, Any]) -> dict[str, Any]:
+        """POST /profiles — create a daemon-stored profile from a full document.
+
+        The document must carry a stable ``id``; the daemon keys its store on
+        it. Returns the daemon's success body (``{profile_id, created,
+        warnings, ...}``). Raises ``DaemonError`` on failure, distinguished by
+        ``.status``: 409 ``already_exists`` (id already in the store) and 400
+        ``validation_error`` (``field_violations`` in ``.details``) are the
+        cases the one-time profile import branches on (DEC-161). Requires a
+        daemon advertising ``control.profile_storage`` (≥ 1.19).
+        """
+        return self._post("/profiles", json=document)
+
+    def list_profiles(self) -> list[dict[str, Any]]:
+        """GET /profiles — list daemon-stored profile summaries.
+
+        Each entry is a lightweight ``{id, name, description}`` summary (DEC-160)
+        — it carries **no** ``controls`` or ``curves``. Fetch a profile's full
+        document with :meth:`get_profile` (callers that need the body must
+        hydrate per id — DEC-175).
+        """
+        data = self._get("/profiles")
+        profiles = data.get("profiles", [])
+        return profiles if isinstance(profiles, list) else []
+
+    def get_profile(self, profile_id: str) -> dict[str, Any]:
+        """GET /profiles/{id} — fetch a stored profile's full document.
+
+        Lossless except that daemon >= 3.0.0 serves hwmon member and sensor ids
+        canonical (DEC-442). Returns the stored document at the top level (``id``/``name``/
+        ``controls``/``curves``/…), ready for ``Profile.from_dict``. Raises
+        ``DaemonError`` with status 404 ``validation_error`` if no profile has
+        that id.
+        """
+        return self._get(f"/profiles/{_seg(profile_id)}")
+
+    def update_profile(self, profile_id: str, document: dict[str, Any]) -> dict[str, Any]:
+        """PUT /profiles/{id} — replace a stored profile with a full document."""
+        return self._put(f"/profiles/{_seg(profile_id)}", json=document)
+
+    def delete_profile(self, profile_id: str) -> dict[str, Any]:
+        """DELETE /profiles/{id} — remove a stored profile."""
+        return self._delete(f"/profiles/{_seg(profile_id)}")
+
+    def override_take(
+        self,
+        control_id: str,
+        pwm_percent: int,
+        *,
+        ttl_secs: int | None = None,
+        timeout: float | None = None,
+    ) -> OverrideGrant:
+        """POST /control/{id}/override — pin a control's members to a fixed PWM (DEC-163).
+
+        Reverts to autonomous curve control if the GUI stops renewing (daemon
+        deadman); renew at the grant's ``renew_secs``.
+        """
+        payload: dict[str, Any] = {"pwm_percent": pwm_percent}
+        if ttl_secs is not None:
+            payload["ttl_secs"] = ttl_secs
+        return parse_override_grant(
+            self._post(f"/control/{_seg(control_id)}/override", json=payload, timeout=timeout)
+        )
+
+    def override_renew(
+        self, control_id: str, override_token: int, *, timeout: float | None = None
+    ) -> OverrideRenewResult:
+        """POST /control/{id}/override/renew — extend an override before its TTL (DEC-163)."""
+        return parse_override_renew(
+            self._post(
+                f"/control/{_seg(control_id)}/override/renew",
+                json={"override_token": override_token},
+                timeout=timeout,
+            )
+        )
+
+    def override_release(
+        self, control_id: str, override_token: int, *, timeout: float | None = None
+    ) -> OverrideReleaseResult:
+        """DELETE /control/{id}/override — release an override, reverting to curve (DEC-163)."""
+        return parse_override_release(
+            self._delete(
+                f"/control/{_seg(control_id)}/override",
+                json={"override_token": override_token},
+                timeout=timeout,
+            )
+        )
+
+    def fan_identify(
+        self,
+        fan_id: str,
+        action: str,
+        *,
+        ttl_secs: int | None = None,
+        timeout: float | None = None,
+    ) -> IdentifyResult:
+        """POST /fans/{id}/identify — hold/restore one fan for identification (DEC-166).
+
+        ``action`` is ``"stop"`` or ``"restore"``. Only the named fan is
+        affected; others keep curve control.
+
+        The *daemon* decides what ``"stop"`` means (DEC-311): an ordinary fan is
+        forced to 0 with a deadman auto-restore, while a ``role: "pump"`` header
+        is perturbed to a duty that never goes below the pump floor. The result's
+        ``mode`` field says which happened — ``"stop"`` or ``"pump_perturb"`` —
+        and it is the only thing that actually knows, so prefer it over
+        re-deriving the answer client-side. A pre-2.28.0 daemon omits ``mode``
+        and always stops.
+        """
+        payload: dict[str, Any] = {"action": action}
+        if ttl_secs is not None:
+            payload["ttl_secs"] = ttl_secs
+        return parse_identify_result(
+            self._post(f"/fans/{_seg(fan_id)}/identify", json=payload, timeout=timeout)
+        )
+
+    def reset_gpu_fan(self, gpu_id: str, *, timeout: float | None = None) -> GpuFanResetResult:
+        """POST /gpu/{gpu_id}/fan/reset — reset GPU fan to automatic mode."""
+        data = self._post(f"/gpu/{_seg(gpu_id)}/fan/reset", json={}, timeout=timeout)
+        return parse_gpu_fan_reset(data)
+
+    def verify_gpu_fan(self, gpu_id: str) -> GpuVerifyResult:
+        """POST /gpu/{gpu_id}/fan/verify — test GPU fan-control effectiveness (~6s).
+
+        No lease (GPU writes never require one, DEC-045). The daemon drives a
+        test speed, waits ``GPU_VERIFY_WAIT_SECONDS = 6 s``, reads back the
+        applied curve + RPM, restores the prior state, and classifies the
+        outcome. We send a 12 s per-call timeout to clear the 6 s wait plus
+        round-trip overhead, matching ``verify_hwmon_pwm``. See DEC-120.
+        """
+        data = self._post(
+            f"/gpu/{_seg(gpu_id)}/fan/verify",
+            json={},
+            timeout=VERIFY_TIMEOUT_S,
+        )
+        return parse_gpu_verify_result(data)
