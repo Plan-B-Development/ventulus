@@ -124,7 +124,7 @@ jobs:
             # Filtered on `.event != "schedule"` rather than `event=push`: an
             # operator re-dispatching ci.yml on a SHA produces a
             # `workflow_dispatch` run, and that escape hatch is documented at the
-            # top of ci.yml for tagging a docs-only commit. `event=push` would
+            # top of ci.yml for tagging a commit with no push run. `event=push` would
             # silently break it.
             run=$(gh api \
               "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=100" \

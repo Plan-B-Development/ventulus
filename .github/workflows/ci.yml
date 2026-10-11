@@ -8,18 +8,21 @@ name: CI
 # NOTE: the decision log and its parity check are local-only and never reach
 # the runner, so ADR parity is a local gate, not a CI job.
 
-# paths-ignore: these trees contain nothing any test reads (verified: no test in
-# tests/ references docs/ or manual/). README.md, CHANGELOG.md, packaging/ and
-# .github/ are deliberately NOT ignored — tests/test_packaging_dependencies.py
-# parses packaging/PKGBUILD, .github/workflows/release.yml, the CHANGELOG and the
-# README, so filtering those would make the suite unable to fail on its own inputs.
+# paths-ignore: these trees contain nothing any test reads (no test opens a file
+# under manual/ or assets/branding/). docs/, README.md, CHANGELOG.md, packaging/
+# and .github/ are deliberately NOT ignored — tests/test_cooling_readiness.py
+# checks the in-app links against docs/24's headings, and
+# tests/test_packaging_dependencies.py parses packaging/PKGBUILD,
+# .github/workflows/release.yml, the CHANGELOG and the README, so filtering those
+# would make the suite unable to fail on its own inputs.
 #
 # TRAP, documented because it is not obvious: release.yml's ci-green job fails
 # CLOSED when no ci.yml run exists for the tagged SHA. A commit whose paths are
 # ALL ignored here produces no run, so tagging it directly would stall the release
 # for ci-green's full 45-minute budget and then fail. In practice every real
 # release bumps pyproject.toml, so the tagged commit always has a run — but if you
-# ever tag a docs-only commit, dispatch this workflow on that SHA first.
+# ever tag a commit that touches only manual/ or assets/branding/, dispatch this
+# workflow on that SHA first.
 #
 # `paths-ignore` is on `push` ONLY, deliberately. The same filter on
 # `pull_request` carries GitHub's well-known required-checks footgun: a skipped
@@ -35,7 +38,6 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - 'docs/**'
       - 'manual/**'
       - 'assets/branding/**'
   pull_request:
