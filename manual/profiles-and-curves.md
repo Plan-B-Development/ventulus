@@ -92,9 +92,9 @@ The **Minimum** floor is chosen automatically from the role inferred for the fan
 
 These per-role floors are GUI-owned policy baked into the profile. The daemon additionally enforces the **pump/CPU 30% floor** as a hard backstop: it rejects a profile whose pump/CPU control declares a `minimum_pct` below 30% at validate time, and re-applies the 30% floor on every evaluation tick regardless of the declared value. The 20% chassis / 0% GPU floors remain GUI policy — the daemon does not enforce those.
 
-A pump on a motherboard header that runs in **DC mode** gets a higher daemon floor: **70%** instead of 30% (daemon 3.0.0 and later), because a pump driven by voltage rather than PWM stalls higher in its range. Like the 30% floor it is hardcoded in the daemon and applies whatever the profile's own minimum says. The **Min** badge does not show it; the header's **Details** on the [Diagnostics](diagnostics.md) page show the floor the daemon applies.
+A pump on a motherboard header that runs in **DC mode** gets a higher daemon floor: **70%** instead of 30%, because a pump driven by voltage rather than PWM stalls higher in its range. Like the 30% floor it is hardcoded in the daemon and applies whatever the profile's own minimum says. The **Min** badge does not show it; the header's **Details** on the **Hardware** page ([System Health § Cooling Hardware](diagnostics.md#cooling-hardware)) show the floor the daemon applies.
 
-A profile saved before one of its fans earned the 30% floor — say, a cooler an older version did not recognise — is **healed when it loads**: a pump/CPU control below 30% is raised to 30%, so the daemon does not refuse it when you apply it. Only the 30% floor is healed; a chassis control you deliberately set below 20% keeps your value.
+A profile saved before one of its fans earned the 30% floor — say, a cooler Ventulus did not yet recognise when the profile was saved — is **healed when it loads**: a pump/CPU control below 30% is raised to 30%, so the daemon does not refuse it when you apply it. Only the 30% floor is healed; a chassis control you deliberately set below 20% keeps your value.
 
 ## Curves
 
@@ -178,7 +178,7 @@ Graph, Stepped and Linear curves have a **Slow-down band** box under the sensor 
 - A steady temperature releases the band after about 30 seconds, so the fans settle to the curve's value.
 - The band never keeps the fans slower than the curve asks for at the current temperature.
 - Trigger curves use their own idle and load temperatures instead; Flat, Mix and Sync curves have no band.
-- The box only appears when your daemon supports it (ventulusd 4.2.0 or newer). Demo mode does not simulate the band.
+- The box appears only when your daemon supports it. Demo mode does not simulate the band.
 
 ## The Control Loop
 
@@ -188,9 +188,9 @@ The **daemon** runs the control loop every second — the GUI never writes fan s
 2. For each fan role in the active profile:
    - If mode is Manual: use the fixed output percentage
    - If mode is Curve: look up the curve, read the bound sensor's temperature, interpolate the output
-3. Apply the **slow-down band** (hysteresis deadband, 2 °C unless the curve sets its own): when temperature is falling, hold the current PWM until the temperature drops that far below the last transition point (prevents fan oscillation). A hold never lasts more than 30 seconds in a row: after that the curve is re-read at the current temperature for one tick, so a temperature that settles just inside the band cannot pin the fans at their old speed. A hold also never keeps the fans slower than the curve asks for at the current temperature
+3. While the temperature is falling, apply the curve's [slow-down band](#slow-down-band): hold the current speed until the temperature has dropped that far below where it last changed
 4. Write the final PWM values to every fan backend (OpenFan, motherboard hwmon, and AMD GPU PMFW), **coalescing redundant writes**: for OpenFan and hwmon it skips the write when the new PWM is identical to the last commanded value, and for AMD GPU PMFW it skips changes smaller than 5% (to avoid SMU firmware churn). This coalescing is entirely daemon-internal — the GUI itself never writes PWM
-5. For a motherboard header whose write was skipped, **check the speed held**: the daemon reads the header back, and if something else — usually the BIOS's own fan control — has moved it more than 2 points, it writes the curve's value again. After 3 corrections that do not hold it stops fighting and reports the fan on the **System State** page as *"Fan duty is not holding"* (see [Diagnostics](diagnostics.md))
+5. For a motherboard header whose write was skipped, **check the speed held**: the daemon reads the header back, and if something else — usually the BIOS's own fan control — has moved it more than 2 points, it writes the curve's value again. After 3 corrections that do not hold it stops fighting and reports the fan on the **System State** page as *"Fan duty is not holding"* (see [System Health § Conditions](diagnostics.md#conditions))
 
 ## The Daemon Drives the Fans
 
@@ -211,27 +211,26 @@ with its firmware, an OpenFan channel at the last speed it was set to (the contr
 no curve of its own). With no profile active, the daemon writes no fan. The one
 exception is a thermal emergency, which takes every fan to full speed and gives each one
 back when it ends — see
-["Fans run at full speed regardless of profile"](hardware-troubleshooting.md#fans-run-at-full-speed-regardless-of-profile).
+[What keeps your machine safe](understanding-fan-control.md#what-keeps-your-machine-safe).
 
 **When you switch profiles**, a motherboard header the new profile does not name is given
 back to exactly what it was doing before the daemon first took it — usually the BIOS curve
 — within a second. So is an AMD GPU the new profile does not name: it goes back to its
-firmware fan curve (daemon 3.0.0 and newer; older daemons leave it at the old profile's
-speed until the daemon stops). The same happens to both when no profile is left active — **Stop** under the
+firmware fan curve. The same happens to both when no profile is left active — **Stop** under the
 sidebar's profile selector, the tray's **Stop profile control**, or deleting the active profile. An OpenFan channel, or a
 motherboard header with no automatic mode to go back to (an ARCTIC fan hub's channels, for
 example), that the new profile does not name is left at its last speed or at the **Exit
 minimum** (Settings, 50 % by default), whichever is higher — or at full speed if the daemon has
 lost track of its speed. It is never slowed, and with an Exit
-minimum of 0 it keeps its last speed (daemon 3.1.0 and newer; older daemons always keep the
-last speed).
+minimum of 0 it keeps its last speed.
 
 **When the daemon stops** — a normal stop, a crash, or an uninstall — each motherboard
 header goes back to what it was doing before, and each AMD GPU the daemon drove goes back
 to its firmware curve. Two kinds of fan have nothing to go back to: OpenFan channels and
-motherboard headers with no automatic mode. Those are left at their last speed or the
-daemon's *exit minimum* (50 % unless you changed it in **Settings**), whichever is higher,
-and at full speed if the daemon had lost track of their speed. An NZXT Kraken runs at
+motherboard headers with no automatic mode. After a clean stop those are left at their last
+speed or the daemon's *exit minimum* (50 % unless you changed it in **Settings**), whichever
+is higher, and at full speed if the daemon had lost track of their speed; after a crash they
+keep their last speed until the daemon is back. An NZXT Kraken runs at
 100 % once the daemon stops, because the driver has no way to return the
 cooler to its own behaviour. On a Dell machine whose fans share one BIOS switch, the BIOS
 takes every fan back.

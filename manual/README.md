@@ -15,13 +15,14 @@ This manual covers every page, setting, and feature of the application.
 3. [Dashboard](dashboard.md) — Real-time overview of fans, sensors, and system health
 4. [Controls](controls.md) — Profiles, fan roles, curves, and manual override
 5. [Settings](settings.md) — Application preferences, themes, and backup/restore
-6. [System Health](diagnostics.md) — The Overview, System State, Hardware, and Logs pages: daemon health, sensors, fan status, hardware readiness, Super-I/O detection, and logs
-7. [Fan Wizard](fan-wizard.md) — Guided fan identification and labelling
-8. [Profiles and Curves Reference](profiles-and-curves.md) — How profiles, fan roles, and curves work together
-9. [Hardware Troubleshooting](hardware-troubleshooting.md) — the System State health report, missing sensors, vendor quirks, Test PWM Control, and why some fans appear read-only
-10. [Driver Setup](driver-setup.md) — Beginner walkthrough for the out-of-tree motherboard fan drivers (DKMS), Secure Boot, the AMD GPU kernel parameter, verification, and rollback
-11. [Understanding Motherboard Fan Control (hwmon)](understanding-fan-control.md) — Plain-English primer: what hwmon, sysfs, Super I/O, and PWM are, and why drivers and BIOS settings matter
-12. [OpenFan Controller](openfan-controller.md) — The OpenFan USB fan controller: detection, serial access, stable device paths, channels, fan identification, profiles, and troubleshooting
+6. [System Health](diagnostics.md) — The Overview, System State, Hardware and Logs pages, section by section
+7. [Fan Tests and Reports](fan-tests.md) — Test PWM Control, Characterise, Discover Control Path, OpenFan calibration, the GPU fan test, the PWM Test Report and the recording sessions
+8. [Fan Wizard](fan-wizard.md) — Guided fan identification and labelling
+9. [Profiles and Curves Reference](profiles-and-curves.md) — How profiles, fan roles, and curves work together
+10. [Hardware Troubleshooting](hardware-troubleshooting.md) — From a symptom to its fix: missing sensors or headers, read-only headers, fans at full speed, GPU fans
+11. [Driver Setup](driver-setup.md) — Beginner walkthrough for the out-of-tree motherboard fan drivers (DKMS), Secure Boot, the AMD GPU kernel parameter, verification, and rollback
+12. [Understanding Motherboard Fan Control (hwmon)](understanding-fan-control.md) — Plain-English primer: what hwmon, sysfs, Super I/O, and PWM are, why drivers and BIOS settings matter, and what keeps your machine safe
+13. [OpenFan Controller](openfan-controller.md) — The OpenFan USB fan controller: detection, serial access, channels, firmware updates, recovery, and troubleshooting
 
 ## Reference Docs
 

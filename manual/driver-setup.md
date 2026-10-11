@@ -4,13 +4,14 @@ This page walks a **new Linux user** from "my motherboard fans don't show up" to
 
 If you already know your way around DKMS and modprobe, the condensed reference lives in the [AMD](../docs/21_AMD_Motherboard_Fan_Control_Guide.md) and [Intel](../docs/23_Intel_Motherboard_Fan_Control_Guide.md) fan-control guides.
 
-> ## ⚠ Read this first
->
-> These steps change kernel parameters, driver/module configuration, or firmware (UEFI/BIOS) settings. Apply them at your own risk and back up your configuration first — an incorrect kernel parameter can stop the system booting.
->
-> All commands on this page are provided **as-is, without warranty of any kind**. You run them at your own risk. The Ventulus project and its contributors are **not responsible** for hardware, firmware, or data damage, boot failures, or any other consequence of following this guide. The drivers installed here are **third-party, out-of-tree kernel modules** maintained by their respective upstream projects, not by Ventulus.
->
-> If anything here conflicts with what your hardware vendor or distribution documents, prefer their guidance.
+> **⚠ Before you start.** These steps change kernel parameters, driver and module
+> configuration, or firmware (UEFI/BIOS) settings. Back up your configuration first:
+> an incorrect kernel parameter can stop the system booting. The drivers installed here
+> are **third-party, out-of-tree kernel modules** maintained by their upstream projects,
+> not by Ventulus. Where this page conflicts with your hardware vendor's or
+> distribution's documentation, prefer theirs. Every change has a
+> [rollback](#rollback--undoing-everything), and the manual's [notice](README.md)
+> applies throughout.
 
 ## Step 0 — Do you even need this?
 
@@ -24,7 +25,7 @@ If it reports your PWM headers with a non-zero **writable** count and no issues,
 
 ## Step 1 — Identify your board and chip
 
-The **System State** page's summary line shows what DMI reports (e.g. `Gigabyte Technology Co., Ltd. — X870E AORUS MASTER — BIOS F14c`), and its **Hardware Registry** table lists every detected Super-I/O chip with the driver bound to it — or, with a daemon older than 3.3.0, the driver its name suggests. The page is the easiest path because it already cross-references the project's chip knowledge base.
+The **System State** page's summary line shows what DMI reports (e.g. `Gigabyte Technology Co., Ltd. — X870E AORUS MASTER — BIOS F14c`), and its **Hardware Registry** table lists every detected Super-I/O chip with the driver bound to it. The page is the easiest path because it already cross-references the project's chip knowledge base.
 
 From a terminal, the same facts come from:
 
@@ -89,7 +90,7 @@ yay -S it87-dkms-git
 yay -S nct6687d-dkms-git
 ```
 
-Both are `-git` packages: every install/reinstall builds the **current upstream snapshot**. That matters — many historical workarounds are already fixed upstream (for the it87 driver: MMIO on by default since the 2026-03 builds, ACPI-conflict sidestepping). The version number shown on the AUR page is stale `-git` metadata; what installs is upstream HEAD at build time. If you installed the driver months ago and something misbehaves, **reinstalling the package is the first remediation, not the last** — but read the next section first if you have a Gigabyte board.
+Both are `-git` packages: every install/reinstall builds the **current upstream snapshot**. That matters — many historical workarounds are already fixed upstream (for the it87 driver: MMIO on by default since the 2026-03 builds, ACPI-conflict sidestepping). The version number shown on the AUR page is stale `-git` metadata; what installs is upstream HEAD at build time. If you installed the driver months ago and something misbehaves, **reinstalling the package is the first remediation, not the last**.
 
 With the `nct6687d` driver, two more things before Step 4:
 
@@ -105,24 +106,21 @@ Both drivers can bind the same chip, which garbles readings and makes PWM writes
 
 ### it87 v2.0 renames your chips
 
-Builds of `it87-dkms-git` made on or after **2026-09-09** (the driver's v2.0 release, [PR #132](https://github.com/frankcrawford/it87/pull/132)) name Gigabyte chips after the board's own ID whenever the driver can read it — for example `it8696_a008090a` instead of `it8696`.
+Builds of `it87-dkms-git` made on or after **2026-09-09** (the driver's v2.0 release,
+[PR #132](https://github.com/frankcrawford/it87/pull/132)) name Gigabyte chips after the
+board's own ID whenever the driver can read it: `it8696_a008090a` instead of `it8696`,
+for example.
 
-**With ventulusd 3.0.0 or newer, the rename changes nothing in Ventulus.** The daemon strips that suffix where it reads the chip name, so every fan header, sensor and voltage rail keeps the id it had before the rebuild. Profiles, fan names, pump roles and cooling devices keep working, the built-in header labels (for example the X870E AORUS MASTER's `SYS_FAN5_PUMP`) still apply, and the dual-chip check on **System State** still recognises both chips. It also reads back anything an older daemon saved under the new names. Two things it cannot do:
+Ventulus strips that suffix where it reads the chip name, so every fan header, sensor
+and voltage keeps its id, and the profiles, fan names, pump roles and cooling devices
+that use them carry on working. The built-in header labels (such as the X870E AORUS
+MASTER's `SYS_FAN5_PUMP`) still apply, and the dual-chip check on **System State**
+still recognises both chips.
 
-- **Members already lost stay lost.** If you rebuilt the driver while running an older Ventulus, the app removed every profile member on the renamed chips the first time it saw the new ids, and saved the profiles without them. Re-add those fans to their profiles.
-- **An `/etc/sensors.d` file written for the old name stops matching.** `sensors` itself matches the new name, so a block that starts `chip "it8696-*"` no longer applies, in `sensors` or in Ventulus. Upstream's per-board configs are written for the new names, and Ventulus reads those.
-
-**On an older daemon, every fan header gets a new id after the rebuild.** Profile members, fan names, header roles — including a pump role you assigned — and cooling-device members all point at ids that no longer exist, so your profile stops controlling those fans, the built-in labels stop applying, and the dual-chip warning reports both chips missing. Update ventulusd before you rebuild the driver. If you cannot yet, stay on the old names by building commit **`c567739`** (2026-08-25). It has the same driver code as the last build before the rename (only a build-script change came between them), including the [PR #128](https://github.com/frankcrawford/it87/pull/128) fixes:
-
-```bash
-yay -G it87-dkms-git          # or: git clone https://aur.archlinux.org/it87-dkms-git.git
-cd it87-dkms-git
-# pin the source to the commit:
-sed -i 's|it87.git"|it87.git#commit=c567739c639533177abd66894a6a8d561337285f"|' PKGBUILD
-makepkg -si
-```
-
-A later `yay -Syu` will offer to "update" the package back to the current master. Skip it (or add `it87-dkms-git` to `IgnorePkg` in `/etc/pacman.conf`) until ventulusd is updated.
+One thing does change: an `/etc/sensors.d` file written for the old name stops
+matching. `sensors` matches the new name, so a block that starts `chip "it8696-*"` no
+longer applies, in `sensors` or in Ventulus. Upstream's per-board configurations use the
+new names, and Ventulus reads those.
 
 > **Secondary-chip fan control on dual-Super-I/O Gigabyte boards is bound by board pairing, not fixed for the family.** Some boards work — the X870E AORUS ELITE X3D reports both chips and controls both. On others the secondary can be masked by an ITE eSPI→LPC bridge latched in configuration mode, measured on an X870E AORUS MASTER. **That is recoverable, but not the way you would guess**: reinstalling, `mmio=on` and `force_id` all change nothing. The latch is written by the `nct6775`/`w83627ehf` modules (or `sensors-detect`). Stop those, reboot, and if the chip is still missing, power down at the wall. Follow the ladder in [Hardware Troubleshooting → *Some of my fan headers are missing*](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up).
 
@@ -150,8 +148,8 @@ Boot-time loading: the `ventulusd` package ships `/etc/modules-load.d/ventulus.c
 Then verify end-to-end in the GUI:
 
 1. **Restart the daemon** so it adopts the new chip's PWM headers: `sudo systemctl restart ventulusd`. (A **Rescan Hardware** click in the global footer page is enough when you only need the chip's *sensors* — fan-control headers are discovered at daemon startup only.)
-2. Click **Rescan Hardware** in the global footer, then open **System State** — the **Hardware Registry** should show your chip as **BOUND** (**LOADED** with a daemon older than 3.3.0) and the header count should match what the board physically has.
-3. On the **Hardware** page, press **Test Control** on a *non-critical chassis fan* header's card (not CPU/pump). A **"PWM control is working correctly"** result is the finish line.
+2. Click **Rescan Hardware** in the global footer, then open **System State** — the **Hardware Registry** should show your chip as **BOUND** and the header count should match what the board physically has.
+3. On the **Hardware** page, press **Test Control** on a *non-critical chassis fan* header's card (not CPU/pump). A **"PWM control is working correctly"** result is the finish line; [Fan Tests and Reports](fan-tests.md#test-pwm-control) explains the other results.
 4. If the test reports the BIOS reverting control, go to Step 5.
 
 ## Secure Boot and DKMS modules
@@ -189,7 +187,7 @@ A correctly-installed, current driver usually takes each header over from the BI
 
 - **Every vendor:** never give a BIOS fan curve a **0% point**. The BIOS curve runs the fans at boot, and whenever the daemon is not controlling them, so a 0% point means stopped fans — pump and CPU fan included — in exactly those moments.
 - **Gigabyte (Smart Fan 5/6):** a current `it87-dkms-git` build usually needs **no BIOS change at all**. For a 4-pin fan, set the header's **FAN Control Mode** to **PWM**. Leave **Fan Speed Control** on a normal curve. *Full Speed* is a fail-safe, not a fix: the firmware runs that fan at 100% whenever it owns it, but on some boards it also locks Linux out of the header ([issue #115](https://github.com/frankcrawford/it87/issues/115)). On IT8689E **Rev 1** boards (e.g. X670E AORUS MASTER), **update `it87-dkms-git` first**. The fix in [PR #128](https://github.com/frankcrawford/it87/pull/128) merged on 2026-08-24, and three users reported working IT8689E control the day before, including on **Rev 1** (a Z790 AORUS MASTER, with fan speed measurably tracking duty). More boards have reported working since, some with **no BIOS changes at all**. So update, then **verify with Test PWM Control** rather than assuming. Only on a build older than 2026-08-24 did the driver need the fork's old BIOS stopgap: PWM 40,40,40,40,40,40,100 at temperatures 0,90,90,90,90,90,90, lowering 90 to your BIOS maximum ([issue #96](https://github.com/frankcrawford/it87/issues/96)). Even that only reliably restored the CPU-fan header. ([PR #114](https://github.com/frankcrawford/it87/pull/114), an earlier candidate fix, was rejected on 2026-08-25.)
-- **MSI:** no BIOS setting makes the headers writable. If every header reads as read-only, the in-kernel `nct6683` is bound instead of `nct6687d` — blacklist it (see Step 3). With ventulusd 3.3.0 or newer the **Hardware Registry** shows which one is bound: `nct6683 bound (mainline kernel)` is the read-only driver. On B840/B850/B860/X870/X870E/Z890 boards, system fans that ignore writes need the driver options in the table below, not a BIOS change. For 3-pin fans, set the header's fan type to DC.
+- **MSI:** no BIOS setting makes the headers writable. If every header reads as read-only, the in-kernel `nct6683` is bound instead of `nct6687d` — blacklist it (see Step 3). The **Hardware Registry** shows which one is bound: `nct6683 bound (mainline kernel)` is the read-only driver. On B840/B850/B860/X870/X870E/Z890 boards, system fans that ignore writes need the driver options in the table below, not a BIOS change. For 3-pin fans, set the header's fan type to DC.
 - **ASUS:** no BIOS setting unlocks the headers either — under `nct6775` they are always writable, and the daemon switches each one to manual itself. In *Q-Fan Control*, match each header's mode to the fan (**DC Mode** for 3-pin, **PWM Mode** for 4-pin). *Q-Fan Tuning* is a one-shot calibration, not a mode switch. On some 800-series boards the firmware has been measured taking a header straight back from manual mode; run **Test PWM Control** to see whether yours does.
 - **ASRock:** headers on the NCT67xx chip are always writable under `nct6775`. Headers on an NCT6686D/NCT6683D are read-only in the kernel driver whatever the BIOS says, and need an out-of-tree driver. Set each header's fan type to match the fan (DC for 3-pin, PWM for 4-pin).
 
@@ -235,12 +233,12 @@ sudo rm -f /etc/modprobe.d/it87.conf /etc/modprobe.d/nct6687.conf \
 sudo systemctl reboot
 ```
 
-If you created `/etc/modprobe.d/ventulus-superio-local.conf` while [recovering a missing chip](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up), leave it unless you are sure the package's guard covers your board (`sudo journalctl -b -t ventulus-superio-guard` shows a line per module it declined): removing it lets `nct6775` and `w83627ehf` probe again. BIOS changes are rolled back in BIOS setup (restore Smart Fan / Q-Fan to its default profile). If you pinned `it87-dkms-git` to a commit, remove it from `IgnorePkg` too. If you use snapshots (e.g. `snapper` / Timeshift on CachyOS), taking one before Step 3 gives you a one-command rollback as well.
+If you created `/etc/modprobe.d/ventulus-superio-local.conf` while [recovering a missing chip](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up), leave it unless you are sure the package's guard covers your board (`sudo journalctl -b -t ventulus-superio-guard` shows a line per module it declined): removing it lets `nct6775` and `w83627ehf` probe again. BIOS changes are rolled back in BIOS setup (restore Smart Fan / Q-Fan to its default profile). If you use snapshots (e.g. `snapper` / Timeshift on CachyOS), taking one before Step 3 gives you a one-command rollback as well.
 
 ## Staying current
 
 - **Kernel updates:** DKMS rebuilds the module automatically when a new kernel + matching headers are installed. If fans disappear right after a kernel update, the usual cause is missing/mismatched headers — re-check Step 2.
-- **Driver updates:** `-git` AUR packages only pick up upstream fixes when *reinstalled* (`yay -S it87-dkms-git`). Do this before troubleshooting any fan-control regression. On a Gigabyte board, a build from 2026-09-09 on renames your chips: with ventulusd 3.0.0 or newer that changes nothing, but on an older daemon it changes every fan header's id, so update the daemon first — see [it87 v2.0 renames your chips](#it87-v20-renames-your-chips). (If a current build *fails to compile*, see upstream [issue #108](https://github.com/frankcrawford/it87/issues/108) for a known `-Werror=unused-function` toolchain failure.)
+- **Driver updates:** `-git` AUR packages only pick up upstream fixes when *reinstalled* (`yay -S it87-dkms-git`). Do this before troubleshooting any fan-control regression. On a Gigabyte board, a build from 2026-09-09 on renames your chips, which changes nothing in Ventulus: see [it87 v2.0 renames your chips](#it87-v20-renames-your-chips). (If a current build *fails to compile*, see upstream [issue #108](https://github.com/frankcrawford/it87/issues/108) for a known `-Werror=unused-function` toolchain failure.)
 
 ## AMD GPU fan control prerequisite (RDNA3+)
 
@@ -274,7 +272,8 @@ Reboot, confirm the parameter took effect with `cat /proc/cmdline`, then run **T
 ## Where to go next
 
 - [Setup Checklist](setup-checklist.md) — the ordered end-to-end setup path this page slots into
-- [Hardware Troubleshooting](hardware-troubleshooting.md) — the System State health report, dual-chip warning, fan-test results
+- [Hardware Troubleshooting](hardware-troubleshooting.md) — from a symptom to its fix, including the dual-chip warning
+- [Fan Tests and Reports](fan-tests.md) — what each fan test's result means
 - [Hardware Compatibility](../docs/19_Hardware_Compatibility.md) — full chip/driver matrix with sources
 - [AMD Motherboard Fan Control Guide](../docs/21_AMD_Motherboard_Fan_Control_Guide.md) / [Intel Guide](../docs/23_Intel_Motherboard_Fan_Control_Guide.md) — vendor-by-vendor depth
 

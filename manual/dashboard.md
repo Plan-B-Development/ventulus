@@ -13,8 +13,7 @@ The page leads with the **telemetry chart** — the one view nothing else duplic
 with a compact **card per fan control** beneath it and the **Thermal Sensors** panel
 alongside. Drag the splitter handles to trade space between them.
 
-Status that used to sit on a Dashboard-only strip now lives on the app-wide chrome, so
-it follows you to every page: connection, uptime and alerts on the **top ribbon**;
+Status lives on the app-wide bars, so it follows you to every page: connection, uptime and alerts on the **top ribbon**;
 operation mode, poll freshness, thermal safety and cooling readiness on the **footer**.
 If the daemon stops answering, the thermal readings on both bars disappear rather
 than freeze on the last one — with no connection there is no current state to show —
@@ -46,29 +45,17 @@ Below it, five banners appear only when they apply:
   your fans, and needs no action unless it persists — a thermal emergency legitimately
   slows a tick down, because the daemon writes to every fan in turn. *Stopped* means
   nothing is controlling your fans and the emergency protection is not running:
-  restart `ventulusd`. Daemons older than v2.17.0 do not report this, and
-  show no banner
-- **Daemon running on fallback settings** — the daemon could not read or parse its own
-  `runtime.toml` and fell back to built-in defaults, so that a corrupt file can never
-  stop it booting. Those defaults carry **no header roles**. If the failure happened at
-  *startup*, any `pump` role you assigned by hand is gone, and with it that header's 30%
-  floor, its stop exemption and its pump-safe identify — which matters most on a board
-  whose chip publishes no header labels, because there your assignment was the only
-  evidence a header drives a pump. A failure during a *reload* leaves header roles
-  untouched. Repairing the file is not enough on its own: the running daemon keeps its
-  defaults, so restart `ventulusd` afterwards. If the banner says a setting was
-  *saved* while the file could not be read, the daemon has already replaced the file: it
-  kept the unreadable one beside it as `runtime.toml.invalid-` plus a timestamp, and the
-  new file carries the header roles and cooling devices it was running with, so no pump
-  role was lost. Every other setting that was only in the old file is gone from it — copy
-  what you need back from the kept copy, then restart `ventulusd`. If the
-  failure was at *startup* and a setting was saved afterwards, the banner names the kept
-  copy instead: the file the daemon now uses is a new one with no roles, so restarting
-  alone would not bring them back — stop `ventulusd`, repair the named copy and
-  move it back in place of `runtime.toml`, then start it. The daemon's
-  verbatim error goes to the GUI log rather than into the banner, since a TOML parse
-  error can run to several lines. Daemons older than v2.35.0 (built as v2.34.0, which was never released) do not report this, and
-  show no banner
+  restart `ventulusd`.
+- **Daemon running on fallback settings** — the daemon could not read its own
+  `runtime.toml`, the file that holds the settings you made through the app, so it is
+  running on built-in defaults rather than refusing to start. Those defaults carry **no
+  header roles**: a `pump` role you assigned by hand may not be in effect, and with it
+  that header's 30% floor, its stop exemption and its pump-safe identify. That matters
+  most on a board whose chip publishes no header labels, where your assignment is the
+  only evidence a header drives a pump. The banner says what the failure cost and what
+  to do; the daemon's
+  [User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md#when-runtimetoml-cannot-be-read) has the recovery steps for each
+  case. The daemon's full error goes to the GUI log.
 
 ## Fan Cards
 
@@ -226,8 +213,7 @@ profile keeps running. The banner goes away on your next successful **Apply**.
 
 The daemon has two thermal safety states, and it drives both itself:
 
-- **Emergency** — the hottest CPU sensor reached the emergency limit, or (daemon 3.0.0 and
-  later) a coolant sensor reached the **coolant limit** set under **Settings**; the chip's
+- **Emergency** — the hottest CPU sensor reached the emergency limit, or a coolant sensor reached the **coolant limit** set under **Settings**; the chip's
   detail says which. Every OpenFan fan and
   every writable fan header runs at full speed, including fans no profile controls. The
   daemon holds it until a *current* reading is back down — the CPU at or below 80 °C, the
@@ -247,12 +233,12 @@ and appear in the Logs page's alert bar and event log. Acknowledging one quieten
 badge, but the footer keeps counting it until the daemon reports a normal state. If the
 daemon stays unreachable for five seconds, nothing current is known about its thermal
 state, so the alert clears and the connection problem is reported instead; a single missed
-reading does not clear it. See
-["Fans run at full speed regardless of profile"](hardware-troubleshooting.md#fans-run-at-full-speed-regardless-of-profile)
-for the full behaviour.
+reading does not clear it. The rules in full are in
+[What keeps your machine safe](understanding-fan-control.md#what-keeps-your-machine-safe);
+if your fans stay at full speed, see
+["Fans run at full speed regardless of profile"](hardware-troubleshooting.md#fans-run-at-full-speed-regardless-of-profile).
 
-Two cooling checks sit beside these states and are alerts too (daemon 3.0.0 and
-later): a **pump stall** — a pump in your profile reading 0 RPM while it should run, which the
+Two cooling checks sit beside these states and are alerts too: a **pump stall** — a pump in your profile reading 0 RPM while it should run, which the
 daemon answers by running it at full speed — is an error alert naming the pump, and the
 **cooling advisory** — the CPU held at its ceiling for a minute with every fan and pump running
 slowly — is a warning that forces nothing. Both appear in the Logs page's alert bar.

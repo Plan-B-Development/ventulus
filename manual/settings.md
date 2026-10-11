@@ -48,7 +48,7 @@ These let you override where the application stores its data. Each row has a **B
 
 A Profiles or Themes change — **Browse…** or **Reset** — applies at once and is saved immediately; there is nothing to Save. The GUI offers to move the existing files to the new folder: **Yes** moves them, **No** changes the folder and leaves them where they are, **Cancel** changes nothing. If a file of the same name is already in the new folder you are asked before it is replaced; **No** keeps the copy already there and leaves the old one in the old folder. If the settings file cannot be written, the folder is not changed and nothing is moved.
 
-When you change the Profiles directory, the GUI registers the new path with the daemon so it can find profiles for headless activation — and, on `ventulusd` ≥ v2.23.0, retires the old one in the same step so the daemon's search path does not collect a dead entry every time you move the directory. The daemon's full search path is shown and editable under **Daemon Configuration** below.
+When you change the Profiles directory, the GUI registers the new path with the daemon so it can find profiles for headless activation — and retires the old one in the same step so the daemon's search path does not collect a dead entry every time you move the directory. The daemon's full search path is shown and editable under **Daemon Configuration** below.
 
 ## Daemon Configuration
 
@@ -64,8 +64,8 @@ The defaults below are the daemon's own, used when neither `daemon.toml` nor thi
 | **Serial timeout** | 500 ms | 50-1000 ms | Read timeout for the OpenFan device. Also annotated when no controller is detected |
 | **Super-I/O port probe** | Off | on/off | Opt-in active chip detection. The switch is only half the requirement — it also needs a root systemd drop-in, and the row says so |
 | **NVIDIA telemetry** | Off | on/off | Opt-in read-only NVML. Same drop-in caveat |
-| **Exit minimum** | 50 % | 0-100 % | When the daemon stops, it leaves each OpenFan fan — and any motherboard header with no automatic mode to go back to — at its last speed or this, whichever is higher (from daemon 3.1.0, also when a profile switch or **Stop profile control** leaves such a fan unnamed), so a fan the daemon was running slowly does not stay slow with nothing controlling it. A fan whose speed the daemon had lost track of goes to 100 %; 0 turns this off. **Applies immediately**, like the profile search directories, and the row shows the value in force. If you edit the daemon's config files by hand, the row says what the files contain until you run `sudo systemctl reload ventulusd`. Needs `ventulusd` v2.50.0 or newer; on an older daemon the row is disabled and says so |
-| **Coolant limit** | 60 °C | 40-70 °C | If a coolant sensor (an AIO or custom-loop coolant temperature the daemon recognises) reaches this, the daemon runs every fan and pump at full speed until the coolant is 5 °C cooler. There is no off switch; a machine with no coolant sensor is unaffected. **Applies immediately**, and the row shows the value in force, with the same hand-edit note as the exit minimum. Needs `ventulusd` v3.0.0 or newer; on an older daemon the row is disabled and says so |
+| **Exit minimum** | 50 % | 0-100 % | When the daemon stops, it leaves each OpenFan fan — and any motherboard header with no automatic mode to go back to — at its last speed or this, whichever is higher (and also when a profile switch or **Stop profile control** leaves such a fan unnamed), so a fan the daemon was running slowly does not stay slow with nothing controlling it. A fan whose speed the daemon had lost track of goes to 100 %; 0 turns this off. **Applies immediately**, like the profile search directories, and the row shows the value in force. If you edit the daemon's config files by hand, the row says what the files contain until you run `sudo systemctl reload ventulusd` |
+| **Coolant limit** | 60 °C | 40-70 °C | If a coolant sensor (an AIO or custom-loop coolant temperature the daemon recognises) reaches this, the daemon runs every fan and pump at full speed until the coolant is 5 °C cooler. There is no off switch; a machine with no coolant sensor is unaffected. **Applies immediately**, and the row shows the value in force, with the same hand-edit note as the exit minimum |
 
 **The two opt-in switches need a drop-in file as well.** The daemon package ships them as
 examples, not installed: `/usr/share/doc/ventulusd/superio-port-probe.conf.example`
@@ -83,11 +83,10 @@ The list of directories the daemon looks in for profile files. Like the exit min
 - **Add…** registers another directory with the daemon.
 - **Remove** stops the daemon looking in the selected one.
 
-Four entries cannot be removed, and the button is disabled with a tooltip saying which rule applies rather than failing after the fact: `/etc/ventulus/profiles` (it holds system-installed profiles); the last remaining directory (the daemon would then be unable to find any profile at all); the first entry in the list, which is the daemon's own profile store and the place it writes new profiles; and this application's own profiles directory, which is re-registered on every connect, so removing it here would appear to work and then quietly come back — change that one under **Path Management**, which retires the old registration in the same step. On a daemon older than v2.23.0, **Remove** is unavailable entirely — that version is the one that added the ability to prune an entry.
+Four entries cannot be removed, and the button is disabled with a tooltip saying which rule applies rather than failing after the fact: `/etc/ventulus/profiles` (it holds system-installed profiles); the last remaining directory (the daemon would then be unable to find any profile at all); the first entry in the list, which is the daemon's own profile store and the place it writes new profiles; and this application's own profiles directory, which is re-registered on every connect, so removing it here would appear to work and then quietly come back — change that one under **Path Management**, which retires the old registration in the same step.
 
 The card also shows the daemon's admin config path, its runtime config path, its socket and its state directory. Those four are deliberately read-only: a bad socket path would lock every client out of the daemon permanently.
 
-Requires `ventulusd` ≥ v2.16.0; on an older daemon the whole card stands down rather than showing values it would have to invent.
 
 ## Preferred Sensors
 
@@ -95,7 +94,6 @@ If your system exposes several CPU or motherboard temperature sensors, you can p
 
 This is **advisory only**: thermal safety always uses the hottest CPU sensor regardless of your choice. The drop-downs populate from the daemon the first time you open Settings; on a daemon that predates this feature the card reports that it is unavailable. You can also set a preferred sensor straight from a sensor row on the **Overview** page (right-click → *Set as preferred…*).
 
-Requires `ventulusd` ≥ v2.6.0.
 
 ## Resets & Maintenance
 
@@ -103,14 +101,14 @@ Several cards collect the things that accumulate quietly as you use the applicat
 
 | Card | What it clears |
 |---|---|
-| **Fan Names** | Every fan name in one place, including names for hardware that is no longer plugged in. Those rows are kept on purpose: otherwise a stale name could never be removed. Renaming from the Dashboard or the Overview fan table is unchanged |
+| **Fan Names** | Every fan name in one place, including names for hardware that is no longer plugged in. Those rows are kept on purpose: otherwise a stale name could never be removed. You can still rename a fan from the Dashboard or the Overview fan table |
 | **Sensors & Chart Series** | Hidden sensors, coolant classification overrides, custom chart colours, hidden chart series — and **Settings for missing hardware** (below) |
-| **Prompts & Dismissals** | A **Show AIO pump info** switch for the popup shown when a pump header joins a role, and buttons that re-arm dismissed driver advisories, the daemon profile-import offer, and the one-time fan-name and chart-series seeding. Also governs the **System State** page's health surfaces: whether the *Acknowledge* and *Dismiss* buttons appear at all, a single **Restore** that brings back everything you have dismissed there — conditions, board notes, interference, the GPU rows on Safety & GPU Limits and GPU advisories — a **Restore** for the **Hardware** page's header-label note (it asks again wherever you answered *Labels are correct*), and a control to forget the recorded fan-control test result so those notes read as unverified again. With daemon 3.2.0 or newer that control is greyed out: the daemon keeps a result per header instead, and a header's result is replaced by testing it again. There is no *Clear acknowledged*: acknowledging is for the current session only, so closing the app already clears it |
-| **Card Layout** | Every Controls-page card size at once (resetting one card by double-clicking its grip is unchanged), and **Reset layout**, which puts every panel divider back to an even split |
+| **Prompts & Dismissals** | A **Show AIO pump info** switch for the popup shown when a pump header joins a role, and buttons that re-arm dismissed driver advisories, the daemon profile-import offer, and the one-time fan-name and chart-series seeding. Also governs the **System State** page's health surfaces: whether the *Acknowledge* and *Dismiss* buttons appear at all, a single **Restore** that brings back everything you have dismissed there — conditions, board notes, interference, the GPU rows on Safety & GPU Limits and GPU advisories — a **Restore** for the **Hardware** page's header-label note (it asks again wherever you answered *Labels are correct*), and a control to forget the recorded fan-control test result so those notes read as unverified again. Against a daemon that keeps a result per header, that control is greyed out: test the header again to replace its result. There is no *Clear acknowledged*: acknowledging is for the current session only, so closing the app already clears it |
+| **Card Layout** | Every Controls-page card size at once (double-clicking a card's grip still resets that one card), and **Reset layout**, which puts every panel divider back to an even split |
 
 ### Remembered layout
 
-Panel sizes set by dragging the dividers between sections are remembered per page, along with the chart's time range and mode, the Logs level filters and search text, and your theme. Everything here used to reset on every launch.
+Panel sizes set by dragging the dividers between sections are remembered per page, along with the chart's time range and mode, the Logs level filters and search text, and your theme.
 
 A restored panel is never allowed to come back collapsed to nothing, however narrow you left it. That matters most on the Dashboard, where the sensor rail is opened and closed by its divider alone — a saved zero-width rail would have left no way to get it back. **Reset layout** is the escape hatch for a saved arrangement you have simply gone off.
 
@@ -159,7 +157,7 @@ To restore it, close the application, copy the backup over `~/.config/ventulus/a
 
 ### Importing Your Profiles into the Daemon
 
-If you run a daemon that owns its own profile store (v1.19 or newer), the
+The daemon keeps its own profile store, and the
 **Sync Local Profiles to Daemon** button copies your local fan profiles
 (`~/.config/ventulus/profiles/`) into the daemon so it can manage them
 directly. The first time the GUI connects to a capable daemon and finds local
@@ -172,8 +170,6 @@ profiles it offers this automatically; you can also run it any time from this ca
   the report, without stopping the rest of the import.
 - Re-running is safe: profiles already imported are matched by id and skipped.
 
-The button acts only against a daemon that advertises profile storage; against an
-older daemon it does nothing.
 
 ## Theme page
 
@@ -210,4 +206,4 @@ Click **Apply Theme Globally** to apply your edits live — the entire interface
 
 ---
 
-Previous: [Controls](controls.md) | Next: [Diagnostics](diagnostics.md)
+Previous: [Controls](controls.md) | Next: [System Health](diagnostics.md)

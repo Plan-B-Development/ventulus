@@ -1,6 +1,6 @@
 # OpenFan Controller
 
-This page explains what an OpenFan Controller is, how Ventulus works with one, and how to get it detected, identified, and controlled. If you do not have an OpenFan Controller you can skip this page — it does not apply to motherboard fan headers (see [Understanding Motherboard Fan Control](understanding-fan-control.md)) or to GPU fans.
+This page covers the OpenFan Controller: what it is, how Ventulus detects and drives it, how to update its firmware, and how to recover it. If you do not have one, skip it; motherboard fan headers are covered in [Understanding Motherboard Fan Control](understanding-fan-control.md).
 
 ## What the OpenFan Controller is
 
@@ -10,7 +10,7 @@ The **OpenFan Controller** (branded **OpenFAN**) is a USB fan controller that dr
 - Store: <https://shop.sasakaranovic.com/products/openfan-pc-fan-controller>
 - Source and hardware design (GitHub): <https://github.com/SasaKaranovic/OpenFanController>
 
-**What this means:** the OpenFan Controller is **not** hardware made or sold by Ventulus. Ventulus is an independent, third-party way to drive it from Linux. For the device itself — its firmware releases, the on-device web UI, warranty, where to buy — use the official links above. Ventulus can install a firmware release you have downloaded from there: see [Updating the OpenFAN firmware](#updating-the-openfan-firmware).
+Ventulus does not make or sell the OpenFan Controller; it is an independent way to drive one from Linux. For the device itself (firmware releases, the on-device web UI, warranty, where to buy), use the official links above. Ventulus can install a firmware release you downloaded from there: see [Updating the OpenFAN firmware](#updating-the-openfan-firmware).
 
 ## How Ventulus talks to it
 
@@ -41,13 +41,13 @@ Set that path in the daemon's config (`/etc/ventulus/daemon.toml`):
 port = "/dev/serial/by-id/usb-Karanovic_Research_OpenFan_...-if00"
 ```
 
-**What this means:** auto-detect is fine for trying it out; pin the `by-id` path if you want the controller to come back reliably after a reboot. The daemon's [Serial device setup](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md#serial-device-setup-openfancontroller) section has the full configuration reference.
+Auto-detection is fine for trying it out; pin the `by-id` path so the controller comes back reliably after a reboot. The daemon's [Serial device setup](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md#serial-device-setup-openfancontroller) section has the full configuration reference.
 
 ## Serial / USB access (permissions)
 
 The daemon needs read/write access to the serial port, and the package already handles it on every distribution: the daemon runs as root, so no serial group is involved, and its systemd service allows it the `/dev/ttyACM*` and `/dev/ttyUSB*` devices and loads the USB serial kernel module (`cdc_acm`). **No udev rule and no group setup is required** for normal use.
 
-> Granting a service access to a device is a system change. The packaged defaults are scoped to serial devices only; if you adjust them, make sure you understand what you are allowing. This guidance is provided **as-is**; the project accepts **no liability** for changes made to your system (MIT License).
+The packaged defaults allow serial devices only. Widen them only if you understand what you are allowing.
 
 Two cases need a manual step:
 
@@ -76,15 +76,15 @@ OpenFan channels are first-class fans in Ventulus. On the [Controls](controls.md
 
 How roles, curves, and profiles fit together is covered in [Profiles and Curves](profiles-and-curves.md).
 
-If a pump is plugged into an OpenFan channel, set that channel's role to **Pump** under *OpenFan Channels* on the Hardware page (ventulusd 3.5.0 or newer). Until you do, the daemon has no way to know it is a pump: a curve can stop it, and fan identification stops it. With the role set it is held at or above the pump safety floor and never stopped. See [Diagnostics § OpenFan channels](diagnostics.md).
+If a pump is plugged into an OpenFan channel, set that channel's role to **Pump** under *OpenFan Channels* on the Hardware page. Until you do, the daemon has no way to know it is a pump: a curve can stop it, and fan identification stops it. With the role set it is held at or above the pump safety floor and never stopped. See [System Health § OpenFan channels](diagnostics.md#openfan-channels).
 
-To find the lowest speed a particular fan will reliably run at, use **Calibrate OpenFan Channel…** on the Hardware page (ventulusd 3.1.0 or newer): it measures where the fan stops and where it starts again, and tells you the minimum to use. See [Hardware Troubleshooting § Calibrate OpenFan Channel](hardware-troubleshooting.md#calibrate-openfan-channel).
+To find the lowest speed a particular fan will reliably run at, use **Calibrate OpenFan Channel…** on the Hardware page: it measures where the fan stops and where it starts again, and tells you the minimum to use. See [Fan Tests and Reports § Calibrate OpenFan Channel](fan-tests.md#calibrate-openfan-channel).
 
 ## Updating the OpenFAN firmware
 
-**Update OpenFAN Firmware…**, in the Hardware page's **Hardware Diagnostics** section, installs a firmware file you have downloaded onto the controller without opening the case. It appears with ventulusd 4.0.0 or newer while an OpenFAN controller is present — or an OpenFAN board is on USB but does not answer (see *A board that does not answer* below) — and is disabled, with the reason in its tooltip, while the controller is not connected or a PWM Test Report runs. The firmware is the upstream project's: download it from the official releases page, <https://github.com/SasaKaranovic/OpenFanController/releases>. Ventulus never downloads firmware. The daemon puts the board in update mode and back, and the file is written either by **you**, copying it onto the drive that appears, or — for a published release Ventulus knows, once you have allowed it (see *Letting Ventulus write the firmware* below) — by the daemon itself, which then reads every byte back.
+**Update OpenFAN Firmware…**, in the Hardware page's **Hardware Diagnostics** section, installs a firmware file you have downloaded onto the controller without opening the case. It appears while an OpenFAN controller is present — or an OpenFAN board is on USB but does not answer (see *A board that does not answer* below) — and is disabled, with the reason in its tooltip, while the controller is not connected or a PWM Test Report runs. The firmware is the upstream project's: download it from the official releases page, <https://github.com/SasaKaranovic/OpenFanController/releases>. Ventulus never downloads firmware. The daemon puts the board in update mode and back, and the file is written either by **you**, copying it onto the drive that appears, or — for a published release Ventulus knows, once you have allowed it (see *Letting Ventulus write the firmware* below) — by the daemon itself, which then reads every byte back.
 
-**Before you start**
+### Before you start
 
 - Leave the computer idle — no game, render or compile — for the few minutes it takes.
 - Every OpenFAN channel, **pumps included**, goes to 100 % when the update starts. Expect it to be loud.
@@ -92,12 +92,12 @@ To find the lowest speed a particular fan will reliably run at, use **Calibrate 
 - When the new firmware starts, it runs every channel at its own default for a few seconds — in the published firmware about 1000 RPM, never below 40 % — until Ventulus takes over again. **A pump on the board slows down for those seconds.** If your cooling cannot take that, move the pump to a motherboard header first, or use the upstream procedure below, which is done with the board unpowered.
 - The window lists the board's channels and marks the ones the daemon protects as pumps.
 
-**Steps**
+### Steps
 
 1. Click **Update OpenFAN Firmware…**. The window shows the controller: its connection, USB serial number and port, and the hardware and firmware reports it gives.
 2. **Choose firmware file…** The window checks the file before anything else happens: a UF2 file for the RP2040 chip the OpenFAN uses, complete and in order, carrying the OpenFAN's USB names. A file that fails is refused with the reason, and so is the 2023 FW_01 binary: it is a pre-production debug build that floods the serial link and drives no fan. The window also shows the file's hardware revision beside the board's (shown, never enforced) and says when the file is byte-for-byte a published release.
 3. The checked file is copied to `~/.cache/ventulus/firmware/`, as `OpenFAN-` and the first eight characters of its SHA-256 fingerprint. That private copy is the one you drag across if you copy the file, so it cannot change between the check and the copy.
-4. The window says who writes the file. With ventulusd 4.0.0 or newer it hands the checked file to the daemon, which says whether it is a published release it would write itself — and the daemon writes one only once you have allowed it to open USB devices. Otherwise — another build, or no permission — you copy the file. The confirmation names who writes it.
+4. The window says who writes the file. It hands the checked file to the daemon, which says whether it is a published release it would write itself — and the daemon writes one only once you have allowed it to open USB devices. Otherwise — another build, or no permission — you copy the file. The confirmation names who writes it.
 5. Tick the confirmation and click **Start update**. The daemon checks that the board is the one you chose (by its USB serial number) and that nothing else is using it — a calibration, a PWM test, a validation recording, a thermal emergency, or another board already in update mode each refuse the start, with the reason. It then sets every channel to 100 % and asks the board to restart in update mode; if the board does not respond, it tries the standard 1200-baud signal on the same port.
 6. **If Ventulus writes the file**, there is nothing to copy. It first checks that the board in update mode is yours — by its flash chip's id, from which the firmware makes its USB serial number — and writes nothing otherwise. It then writes the file, with a progress bar, reads every byte back and restarts the board. If anything stops it before the restart, it gives the drive back and the window asks you to copy the prepared file as in the next step, saying why. When the board in update mode was not yours, nothing was written: copy the file only if you are sure the drive is the OpenFAN board's.
 7. **If you copy the file**, a drive called **RPI-RP2** appears, and the window names it (for example `sdb`). Open it in your file manager — most desktops mount it by themselves — and drag the prepared file onto it, from the window's file handle or from **Open folder**. You have 15 minutes. If another board is also in update mode, the window names its drive too: do not copy to that one.
@@ -107,7 +107,7 @@ If the daemon does not answer **Start update** — it timed out, or the connecti
 
 **Cancel** works only while the daemon is checking the board and parking the fans. Once it has asked the board to restart, the update can only be finished. **Closing the window does not stop an update**: reopen it from the same button, which stays available while an update runs or needs recovery. While it runs, the Dashboard shows one *OpenFAN firmware update in progress* warning in place of each OpenFAN fan's *telemetry stale* warning; a stalled fan, every other fan's warnings and the thermal banner are unaffected.
 
-**The result**
+### The result
 
 | Result | What it means |
 |---|---|
@@ -120,16 +120,9 @@ If the daemon does not answer **Start update** — it timed out, or the connecti
 | **Firmware copied, board not back** | The drive went away, but the board did not come back answering. Wait a minute — the daemon keeps watching. If the board is back on USB but never answers, the new firmware may not understand Ventulus's commands: a future firmware can change them. That is not a failed copy. Copy back the firmware you had before — the window offers to, once the daemon reports the board as not answering (see *A board that does not answer*) — or wait for a Ventulus update. |
 | **The board needs recovery** | The board is in update mode, or may be: no firmware was copied, or Ventulus's own write stopped before the board restarted from it. The window says which. See below. |
 
-**If the board needs recovery.** A board in update mode leaves it in one of three ways: a firmware file is copied onto its **RPI-RP2** drive (the prepared file, or the firmware you had before), its **RESET** button is pressed, or the PC is switched off and on. Ventulus does not take it out by itself: it restarts a board only after writing a firmware and reading it back. If Ventulus's own write stopped part-way, part of the flash is already rewritten: only copying a firmware file brings the board back, and RESET or switching off and on does not. If it had written and read back the whole file, RESET starts the new firmware. Until the board answers again the daemon leaves its channels alone, the window and an error alert say so, and the daemon keeps watching — after a daemon restart too — and takes the board back as soon as it answers. If no RPI-RP2 drive appears at all, use the upstream BOOT-button procedure below.
+### Letting Ventulus write the firmware (optional)
 
-**A board that does not answer.** An OpenFAN board can be on USB and still not answer Ventulus: it runs the 2023 FW_01 build, which floods its serial link; a firmware with other commands; a firmware that has hung; or a firmware an earlier update left it with. Its fans are then not under fan control, and the daemon's thermal emergency cannot reach them. Once the daemon has opened the board and had no answer, it reports it — never on the board's USB names alone — and the Dashboard shows one *OpenFAN board not answering* warning naming its USB port, in place of each OpenFAN fan's *telemetry stale* warning. **Update OpenFAN Firmware…** then updates that board, with ventulusd 4.0.0 or newer. This works as above, with these differences — and it has not yet been tried on real hardware:
-
-- Nothing is set to 100 % first: the board takes no commands, so its channels stay wherever its firmware has them, before and during the update. The window says so, and the confirmation names it.
-- The daemon asks the board once more; one that answers now is not updated but taken back under fan control. Otherwise it sends the standard 1200-baud signal and waits for update mode.
-- If the board does not enter update mode by itself, the window asks you to put it there: **hold its BOOT button, press and release its RESET button, then release BOOT.** You have 10 minutes. **Cancel** stops the update without changing anything — unless the board is already restarting into update mode. Then the update goes on rather than leave the board there, and the window says the cancel came too late.
-- Once the board answers again, the daemon takes it over as the controller. If it never does, the daemon keeps watching for it, as after any update that needs recovery.
-
-**Letting Ventulus write the firmware (optional).** The daemon may open USB devices only once you install a small systemd drop-in that ships with it, off by default. With it, any local account can start an update that writes one of the published releases Ventulus knows — never another file; without it, every update is copied by hand. To install it:
+The daemon may open USB devices only once you install a small systemd drop-in that ships with it, off by default. With it, any local account can start an update that writes one of the published releases Ventulus knows — never another file; without it, every update is copied by hand. To install it:
 
 ```
 sudo install -Dm644 /usr/share/doc/ventulusd/openfan-firmware-write.conf.example /etc/systemd/system/ventulusd.service.d/openfan-firmware-write.conf
@@ -139,10 +132,27 @@ sudo systemctl restart ventulusd
 
 Then click **Read again** in the window. To remove it, delete `/etc/systemd/system/ventulusd.service.d/openfan-firmware-write.conf` with `sudo rm`, and run the last two commands again.
 
-**Updating by hand.** Two ways that do not use the window:
+### Updating by hand
+
+Two ways that do not use the window:
 
 - **The upstream procedure** (from the [firmware README](https://github.com/SasaKaranovic/OpenFanController/tree/master/Firmware)): disconnect all fans and power from the board, hold its **BOOT** button while connecting the USB cable, copy the firmware onto the drive that appears, and power-cycle the board afterwards.
 - **From a terminal, with the board in place.** Stop the daemon first — it holds the serial port — with `sudo systemctl stop ventulusd`. While it is stopped, motherboard headers go back to the mode the daemon found them in — normally your BIOS's own control — and the OpenFAN keeps the speeds it was last given. List the board's serial interfaces with `ls /dev/serial/by-id/`: there are two, named `usb-Karanovic_Research_OpenFan_<serial>-if00` and `-if02`. Run `stty -F /dev/serial/by-id/usb-Karanovic_Research_OpenFan_<serial>-if00 1200`, with your board's serial. The board restarts in update mode and the RPI-RP2 drive appears; copy the firmware onto it, wait for the drive to disappear, and start the daemon again with `sudo systemctl start ventulusd`.
+
+## Recovering a board
+
+### If the board needs recovery
+
+A board in update mode leaves it in one of three ways: a firmware file is copied onto its **RPI-RP2** drive (the prepared file, or the firmware you had before), its **RESET** button is pressed, or the PC is switched off and on. Ventulus does not take it out by itself: it restarts a board only after writing a firmware and reading it back. If Ventulus's own write stopped part-way, part of the flash is already rewritten: only copying a firmware file brings the board back, and RESET or switching off and on does not. If it had written and read back the whole file, RESET starts the new firmware. Until the board answers again the daemon leaves its channels alone, the window and an error alert say so, and the daemon keeps watching — after a daemon restart too — and takes the board back as soon as it answers. If no RPI-RP2 drive appears at all, use the upstream BOOT-button procedure in [Updating by hand](#updating-by-hand).
+
+### A board that does not answer
+
+An OpenFAN board can be on USB and still not answer Ventulus: it runs the 2023 FW_01 build, which floods its serial link; a firmware with other commands; a firmware that has hung; or a firmware an earlier update left it with. Its fans are then not under fan control, and the daemon's thermal emergency cannot reach them. Once the daemon has opened the board and had no answer, it reports it — never on the board's USB names alone — and the Dashboard shows one *OpenFAN board not answering* warning naming its USB port, in place of each OpenFAN fan's *telemetry stale* warning. **Update OpenFAN Firmware…** then updates that board. This works as above, with these differences — and it has not yet been tried on real hardware:
+
+- Nothing is set to 100 % first: the board takes no commands, so its channels stay wherever its firmware has them, before and during the update. The window says so, and the confirmation names it.
+- The daemon asks the board once more; one that answers now is not updated but taken back under fan control. Otherwise it sends the standard 1200-baud signal and waits for update mode.
+- If the board does not enter update mode by itself, the window asks you to put it there: **hold its BOOT button, press and release its RESET button, then release BOOT.** You have 10 minutes. **Cancel** stops the update without changing anything — unless the board is already restarting into update mode. Then the update goes on rather than leave the board there, and the window says the cancel came too late.
+- Once the board answers again, the daemon takes it over as the controller. If it never does, the daemon keeps watching for it, as after any update that needs recovery.
 
 ## Troubleshooting
 
@@ -152,7 +162,7 @@ Then click **Read again** in the window. To remove it, delete `/etc/systemd/syst
 | Detected, but no fans show RPM | Fans not connected to populated channels, or 3-pin fans with no tachometer | A `0` RPM on an empty or tach-less channel is normal. Connect a known-good 4-pin fan to confirm |
 | Worked, then stopped after unplug / replug | USB re-enumeration | The daemon detects the dropout and **auto-reconnects** — after 5 consecutive failed reads it tries again on a backoff that doubles up to 30 poll intervals — about 1 s up to 30 s at the default poll interval, and proportionally shorter if you have lowered it — and resumes when it reappears. Each try opens only your configured port, the controller's own device, and a serial device that has just appeared, so other USB-serial hardware is left alone. A pinned `by-id` path is tried first on every attempt |
 | Permission denied on the serial port | The controller is on a device node the service may not open: only `/dev/ttyACM*` and `/dev/ttyUSB*` are allowed | Allow its device class with a `DeviceAllow=` drop-in (see [Serial / USB access](#serial--usb-access-permissions)), then restart the daemon |
-| *OpenFAN board not answering* warning | The board runs firmware Ventulus cannot talk to — such as the 2023 FW_01 build — or has hung | Update it from **Update OpenFAN Firmware…** (see [A board that does not answer](#updating-the-openfan-firmware)). If it has hung, press its **RESET** button, then **Rescan Hardware** in the footer |
+| *OpenFAN board not answering* warning | The board runs firmware Ventulus cannot talk to — such as the 2023 FW_01 build — or has hung | Update it from **Update OpenFAN Firmware…** (see [A board that does not answer](#a-board-that-does-not-answer)). If it has hung, press its **RESET** button, then **Rescan Hardware** in the footer |
 
 If the controller itself behaves oddly (the firmware's own behaviour, the on-device web UI, the hardware), that is a question for the upstream project — see the official links above. Installing a firmware release is covered in [Updating the OpenFAN firmware](#updating-the-openfan-firmware).
 

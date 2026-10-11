@@ -1,14 +1,26 @@
 # System Health (Overview, System State, Hardware & Logs)
 
-The application spreads the health and status of every subsystem across four standalone sidebar pages — **Overview**, **System State**, **Hardware**, and **Logs**. Together they are your primary tools for troubleshooting connection issues, stale sensors, and hardware detection problems. (In earlier versions these were tabs on a single **Diagnostics** page; that tabbed page was retired in the redesign and its content re-homed onto the four pages documented below.)
+Four sidebar pages show the health of every part of the system:
 
-> **Looking for help with a specific motherboard or fan controller?** Start with the [Hardware Troubleshooting](hardware-troubleshooting.md) page — it covers the **System State** page's health report, the fan tests, vendor quirks, and what to do when fans report 0 RPM or refuse to change speed.
+- **Overview**: is the daemon healthy, what hardware did it find, and what are the
+  sensors and fans doing?
+- **System State**: the health report. What on this machine needs a response, and how
+  do you fix it?
+- **Hardware**: your cooling hardware, the daemon's readiness checklist, and the fan
+  tests.
+- **Logs**: what the app has been doing, and the alerts.
+
+For help with a specific problem, start from the symptom on
+[Hardware Troubleshooting](hardware-troubleshooting.md). The tests themselves are
+explained on [Fan Tests and Reports](fan-tests.md).
 
 ## Overview page
 
 ![Overview page](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/03_overview.png)
 
-The **Overview** page answers *"is the daemon healthy, what hardware was found, and what are the sensors and fans doing?"*. It opens with two information cards — **Daemon Health** and **Device Discovery** — followed by the **Fan Status** and **Sensors** sections, in that order, separated by a drag handle that retrades height between the two tables. The two tables share whatever height the window has spare, so making the window taller shows more rows rather than more empty page; drag the handle to give one table more of that height than the other. (The two sections are documented below in the reverse order, sensors first.)
+The page opens with two cards, **Daemon Health** and **Device Discovery**, followed by
+the **Fan Status** and **Sensors** tables. The two tables share whatever height the
+window has spare; drag the handle between them to give one more room.
 
 ### Daemon Health
 
@@ -16,235 +28,430 @@ The **Overview** page answers *"is the daemon healthy, what hardware was found, 
 |-------|---------|
 | **Daemon version** | Version of the running daemon and its API |
 | **Status** | Overall health: "healthy", "warning", or "critical" |
-| **Uptime** | How long the daemon has been running since last restart |
-| **Subsystems** | List of the subsystems the daemon reports — `openfan`, `hwmon`, `engine` and `controls` — with their status and age. If you have no OpenFan Controller the `openfan` line is left out rather than listed as healthy-and-empty; it reappears the moment that subsystem reports a fault, so an adopted controller that drops off mid-session is still shown |
+| **Uptime** | How long the daemon has been running since it last started |
+| **Subsystems** | The subsystems the daemon reports (`openfan`, `hwmon`, `engine` and `controls`), each with its status and age. With no OpenFan Controller the `openfan` line is left out; it reappears if that subsystem reports a fault, so a controller that drops off mid-session still shows |
 
-**Age** is the time in milliseconds since the daemon last polled that hardware subsystem. A low age (under 1000ms) means the data is fresh. A high age means the daemon is having trouble reaching that hardware.
+**Age** is the time in milliseconds since the daemon last polled that subsystem. Under
+1000 ms means the data is fresh; a high age means the daemon is having trouble
+reaching that hardware.
 
 ### Device Discovery
 
 | Field | Meaning |
 |-------|---------|
-| **OpenFan** | Whether an OpenFan Controller is detected, channel count, and write/RPM capability |
-| **hwmon** | Whether motherboard fan headers are detected, the header count, and their write capability |
-| **AMD GPU** | Whether an AMD discrete GPU is detected, its model, PCI address, and fan control method (`pmfw` or legacy `pwm1`) |
-| **Intel GPU** | Whether an Intel Arc discrete GPU is detected, its model, and PCI address. Intel GPU fans are always reported `read_only (firmware-managed)` — the `xe`/`i915` drivers expose no fan-control path |
-| **NVIDIA GPU** | Whether an NVIDIA discrete GPU is detected (via the open `nouveau` driver or the opt-in NVML backend), its model, driver, and PCI address. NVIDIA GPU fans are always reported `read-only` — `nouveau`'s writable `pwm1` is excluded for safety and the NVML backend is telemetry-only |
-| **Liquid cooling** | Whether a liquid cooler (AIO) is detected via hwmon, and whether its pump/fan is writable, monitor-only (a read-only driver such as NZXT Kraken2), or not detected. USB-only coolers are out of scope and shown as not detected |
-| **Features** | Summary of write capabilities (OpenFan writes, hwmon writes) |
+| **OpenFan** | Whether an OpenFan Controller is detected, its channel count, and its write and RPM capability |
+| **hwmon** | Whether motherboard fan headers are detected, how many, and whether they are writable |
+| **AMD GPU** | Whether an AMD discrete GPU is detected, its model, PCI address, and fan control method (`pmfw`, or `pwm1` on an RX 6000 or older) |
+| **Intel GPU** | Whether an Intel Arc discrete GPU is detected, its model and PCI address. Its fan is always `read_only (firmware-managed)`: the `xe`/`i915` drivers expose no fan control |
+| **NVIDIA GPU** | Whether an NVIDIA discrete GPU is detected (through `nouveau` or the opt-in NVML backend), its model, driver and PCI address. Its fan is always `read-only`: `nouveau`'s writable `pwm1` is excluded for safety, and NVML is telemetry only |
+| **Liquid cooling** | Whether a liquid cooler (AIO) is detected through hwmon, and whether its pump and fan are writable, monitor-only (a read-only driver such as NZXT Kraken2), or not detected. USB-only coolers without a kernel driver show as not detected |
+| **Features** | A summary of write capabilities (OpenFan writes, hwmon writes) |
 
 ### Sensors
 
-An 8-column diagnostic table of every temperature sensor reported by the daemon (`#`, Label, Sensor ID, Source class, Chip, Value, Age, Confidence — double-click a row, press **Enter** on it, or right-click → **Open detail…** for the full detail dialog). A **header summary line** above the table answers "is anything wrong?" at a glance — `Sensors: N total · X CPU · Y board · R memory · Z GPU · V liquid · W disk · K stale · J low-confidence · U unavailable · M hidden`.
+An 8-column table of every temperature sensor the daemon reports (`#`, Label, Sensor
+ID, Source class, Chip, Value, Age, Confidence). A summary line above it answers "is
+anything wrong?" at a glance:
+`Sensors: N total · X CPU · Y board · R memory · Z GPU · V liquid · W disk · K stale · J low-confidence · U unavailable · M hidden`.
 
 | Column | Meaning |
 |--------|---------|
 | **#** | Row number |
-| **Label** | Sensor label reported by the kernel driver (e.g., "Tctl", "edge"). Prefixed with `⚠ ` for a sensor with a documented bogus-quirk (e.g. the ASUS NCT6776F `CPUTIN` case) and `? ` for a low-confidence classification |
-| **Sensor ID** | Stable identifier (e.g. `hwmon:<chip>:<dev_id>:<label>`) — the id profiles use to bind a curve to this sensor |
-| **Source class** | Fine-grained classification from the sensor knowledge base (`cpu_die`, `vrm`, `board_thermistor`, `gpu_package`, …) |
-| **Chip** | Kernel driver / chip providing the reading (e.g., `k10temp`, `nct6798`, `amdgpu`, `xe`) |
-| **Value (°C)** | Current temperature in °C. Suffixed `⚠ ALARM` when the live value has reached the sensor's reported critical threshold. The chip's own alarm bits are read only when the daemon starts, so the sensor's detail dialog lists them marked *(at daemon start)* rather than treating them as current |
+| **Label** | The label from the kernel driver (for example "Tctl", "edge"). Prefixed `⚠ ` for a sensor with a documented bogus reading (such as the ASUS NCT6776F `CPUTIN`) and `? ` for a low-confidence classification |
+| **Sensor ID** | Stable identifier (for example `hwmon:<chip>:<dev_id>:<label>`), the id a profile uses to bind a curve to the sensor |
+| **Source class** | Fine-grained classification from the sensor knowledge base (`cpu_die`, `vrm`, `board_thermistor`, `gpu_package`…) |
+| **Chip** | The kernel driver or chip providing the reading (`k10temp`, `nct6798`, `amdgpu`, `xe`…) |
+| **Value (°C)** | The current temperature. Suffixed `⚠ ALARM` when the live value has reached the sensor's reported critical threshold. The chip's own alarm bits are read only when the daemon starts, so the detail dialog lists them as *(at daemon start)* |
 | **Age (ms)** | Time since the daemon last read this sensor |
-| **Confidence** | How certain the GUI is about how to interpret this sensor: `high`, `medium`, `low`, or `unknown`. Lower confidence usually means the sensor's chip has known quirks (e.g., the ASUS NCT6776F `CPUTIN` reading is a board temperature, not the CPU) |
+| **Confidence** | How sure Ventulus is about what the sensor measures: `high`, `medium`, `low` or `unknown`. Lower confidence usually means the chip has known quirks |
 
-The `K stale` count on the header summary line is the quick check for sensors that have stopped updating. The daemon source (`hwmon`, `amd_gpu`, `intel_gpu`, `nvidia_gpu`), kind, driver type, trend, and freshness are not table columns — open the row's detail dialog to see them (trend also appears in the hover tooltip).
+The `K stale` count is the quick check for sensors that have stopped updating. The
+daemon source, kind, driver type, trend and freshness are in each row's detail dialog
+(trend also shows in the hover tooltip).
 
 #### Unavailable sensors
 
-Some sensors exist but currently can't be read at all — the classic example is a Wi-Fi-radio temperature (an `ath12k` chip) that returns "Network is down" whenever the radio is switched off. Rather than letting the daemon log that failure endlessly, these are reported as **unavailable** and listed in a small panel below the table: each shows its label, the read-error reason, and how long it has been unavailable, and the count appears as `· U unavailable` on the header summary line. The panel is hidden entirely when nothing is unavailable. Because such a sensor can disappear the moment its device powers down, it is **never offered as a fan-curve source** in the Controls page (a curve already bound to one keeps working). This is display-only — there is no banner or pop-up — and an unavailable sensor re-appears in the table automatically the moment it becomes readable again.
+Some sensors exist but cannot be read: the classic case is a Wi-Fi radio's
+temperature (an `ath12k` chip), which returns "Network is down" while the radio is
+off. These are listed as **unavailable** in a small panel below the table, each with
+its label, the read error and how long it has been unavailable, and counted as
+`· U unavailable` in the summary line. The panel is hidden when there are none.
+Because such a sensor can vanish the moment its device powers down, it is **never
+offered as a curve sensor** (a curve already bound to one keeps working). It
+reappears in the table by itself once it can be read again.
 
-#### Sensor Detail dialog
+#### Sensor detail dialog
 
-Open it by double-clicking a row, pressing **Enter** on the selected row, or right-click → **Open detail…**. It shows the full classification description and every classification note (not truncated like the hover tooltip), board context, a **Thresholds** section with a headroom-to-critical indicator, and a clickable kernel.org driver documentation link. On a daemon that reports its own classification (≥ v2.6.0), the dialog adds a **Daemon classification** section — the daemon's authoritative class, confidence, and rationale — shown alongside the GUI's own heuristic, not replacing it.
+Double-click a row, press **Enter** on it, or right-click → **Open detail…**. It shows
+the full classification description and every note, board context, a **Thresholds**
+section with the headroom to critical, a link to the kernel driver's documentation,
+and the daemon's own classification (class, confidence and reasoning) beside
+Ventulus's.
 
-#### Hiding sensors
+#### Hiding sensors and changing their classification
 
-Right-click a row → **Hide sensor** to remove a sensor you don't care about (a duplicate, or a chip that always reads garbage). Hidden sensors are never silently dropped — they collapse into a `▸ N hidden sensors` toggle row at the bottom that you can expand again. This hide-list is **local to this page**; the **Mirror hidden to dashboard** button in the header pushes the current hide-list into the shared dashboard series selection as a one-shot.
+Right-click a row → **Hide sensor** to remove one you do not care about (a duplicate,
+or a chip that always reads garbage). Hidden sensors collapse into a `▸ N hidden
+sensors` row at the bottom that you can expand again. The hide-list belongs to this
+page; **Mirror hidden to dashboard** copies it to the Dashboard's chart selection once.
 
-Right-click also offers **Treat as coolant** — force a sensor to be classified as a liquid-cooling **coolant** temperature when the automatic classifier is too conservative — and, on a sensor you have already overridden, **Reset classification to auto** to clear it. **Clear overrides** on the **Settings** page's *Sensor classification overrides* row clears every one at once. The override is a GUI-only preference: it groups the sensor under *AIO / Liquid* on the dashboard, lets **Configure AIO** find it as the loop's coolant sensor (and seed its curve for coolant rather than CPU temperatures), and stars it (★) in the curve editor's sensor list. It changes nothing in the daemon — the sensor's reported kind stays the same, and it has no effect on thermal safety. In particular it does not arm the daemon's **coolant emergency** (daemon 3.0.0 and later), which forces every fan and pump to full speed when a sensor *the daemon* classifies as coolant reaches the coolant limit set under **Settings**; a sensor you only treat as coolant here is not protected by it.
+**Treat as coolant** forces a sensor to count as a liquid-cooling coolant temperature
+when the automatic classifier is too cautious; **Reset classification to auto** undoes
+it, and **Clear overrides** on the **Settings** page clears every one. The override is
+a Ventulus preference only: it groups the sensor under *AIO / Liquid* on the
+Dashboard, lets **Configure AIO** use it as the loop's coolant sensor (and seed its
+curve for coolant temperatures), and stars it (★) in the curve editor. **It does not
+arm the daemon's coolant emergency**, which acts only on sensors the daemon itself
+classifies as coolant.
 
-On a daemon ≥ v2.6.0 the menu also offers **Set as preferred CPU sensor** / **Set as preferred motherboard sensor** — the same daemon-persisted, advisory preference you can set from the **Settings** page (Preferred Sensors card); thermal safety still uses the hottest CPU sensor regardless.
+**Set as preferred CPU sensor** and **Set as preferred motherboard sensor** set the
+same preference as the **Settings** page's *Preferred Sensors* card. It is advisory:
+thermal safety always uses the hottest CPU sensor.
 
-Hover any row to see a tooltip explaining the chip's source class, description, and any known driver quirks. For deeper sensor interpretation, see the [Sensor Interpretation Guide](../docs/20_Sensor_Interpretation_Guide.md) and the [AMD Sensor Interpretation Deep Dive](../docs/22_AMD_Sensor_Interpretation_Deep_Dive.md).
+Hover any row for its source class, description and known driver quirks. For more,
+see the [Sensor Interpretation Guide](../docs/20_Sensor_Interpretation_Guide.md) and
+the [AMD Sensor Interpretation Deep Dive](../docs/22_AMD_Sensor_Interpretation_Deep_Dive.md).
 
 ### Fan Status
 
-The **Fan Status** section is a single live view of every controllable fan output the daemon reports. (Hardware-health checks — chip detection, driver state, BIOS interference, and PWM verification — live on the separate [System State](#system-state-page) page.)
-
-The fan table has the following columns:
+A live view of every fan output the daemon reports:
 
 | Column | Meaning |
 |--------|---------|
-| **ID** | Display name (user alias if set, otherwise hardware label or fan ID) |
-| **Source** | Connection type: openfan, hwmon, amd_gpu, intel_gpu, or nvidia_gpu |
-| **Control method** | How this fan can be controlled: `openfan`, `hwmon` (with PWM-only or full read/write), `amd_gpu` (PMFW curve; or *verify only (legacy pwm1)* on an RX 6000 or older, which can be tested and reset but not driven by a profile), `read_only`, or `unknown`. Read-only entries cannot be commanded — **Test PWM Control** on the [System State](#system-state-page) page explains why |
-| **RPM** | Hardware-measured speed (dash if not available). Writable hwmon headers reading 0 RPM are annotated `(no fan detected)` so you don't accidentally assign a curve to an empty header |
-| **PWM (%)** | Last commanded speed percentage (dash if not set) |
-| **Freshness** | "fresh" (under 2 s), "stale" (2-10 s, shown in yellow), or "invalid" (over 10 s, shown in red) |
+| **ID** | Display name: your name for it if you set one, otherwise the hardware label or fan id |
+| **Source** | `openfan`, `hwmon`, `amd_gpu`, `intel_gpu` or `nvidia_gpu` |
+| **Control method** | How the fan can be controlled: `openfan`, `hwmon` (PWM-only or full read/write), `amd_gpu` (firmware curve; or *verify only (legacy pwm1)* on an RX 6000 or older, which can be tested and reset but not driven by a profile), `read_only`, or `unknown` |
+| **RPM** | Hardware-measured speed (a dash if unavailable). A writable header reading 0 RPM is marked `(no fan detected)` |
+| **PWM (%)** | Last commanded speed (a dash if none) |
+| **Freshness** | "fresh" (under 2 s), "stale" (2–10 s, yellow) or "invalid" (over 10 s, red) |
 
-Hover any cell for a tooltip explaining what the value means and, for read-only fans, why the GUI cannot drive them.
+Hover any cell for what the value means and, for a read-only fan, why it cannot be
+driven.
 
 ## System State page
 
 ![System State page](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/04_system_state.png)
 
-The **System State** page is the health report — it answers *"is my fan-control hardware healthy, and if not, how do I fix it?"*. It renders the daemon's `/diagnostics/hardware` snapshot, which the GUI fetches in the background at startup, so the page has its answer ready the first time you open it; **Refresh** on the page, or the global footer's **Rescan Hardware** action, takes a new one.
+The health report. It renders the daemon's hardware diagnostics, which Ventulus
+fetches in the background at startup so the page has its answer ready. **Refresh**
+on the page, or **Rescan Hardware** in the footer, takes a new snapshot; until you do,
+a problem you have just fixed is still reported.
 
-It leads with the answer and keeps the detail one click away:
+| Section | What it tells you |
+|---------|-------------------|
+| **System Health Overview** | A pill reading **SYSTEM READY**, or **N ACTION REQUIRED** in amber (red when one is critical), and a summary line: how many PWM headers were found and how many are writable, then your board's vendor, model and BIOS version as the firmware reports them (for example `Gigabyte Technology Co., Ltd. — X870E AORUS MASTER — BIOS F14c`) |
+| **Conditions** | One card for each problem the daemon has observed on this machine, with its fix |
+| **Board notes for this hardware** (collapsed) | Documented quirks for your board and chip, with what this machine says about each |
+| **Hardware Registry** | Each detected Super-I/O or sensor chip: status, chip, driver, driver status, whether the driver is in the mainline kernel, and its PWM header count. Hover a row for the chip's known issues |
+| **Interference Monitor** | Per-header reclaim counts, and any duty the daemon had to correct |
+| **Safety & GPU Limits** | The **CPU Thermal State** row, a row per AMD discrete GPU, kernel advisories, and the firmware's fan speed range |
+| **Advanced actions** (collapsed) | Fan and GPU tests, and **Restore GPU Fan to Automatic** |
 
-- **System Health Overview** — a pill reading **SYSTEM READY**, or **N ACTION REQUIRED** in amber (red when one of them is critical), and a summary line with the PWM header counts and your board — always on screen.
-- **Conditions** — one card per problem the daemon has actually **observed** on this machine (driver-module collision, ACPI conflict, BIOS reclaiming fan control, a chip that did not enumerate, read-only headers, and — daemon 2.53.0+ — a fan whose duty **will not stay put**), each with a colour-coded severity badge, a one-line **fix**, and a link to the relevant documentation. A healthy system shows a single *No active conditions — fan control is available* line, and the pill above reads **SYSTEM READY**. Conditions clear themselves: fix the cause, refetch, and the card is gone. You can also **Acknowledge** or **Dismiss** one you have decided to live with. **Acknowledge** greys the card down, drops its coloured severity bar and marks it *Acknowledged* for this session — it stays in place and in order, so you can still read it; **Dismiss** removes it until you restore it. Either way the **N ACTION REQUIRED** count above keeps counting it, and a line beneath the list tells you how many are hidden, so this page can never claim your system is ready while fan control is broken. A dismissal is tied to *what the machine said at the time*: dismiss an ACPI conflict for the two ranges you know about and a third range speaks again, and BIOS-reclaim warnings come back if contention climbs into the HIGH band.
+**Refresh** and **Open Full Report ↗** sit on the System Health Overview header. *Open
+Full Report* opens the whole report, *System Health — Full Report*, in its own
+resizable window with every link clickable. It always contains every condition and
+note, including ones you dismissed, so it is the complete record for support.
 
-  **"Fan duty is not holding"** (v2.82.0 — built as v2.81.0, which was never released — with daemon 2.53.0+) means something other than Ventulus keeps changing that fan's speed — usually the motherboard's own fan control, or another fan program. The daemon puts the duty back when that happens; if three corrections in a row do not hold, it stops fighting and this card appears, naming the fan. It counts toward **N ACTION REQUIRED** and appears in the Full Report like any other condition. Dismissing it covers this episode only: if the fan stops holding again later, the card comes back. Corrections that *did* hold are not a warning; they show as a count in the Interference Monitor.
+### Conditions
 
-  **CRITICAL means a risk of damaging hardware** — on the current advisory set, only the out-of-tree `nct6687` driver mis-claiming an NCT6797D/NCT6798D chip, which has bricked a CPU_FAN header in the wild. Everything else, including losing fan control entirely, reads **ACTION REQUIRED**.
-- **Board notes for this hardware (N)** — a collapsed section below the conditions, holding the documented quirks for your board and chip. These are *reference material*, not alarms: they match on which motherboard you own, so they can never clear on their own, and showing them as warnings would train you to ignore the list above. Each note carries a four-tier severity badge (**CRITICAL** red / **HIGH** orange / **MEDIUM**/**LOW** amber / **INFO** blue), a collapsible detail (HIGH and above open by default), and — the part that matters — **what this machine actually says about it**:
+One card per problem the daemon has actually observed, each with a severity badge, a
+one-line fix, and a link to the relevant documentation:
 
-  | Evidence | Meaning |
-  | --- | --- |
-  | *observed on this system* | Confirmed here. The note is raised as a condition above, or explains one that is already there. |
-  | *not present on this system* | Measured and refuted — the collision or missing chip it describes is not here. |
-  | *not yet verified on this system* | Neither confirmed nor refuted. Most of these describe the BIOS quietly ignoring PWM writes, which only writing to a header can settle — use **Test fan control** in this section. A header with no tachometer — an empty header, a 3-pin fan, a fan or pump sitting at zero RPM — reports *no tach* and settles nothing either way; it does not count as a failure, and it will not overwrite a result you already have. A test whose read-back of the header failed outright reports *no readback* (daemon v2.48.0+) and is treated identically — also not a failure, also non-overwriting; re-run it. With daemon 3.2.0+ the evidence is the daemon's own per-header results, so a test run from the **Hardware** page, the PWM Test Report or a validation session counts too, and a header whose latest result failed keeps the note *observed* until that header passes. |
-  | *reference for this hardware* | Nothing on this machine could ever confirm or refute it (for example, a note about a sensor driver that is never the fan-control path). |
+- a Super-I/O chip that did not appear (the dual-chip warning; see
+  ["Some of my fan headers are missing"](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up));
+- a *Driver module collision* or *Conflicting driver modules loaded*;
+- an *ACPI I/O port conflict* (for `it87`, prefer the driver-local
+  `options it87 ignore_resource_conflict=1`; the system-wide
+  `acpi_enforce_resources=lax` is the fallback, and the only option for `nct6775`);
+- *BIOS/EC reclaiming fan control*;
+- every PWM header read-only, or no hwmon chips at all;
+- a GPU with fan control disabled or unavailable;
+- **Fan duty is not holding**: something other than Ventulus keeps changing that
+  fan's speed, usually the board's own fan control or another fan program. The daemon
+  puts the duty back each time; after three corrections in a row that do not hold, it
+  stops fighting and this card appears, naming the fan. Corrections that did hold are
+  not a warning; they show as a count in the Interference Monitor.
 
-  **Acknowledge** collapses and greys a note you have read, for this session only; **Dismiss** hides it until you restore it. Neither is permanent and neither can silence a real problem — the silence is recorded against what the machine said at the time, so a note you quietened comes back if it is later **confirmed**. It does *not* come back when things improve: dismiss a note, run **Test fan control**, and a clean result leaves it dismissed. Undo a dismissal from **Settings → Prompts & Dismissals**, and turn the buttons off there entirely if you would rather the notes stayed as they are. Since v2.74.0 (built as v2.73.0, which was never released) the same two buttons appear on every warning this page raises — the conditions, the Interference Monitor, the CPU thermal row, the GPU advisories and, since v2.77.0, the GPU rows on Safety & GPU Limits — and they follow the same rule everywhere. A reading that is *not* warning you, such as **Zero-RPM: available**, has no buttons, because there is nothing to quieten, and the **Hardware Registry** table below has none either — it is a list of what is installed rather than a list of what needs doing.
+A healthy system shows a single *No active conditions — fan control is available*
+line, and the pill reads **SYSTEM READY**. Conditions clear themselves: fix the cause,
+refresh, and the card is gone.
 
-  The pop-out full report (**Open Full Report**, titled *System Health — Full Report*) always contains every note, including dismissed ones — it is the complete record for support.
-- **Hardware Registry** — the chip/driver table (Status, Chip / Component, Driver, Driver Status, Mainline, Headers), always visible below the health report. The *Driver Status* column shortens long text to keep every column on screen; hover it for the full wording. It is the dominant element of the page's second row, taking about three quarters of the width; drag the divider on its right to give it more or less.
-- **Interference Monitor** and **Safety & GPU Limits** — always-visible cards stacked in the column beside the Hardware Registry. The Interference Monitor carries the BIOS-reclaim gauge and names the contended header when the BIOS has been reclaiming fan control. Since v2.74.0 it also says **when**: the daemon's watchdog re-enables manual mode on every reclaim, so a BIOS that is genuinely fighting produces them continuously. Once an hour has passed with none, the warning above stands down and this card reads **Past Interference** — the count is kept, because it never resets while the daemon is running, but it is a record of what happened rather than something to act on. If your daemon is too old to report the timing, nothing stands down and the warning stays exactly as it was; Safety & GPU Limits carries the CPU thermal state — live, from the same 1 Hz daemon poll that drives the banner and the footer, and **Unknown — disconnected** while that poll cannot reach the daemon rather than the last state it saw — with the emergency limit your CPU actually reports beside it — or, during a coolant emergency (daemon 3.0.0 and later), the coolant limit that tripped it — plus the GPU rows and the firmware speed range. Neither is hidden behind a collapse — the page keeps its safety-relevant readings on screen. Both can be quietened, and quietening them **demotes rather than deletes**: the reclaim gauge keeps its count and the thermal row keeps its state and your CPU's own emergency limit, they simply stop being coloured as alarms. Since v2.77.0 the **GPU rows quieten the same way** — **Fan Control: read_only** (the normal state of an RX 7000/9000 card booted without `amdgpu.ppfeaturemask`), **Overdrive: disabled**, either **ppfeaturemask** row, **amdgpu binding: not bound** and any unbound **AMD** PCI device. They are settings you may have chosen on purpose, and they never clear on their own, so leaving them shouting forever was the one part of this page that still did. Dismissing a GPU row does **not** dismiss the matching condition card above it: that card carries the fix, and hiding the instructions with the symptom would be the wrong trade. Change the setting and the row speaks again with its new reading. A real thermal emergency still reaches you through the banner, the footer and the status ribbon, which nothing on this page can silence — and the daemon protects the hardware regardless of what any of them shows.
-- **Advanced actions** (the page's one collapsible section, collapsed by default; **Test PWM Control**, **Verify All Writable** and **Characterise** are unavailable while a PWM Test Report is running, because the report is using the daemon's diagnostic slot. They are also unavailable while any one of them is running a test, until it finishes, because the daemon runs these tests one at a time): the **Test PWM Control** / **Verify All Writable** buttons, **Characterise PWM Response** (a deeper PWM/RPM sweep beside the quick test — daemon 2.29.0+, hidden otherwise; see [Hardware Troubleshooting](hardware-troubleshooting.md#characterise-pwm-response)), plus **Test GPU Fan Control** and **Restore GPU Fan to Automatic** when a writable AMD GPU is present.
-- **Restore GPU Fan to Automatic** hands the GPU fan back to the firmware's default curve — use it to undo a static GPU speed set this session without restarting the daemon. It is disabled (with the reason in its tooltip) while an active profile is driving the GPU fan: remove the GPU from its fan role or deactivate the profile first. Once it has run, the daemon leaves that GPU fan alone — even if a profile names it — until a profile is next activated or the daemon restarts; deactivating a profile does not change that. From daemon 2.56.4, a stop or restart of the daemon no longer resets that GPU either, so a curve you then set in LACT or CoreCtrl stays; daemon 2.56.3 and older reset every AMD GPU when they stop.
-- **Rescan Hardware** asks the daemon to re-enumerate hwmon sensors and PWM headers — use it right after loading a sensor kernel module (for example following a driver install). New sensors appear within a couple of poll cycles; brand-new motherboard fan-*control* hardware still requires a daemon restart. An **OpenFan controller is the exception** (daemon 2.18.0+): the same button also asks the daemon to look for one, and if it finds one it is adopted immediately — the result line names the port it was found on, and says nothing about restarting.
-- **Refresh** and **Open Full Report ↗** sit on the **System Health Overview** header, always on screen. *Refresh* re-reads the hardware diagnostics from the daemon — the page otherwise renders the snapshot it took when the GUI started, so a problem you have just fixed keeps being reported until you press it. *Open Full Report* opens the complete report — *System Health — Full Report* — in its own resizable window, with every link clickable; it is the only way into the report anywhere in the application, and it is what the "always contains every note, including dismissed ones" note above depends on. Both used to be the last controls inside *Advanced actions*, which is collapsed by default — the report in particular was effectively invisible.
+**CRITICAL means a risk of damaging hardware.** Today only one condition is critical:
+the out-of-tree `nct6687` driver claiming an NCT6797D or NCT6798D chip, which has
+bricked a CPU_FAN header in the wild. Everything else, including losing fan control
+entirely, reads **ACTION REQUIRED**.
 
-This page is covered in depth on the [Hardware Troubleshooting](hardware-troubleshooting.md) page.
+### Board notes for this hardware
 
-> **Lease management is daemon-internal as of 2.0.0.** The daemon is the sole writer of motherboard fan headers, so it manages the hwmon lease entirely on its own — the GUI never holds one. The dedicated **Lease** tab that earlier versions showed here has been removed.
+A collapsed section below the conditions holds the documented quirks for your board
+and chip: BIOS settings to change, drivers to install, known issues. They match on
+which motherboard you own rather than on anything your machine is doing, so they are
+reference material, not alarms, and they never clear by themselves. Currently
+surfaced quirks include Smart Fan 6 BIOS notes for Gigabyte AM5 800-series AORUS
+boards (IT8696E), and the usual driver paths and ASUS WMI sensor helpers for NCT6798 /
+NCT6799 on ASUS. The full list of vendor workarounds is in the
+[AMD Motherboard Fan Control Guide](../docs/21_AMD_Motherboard_Fan_Control_Guide.md).
+
+Each note is its own row, most severe first, with a badge that pairs an icon, a word
+and a colour: **CRITICAL** (red), **HIGH** (orange), **MEDIUM** or **LOW** (amber),
+**INFO** (blue). **Details** opens the full explanation and a link to the Hardware
+Compatibility Guide; CRITICAL and HIGH notes, and anything confirmed on your machine,
+start open. Each note also says what this machine says about it:
+
+| Evidence | Meaning |
+| --- | --- |
+| *observed on this system* | Confirmed here. The note is raised as a condition, or explains one that is already there |
+| *not present on this system* | Measured and refuted: the collision or missing chip it describes is not here |
+| *not yet verified on this system* | Neither confirmed nor refuted. Most of these describe the BIOS quietly ignoring PWM writes, which only a write to a header can settle: use **Test fan control** in this section. The evidence is the daemon's own per-header test results, so a test run from the **Hardware** page, the PWM Test Report or a validation session counts too, and a header whose latest result failed keeps the note *observed* until that header passes. A header with no tachometer reports *no tach*, and a test whose read-back failed reports *no readback*; neither settles anything or overwrites a result you already have |
+| *reference for this hardware* | Nothing on this machine could confirm or refute it (for example, a note about a sensor driver that is never the fan-control path) |
+
+### Acknowledge and Dismiss
+
+Every warning on this page (conditions, board notes, the Interference Monitor, the
+CPU thermal row, the GPU advisories and the GPU rows on Safety & GPU Limits) can be
+quietened:
+
+- **Acknowledge** greys the item and marks it *Acknowledged* for this session. It
+  stays in place and in order, so you can still read it.
+- **Dismiss** hides it until you restore it from **Settings → Prompts & Dismissals**,
+  where you can also turn the buttons off altogether.
+
+Neither can silence a real problem. The **N ACTION REQUIRED** count keeps counting
+quietened conditions, and a line under the list says how many are hidden, so the page
+never claims your system is ready while fan control is broken. A silence is recorded
+against what the machine said at the time: it comes back if the problem is later
+confirmed or gets worse (dismiss an ACPI conflict for two address ranges, and a third
+range speaks again; BIOS-reclaim warnings come back if contention climbs into the HIGH
+band). It does *not* come back when things improve: dismiss a note, run **Test fan
+control**, and a clean result leaves it dismissed.
+
+Quietening the cards on the right **demotes rather than deletes**: the reclaim gauge
+keeps its count and the thermal row keeps its state and your CPU's emergency limit;
+they stop being coloured as alarms. Dismissing a GPU row does not dismiss the matching
+condition card, which carries the fix. A reading that is not warning you, such as
+**Zero-RPM: available**, has no buttons, and neither does the Hardware Registry. A real
+thermal emergency still reaches you through the banner, the footer and the status
+ribbon, which nothing here can silence, and the daemon protects the hardware whatever
+any of them shows.
+
+### Hardware Registry, Interference Monitor, and Safety & GPU Limits
+
+The **Hardware Registry** takes about three quarters of the page's second row; drag
+the divider on its right to resize it. The *Driver Status* column shortens long text
+to keep every column on screen; hover it for the full wording.
+
+The **Interference Monitor** carries the BIOS-reclaim gauge and names the contended
+header. Once an hour has passed with no reclaim, the warning stands down and the card
+reads **Past Interference**, keeping the count as a record. What the counts mean, and
+what to do about them, is in
+[The BIOS keeps taking fan control back](hardware-troubleshooting.md#the-bios-keeps-taking-fan-control-back).
+
+**Safety & GPU Limits** carries:
+
+- the **CPU Thermal State**: live, from the same once-a-second poll that drives the
+  banner and the footer (**Unknown — disconnected** while the daemon cannot be
+  reached), with the emergency limit your CPU actually uses, or during a coolant
+  emergency the coolant limit that tripped it;
+- a row per AMD discrete GPU: fan control method, overdrive, the
+  `amdgpu.ppfeaturemask` state firmware fan curves need, and the `amdgpu` binding.
+  **Fan Control: read_only** is the normal state of an RX 7000/9000 card booted without
+  `amdgpu.ppfeaturemask`. These are settings you may have chosen on purpose, so they
+  can be quietened; change the setting and the row speaks again;
+- kernel advisories (see
+  ["A popup said my kernel has a known regression"](hardware-troubleshooting.md#a-popup-said-my-kernel-has-a-known-regression--should-i-worry));
+- the firmware's fan speed range.
+
+### Advanced actions
+
+Collapsed by default: **Test PWM Control**, **Verify All Writable**, **Characterise
+PWM Response**, and, when a writable AMD GPU is present, **Test GPU Fan Control** and
+**Restore GPU Fan to Automatic**. Each is explained on
+[Fan Tests and Reports](fan-tests.md). They are unavailable while one of them, or a
+PWM Test Report, is running, because the daemon runs one test at a time.
+
+**Restore GPU Fan to Automatic** hands the GPU fan back to the card's own curve, to
+undo a static GPU speed without restarting the daemon. It is disabled, with the reason
+in its tooltip, while the active profile drives that GPU: remove the GPU from its fan
+role or deactivate the profile first. Afterwards the daemon leaves the fan alone, even
+if a profile names it, until a profile is next activated or the daemon restarts. A
+curve you then set in LACT or CoreCtrl stays, across daemon restarts too.
+
+**Rescan Hardware**, in the footer, asks the daemon to look again for hwmon sensors
+and PWM headers: use it right after loading a sensor driver. New sensors appear within
+a couple of seconds. New fan *headers* need a daemon restart
+(`sudo systemctl restart ventulusd`). An OpenFan Controller is the exception: the same
+button asks the daemon to look for one and adopts it at once, and the result names the
+port it was found on.
 
 ## Hardware page
 
 ![Hardware page](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/05_hardware.png)
 
-The **Hardware** page is where you see, understand and test your cooling hardware. It has six sections: the **Hardware Readiness Checklist** (the daemon's go/no-go assessment), **Recommended Actions**, **Cooling Hardware** (your coolers and every PWM header), **Hardware Diagnostics** (the active tests), the **Super-I/O Architecture** report (motherboard sensor/fan-chip detection), and **Voltages** (the board's voltage inputs — see [Hardware Troubleshooting § Voltages](hardware-troubleshooting.md#voltages-and-why-some-of-them-have-no-name) for who names them, and why some have no name). **Re-scan**, at the top of the page, asks the daemon for a fresh hardware scan and reads the Voltages table again. The readiness and Super-I/O halves come from a *single* request to the daemon's combined `GET /inventory/hardware-readiness`, which serves one shared, coalesced hardware scan — so those two sections can never disagree with each other.
+Where you see, understand and test your cooling hardware. It has six sections: the
+**Hardware Readiness Checklist**, **Recommended Actions**, **Cooling Hardware** (your
+coolers and every PWM header), **Hardware Diagnostics** (the tests), the **Super-I/O
+Architecture** report, and **Voltages**. **Re-scan**, at the top, asks the daemon for
+a fresh hardware scan and reads the voltages again. The checklist and the Super-I/O
+report come from one daemon request over one shared scan, so they never disagree.
 
-Every readiness check on this page is explained in full — what it means, why it fails, and how to clear it — in the [Cooling Hardware Readiness Guide](../docs/24_Cooling_Hardware_Readiness_Guide.md); the page's own *Learn how* links point there.
+Every readiness check is explained in full (what it means, why it fails, how to clear
+it) in the [Cooling Hardware Readiness Guide](../docs/24_Cooling_Hardware_Readiness_Guide.md);
+the page's *Learn how* links point there.
 
-Everything the page *displays* is read-only. The tests in **Hardware Diagnostics** do exercise your hardware, and each is described below; all of them run inside the daemon, which keeps its hwmon lease, the pump safety floor and thermal protection in force throughout. **The GUI never writes a PWM value itself, and no action on this page can stop a pump header or drive a fan below its floor — with one exception you opt into:** **Calibrate OpenFan Channel…** walks the OpenFan channel you pick down to 0 %, and only after you confirm that the channel powers no pump. With daemon 3.5.0 or newer, a channel you set to **Pump** under *OpenFan Channels* is never calibrated.
+What the page *shows* is read-only. The tests under **Hardware Diagnostics** do
+exercise your hardware, always inside the daemon, which keeps the pump floor and
+thermal protection in force throughout. No action on this page can stop a pump or
+drive a fan below its floor, with one exception you opt into: **Calibrate OpenFan
+Channel…** walks the channel you pick down to 0 %, only after you confirm it powers no
+pump, and never on a channel set to **Pump**.
 
 ### Hardware Readiness Checklist
 
-The **Hardware Readiness Checklist** shows the daemon's own structured assessment of your cooling hardware — its answer to *"what is ready, what needs attention, and what should I do next?"*. It populates the first time you open the page (or via **Re-scan**).
+The daemon's own assessment of your cooling hardware: *what is ready, what needs
+attention, and what should I do next?* It fills in the first time you open the page,
+or on **Re-scan**.
 
-**This page and the System State page answer two different questions, and neither owns a verdict for the whole machine.** This checklist answers *"is this machine's hardware and driver stack set up for fan control?"* — the *daemon's* go/no-go assessment, from CPU-sensor presence, default-CPU confidence, whether PWM controls are present / read-only / not-yet-verified, monitor-only fan tachometers, quarantined sensors, and any preferred sensor that has gone missing. The **System State** page answers *"what on this machine needs a response right now?"* — the GUI's own reading of `/diagnostics/hardware` (drivers, chips, BIOS interference, PWM tests). A machine can be **HARDWARE READY** here and still have something on the System State page that wants your attention, and that is not a contradiction: the two are looking at different things.
+It answers a different question from the System State page, and neither gives a
+verdict for the whole machine. This checklist asks *is this machine's hardware and
+driver stack set up for fan control?*, from CPU-sensor presence, how confident the
+daemon is in the default CPU sensor, whether PWM controls are present, read-only or
+not yet verified, monitor-only fan tachometers, quarantined sensors, and any preferred
+sensor that has gone missing. System State asks *what on this machine needs a response
+right now?* A machine can be **HARDWARE READY** here and still have something on System
+State that wants attention; the two are looking at different things, which is why the
+verdicts use different words.
 
-The two verdicts deliberately do not share a word, which is why this one says *HARDWARE*. Up to v2.76.4 it read a bare **READY** against the System State page's **SYSTEM READY**, and the checklist was titled *System Readiness Checklist* — near-identical wording for two different answers, a page apart.
-
-- **Verdict pill** — **HARDWARE READY** or **HARDWARE NEEDS ATTENTION**, colour-coded, sitting at the end of this section's own heading. It is scoped to this checklist, not to the page and not to the machine.
-- **Item checklist** — one card per item, most severe first. Each shows a severity chip (**CRITICAL** / **WARN** / **OK**, icon + word + colour), a one-line summary, and — inside an expandable **Details** section — the technical detail, the recommended next step, and impact flags (*affects safety*, *blocks fan control*, *blocks monitoring*, *reboot may be required*). Warning and critical items open their detail automatically.
+- **Verdict pill**: **HARDWARE READY** or **HARDWARE NEEDS ATTENTION**, at the end of
+  the section's heading. It covers this checklist only.
+- **Item checklist**: one card per item, most severe first, each with a severity chip
+  (**CRITICAL** / **WARN** / **OK**), a one-line summary and, under **Details**, the
+  technical detail, the recommended next step, and flags (*affects safety*, *blocks fan
+  control*, *blocks monitoring*, *reboot may be required*). Warning and critical items
+  open their detail by themselves.
 - A healthy system shows *✓ All hardware-readiness checks passed.*
-
-Requires `ventulusd` ≥ v2.11.0. On a daemon that predates the feature the checklist reports that hardware readiness is unavailable.
 
 ### Recommended Actions
 
-Each checklist item carries a recommended next step; the page gathers these into a **Recommended Actions** summary so you can work down the list from most to least urgent. A **PWM control test** action now scrolls you to this page's own **Hardware Diagnostics** section — the tests live here. GPU-fan verification, and the bulk **Verify All Writable** sweep, still live on the **System State** page, reachable from the **Advanced (System State)** button in that section.
+The checklist items' next steps, gathered into one list from most to least urgent. A
+**PWM control test** action scrolls to this page's **Hardware Diagnostics** section.
+GPU-fan verification and **Verify All Writable** are on System State, reachable from
+the **Advanced (System State)** button in that section.
 
 ### Cooling Hardware
 
-This section answers *"what cooling hardware do I have, and what is it doing right now?"*.
+*What cooling hardware do I have, and what is it doing right now?*
 
-**Cooling devices.** If you have grouped a pump and its radiator fans into a cooling device (via **Configure AIO…** on the Controls page), it appears here as one assembly rather than a set of unrelated hwmon channels: pump, radiator fans, control sensor, pump strategy, coolant telemetry and an overall status, with live RPM and PWM beside each member. Buttons let you jump to the headers, characterise the pump, start a validation session, edit the configuration, or **Forget Device** — which removes only the *grouping*. Your headers, their assigned roles and the pump safety floor are unaffected, and no fan changes speed.
+**Cooling devices.** A pump and its radiator fans grouped by **Configure AIO…** on the
+Controls page appear here as one assembly: pump, radiator fans, control sensor, pump
+strategy, coolant readings and an overall status, with live RPM and PWM beside each
+member. Its buttons jump to the headers, characterise the pump, start a validation
+session, edit the configuration, or **Forget Device**, which removes only the
+*grouping*: your headers, their roles and the pump floor are unaffected, and no fan
+changes speed.
 
-**PWM headers.** Every discovered header gets a card showing its name, role, live RPM, and — kept deliberately apart — the PWM the daemon **requested** and the PWM the hardware **reports back**. Those two numbers are what let you tell a failed write from a BIOS/EC reclaim from a device doing its own control; a single merged number would hide all three. A **Details** disclosure adds the engineering view: which chip and channel, the kernel label, the capability audit (PWM write, readback, `pwm_enable`, supported control modes, PWM/DC mode, base frequency, tach pulses, alarm state, BIOS/EC reclaim count), and the classification and safety block — role, role source, the device safety floor, and whether stopping the fan is prohibited.
+**PWM headers.** Every header gets a card with its name, role, live RPM and, kept
+apart on purpose, the PWM the daemon **requested** and the PWM the hardware **reports
+back**. Those two numbers are what tell a failed write from a BIOS reclaim from a
+device doing its own control. **Details** adds the engineering view: chip and channel,
+the kernel label, the capability audit (PWM write, readback, `pwm_enable`, supported
+control modes, PWM/DC mode, base frequency, tach pulses, alarm state, reclaim count),
+and the safety block: role, where the role came from, the safety floor, and whether
+stopping the fan is prohibited.
 
-**Setting a header's role.** **Set role…** beside the role on each card (daemon 2.28.0 or newer) says what the header drives: **Pump** (never stopped, held at or above the pump safety floor), **Chassis fan** or **Radiator fan** (no floor; this is what makes the PWM Test Report's stall/restart probe available on the header), **CPU fan** (with ventulusd 3.6.0 or newer, held at or above the CPU fan safety floor in the active profile, as a header whose own label names the CPU fan is — but it is not a pump, so identify still stops it; with an older daemon it changes the name shown only and adds no floor), **No fan** (daemon 3.4.0 or newer: nothing is plugged in, so the card is dimmed and its status reads *No fan* instead of warning about a missing RPM; it adds no floor, and a header the daemon protects as a pump stays protected and keeps its warnings), or **Not set**, which removes your assignment. Only your assignment changes: a role that comes from the hardware label or the chip stays underneath it, so **Not set** puts the header back to that role, and a header the daemon protects as a pump — from its label, or because the active profile names it a pump — stays protected whatever you choose. Removing a pump you assigned asks first and names the protection being removed. The message afterwards appears on that card, under its role, and reports the daemon's own answer, not what was asked for. The button is disabled on a read-only header, where a role changes nothing; it stays available while a PWM Test Report runs, because the daemon re-checks roles at every step.
+A few things read **Unknown** on most boards, and that is normal: the supported
+control modes are known only for `it87` and `nct6775` chips, and many boards expose no
+PWM frequency or tach-pulse count. A driver that stays silent is not a driver saying
+no, so the page says *Unknown* rather than *Unsupported*.
 
-**OpenFan channels** (daemon 3.5.0 or newer). An OpenFan channel has no hardware label, so the daemon cannot tell that a pump is plugged into one until you say so. Under the PWM headers, *OpenFan Channels* lists every channel the controller reports — and any channel you assigned a role to while it is unplugged — with **Set role…** beside each. **Pump** keeps the channel at or above the pump safety floor in every profile, makes fan identification change its speed instead of stopping it, and stops **Calibrate OpenFan Channel…** from walking it to 0 %. **CPU fan** (ventulusd 3.6.0 or newer) keeps it at or above the CPU fan safety floor in the active profile, but identify still stops it; with an older daemon it changes the name shown only. The other roles change the name shown only. Removing a pump you assigned asks first, and the message afterwards reports the daemon's own answer.
+#### Setting a header's role
 
-**Labels from the nct6687d driver on a non-MSI board.** The out-of-tree nct6687d driver gives MSI's fan names (`CPU Fan`, `Pump Fan`, `System Fan #1`…) to every board it runs on. On another vendor's board — an ASRock Taichi is the known case — its "Pump Fan" can be a case-fan header while the real pump sits on a header with no name at all, where it gets no pump protection until you name it. Such a header's card says **Label unverified**, and a note above the PWM headers asks you to use **Set role…** on the header your pump is plugged into. It disappears once you assign a pump, or when you choose **Labels are correct**, which is remembered for this machine only (restore it under **Settings ▸ Prompts & Dismissals**).
+**Set role…** beside each card's role says what the header drives:
 
-A few things read as **Unknown** on most boards, and that is normal rather than a problem: the supported control modes are known only for `it87` and `nct6775` chips, and many boards expose no PWM frequency or tach-pulse count at all. The page says *Unknown* rather than *Unsupported* precisely because a driver that stays silent is not a driver saying no.
+- **Pump**: never stopped, and held at or above the pump floor.
+- **CPU fan**: held at or above the CPU-fan floor in the active profile, as a header
+  whose own label names the CPU fan is. It is not a pump, so fan identification still
+  stops it.
+- **Chassis fan** or **Radiator fan**: no floor. This is what makes the PWM Test
+  Report's stall/restart probe available on the header.
+- **No fan**: nothing is plugged in, so the card is dimmed and reads *No fan* instead
+  of warning about a missing RPM. It adds no floor.
+- **Not set** removes your assignment.
 
-Requested PWM shows as approximate on a daemon older than v2.33.0, which did not report the commanded duty separately from the readback.
+Only your assignment changes. A role that comes from the hardware label stays
+underneath it, so **Not set** returns the header to that role, and a header the daemon
+protects as a pump (from its label, or because the active profile names it a pump)
+stays protected whatever you choose. Removing a pump you assigned asks first and names
+the protection being removed. The message afterwards appears on the card and reports
+the daemon's answer, not what was asked for. The button is disabled on a read-only
+header, and stays available while a PWM Test Report runs, because the daemon checks
+roles again at every step.
+
+#### OpenFan channels
+
+An OpenFan channel has no hardware label, so the daemon cannot tell that a pump is
+plugged into one until you say so. *OpenFan Channels*, under the PWM headers, lists
+every channel the controller reports, and any channel you gave a role while it is
+unplugged, each with **Set role…**. **Pump** keeps the channel at or above the pump
+floor in every profile, makes fan identification change its speed instead of stopping
+it, and keeps **Calibrate OpenFan Channel…** off it. **CPU fan** keeps it at or above
+the CPU-fan floor in the active profile, but identification still stops it. The other
+roles change only the name shown.
+
+#### Labels from the nct6687d driver on a non-MSI board
+
+The out-of-tree nct6687d driver gives MSI's fan names (`CPU Fan`, `Pump Fan`,
+`System Fan #1`…) to every board it runs on. On another vendor's board (an ASRock
+Taichi is the known case) its "Pump Fan" can be a case-fan header, while the real pump
+sits on a header with no name and no pump protection. Such a header's card says
+**Label unverified**, and a note above the PWM headers asks you to use **Set role…** on
+the header your pump is on. The note goes once you assign a pump, or when you choose
+**Labels are correct**, which is remembered for this machine (restore it under
+**Settings ▸ Prompts & Dismissals**).
 
 ### Hardware Diagnostics
 
-The active tests, gathered in one place instead of scattered across the page. Each is disabled with a reason in its tooltip when your hardware or daemon cannot support it — a read-only header cannot be driven, and validation sessions need daemon v2.32.0 or newer plus a configured cooling device.
+The tests, each disabled with the reason in its tooltip when your hardware cannot run
+it. Each is explained on [Fan Tests and Reports](fan-tests.md):
 
-- **PWM Test Report…** — the whole-machine assessment; see [§ PWM Test Report](#pwm-test-report) below. While a report is running, every other test on this page (and on System State) is unavailable, because it is using the daemon's diagnostic slot.
-- **Calibrate OpenFan Channel…** — finds the duty at which a fan on an OpenFan channel stops, and the duty at which it starts again, and tells you the minimum that keeps it running. Needs ventulusd 3.1.0 or newer and an OpenFan controller; disabled with the reason otherwise. See [Hardware Troubleshooting § Calibrate OpenFan Channel](hardware-troubleshooting.md#calibrate-openfan-channel).
-- **Update OpenFAN Firmware…** — installs a firmware file you downloaded onto the OpenFAN controller: the daemon puts the board in update mode and back, and either you copy the file onto its drive or, for a published release once you allow it, the daemon writes it and reads it back. Appears with ventulusd 4.0.0 or newer while an OpenFAN controller is present, or an OpenFAN board is on USB but does not answer — which it then updates; disabled, with the reason, while the controller is not connected or a PWM Test Report runs. See [OpenFan Controller § Updating the OpenFAN firmware](openfan-controller.md#updating-the-openfan-firmware).
-- **Test Control** (on each header card) — the quick write-and-read-back test. See [Hardware Troubleshooting § Test PWM Control](hardware-troubleshooting.md#test-pwm-control).
-- **Characterise** (on each header card, and **Characterise Pump** on a device card) — the full sweep, reporting response latency and settling time per step. On daemon 2.40.0+ it walks the header down and back up, adding hysteresis, RPM stability and a plotted response curve, and opens on the same safety preflight as Discover Control Path. See [§ Characterise PWM Response](hardware-troubleshooting.md#characterise-pwm-response).
-- **Discover Control Path** (on each header card) — finds out *which* fan this header actually controls, by nudging it and watching every tachometer on the board. Opens on a safety preflight that blocks the test if anything is unsafe. Daemon 2.39.0+; disabled with a reason otherwise. See [§ Discover Control Path](hardware-troubleshooting.md#discover-control-path).
-- **Startup / Lifecycle Recording** — records how your cooler behaves across startup, resume and profile changes.
-- **AIO Validation** — records what your cooler actually does and finalises into an evidence summary you can export as CSV or JSON.
-
-- **Thermal Observation** (daemon 2.41.0+, disabled with the required version in its tooltip otherwise) — records how your cooler responds to a workload **you** run. While it records you get a live readout of elapsed time, control temperature, CPU package power, pump and radiator duty and RPM, the temperature trend, and whether the temperature has reached a steady state.
-
-  **Ventulus does not start, stop or control your workload.** Start your game, render or stress test yourself, then come back and record. Nothing in this observation drives a fan or a pump — it only watches.
-
-  When you stop it you also get:
-
-  - **Steady state** — whether the temperature settled, with the mean, peak, trend, variation, warm-up time and the exact rule that produced the verdict. "Not established" means *this recording* did not settle — it is not a verdict on your cooler, and a run you stopped early looks the same as one that genuinely never stabilises.
-  - **Startup behaviour** — if the fans or pump spun up hard at the start and then came down, you get the peak and settled RPM, how long it lasted, and the duty that was commanded and read back while it happened. **A high startup RPM is not a fault** when the duty was being obeyed; many coolers ramp at power-on by design, and the two figures being shown together is what tells you which it was.
-  - **Timeline** — temperature and RPM plotted over the recording with the steady period shaded, and CPU/GPU power beneath.
-
-  **Isolation templates** step you through the two comparisons cooler reviews use — *pump influence* (hold the fans, vary the pump) and *radiator influence* (hold the pump, vary the fans). Each stage tells you which duty to set; you set it on the Controls page as usual, and Ventulus marks the timeline. It will refuse to advance while thermal protection is active or while it cannot read a temperature.
-
-  The session window **stays open while you use the rest of the app**, which is what makes those stages followable — leave it open, switch to Controls, set the duty, and come back to mark the stage. (Before v2.65.1 the window blocked every other page, so the instruction to set a duty could not actually be carried out.)
-
-  **If CPU package power shows a dash**, your machine does not expose it — AMD systems using `k10temp` commonly do not. That is a gap in what Linux publishes, not a fault, and everything else in the observation still works.
-
-**By default a session runs until you stop it.** This is the single most important thing to know about all three recorders: the diagnostics you tick are *short* — seconds to a couple of minutes each — but finishing them does **not**, on its own, end the session, and neither does closing the window. Left alone it keeps recording until you press **Stop & Save**, or until the daemon's sample cap is reached about two hours in. While one is recording, the footer at the bottom of every page shows a **Recording** chip with the sample count; click it to get back to the page where you can stop it.
-
-**Unless you tick "Stop the session automatically when the diagnostics finish"** (v2.66.0, needs `ventulusd` 2.43.0 or newer). That option is on the start form, and it does exactly what it says: the daemon stops and saves the session the moment the last diagnostic completes, which for a typical run is a few minutes rather than two hours. It is **already ticked** for **AIO Validation**, because that recorder exists for its diagnostics; for **Startup / Lifecycle** and **Thermal Observation** it starts unticked, since those are passive recordings where the diagnostics are incidental and you almost certainly want to keep recording afterwards. The option is unavailable until you tick at least one diagnostic — there would be nothing for it to wait for — and it does not appear at all against an older daemon. You can still press **Stop & Save** early either way.
-
-**Stop & Save** and **Stop & Mark Cancelled** both keep everything. They finalise the session, compute the findings, and save it — the only difference is that the second records the session as *cancelled*, so you can tell a run you abandoned from one you saw through. Neither discards your recording. (Earlier versions styled the second as a red destructive action and documented it as "end without finalising", which was wrong in both the app and the API contract.)
-
-All three recorders open the same dialog. It shows elapsed time, per-member telemetry, a row for each diagnostic as it finishes, and, when the session finishes, a findings table using explicit result words — **PASS**, **FAIL**, **OBSERVED**, **NOT OBSERVED**, **NOT TESTED**, **UNKNOWN**, **UNAVAILABLE**. Nothing that was not actually tested is ever reported as PASS, and a capability your hardware simply does not expose is reported as *unavailable*, never as a failure. A finding or evidence row about one cooling-device member names that member, so one check can appear twice — a **PASS** for the pump and a **FAIL** for a radiator fan, say — and both are right. You can mark an event while recording, and attach external electrical measurements (a meter or logic-analyser reading) to the session — those are stored for your own analysis and are never used for any control or safety decision.
-
-### PWM Test Report
-
-**Hardware ▸ PWM Test Report…** (v2.82.0 — built as v2.81.0, which was never released) checks your cooling setup and writes down what it actually saw. It is built on the same daemon tests as the buttons above, run one at a time, and the daemon performs and undoes every one of them.
-
-1. **What to test.** Every channel the daemon reports is listed. For each motherboard header you tick the tests to run: the **PWM control test** and **tach pairing** start ticked on headers with a fan turning; the **full PWM sweep** (100 % down to 20 % and back, never below a pump's floor) and the **stall/restart probe** are yours to choose. The probe (daemon 2.54.0+) looks for where a chassis or radiator fan stops below 20 % and where it starts again; it is offered only on a header whose **role** is chassis fan or radiator fan, and never on a pump-protected header (one the hardware labels, you assigned, or your active profile names as a pump) or a CPU fan — whatever the header's label says. **Set…** in the **Role** column opens the same role picker as the Hardware page's header cards, so a header with no label can be named a chassis or radiator fan here; the table then refreshes and keeps your ticks. It also follows a role you set on a Hardware card while it is open; if you are on a later step by then, it refreshes when you go **Back** to it. OpenFan channels and GPU fans are reported but not tested. A test that cannot run says why in its tooltip — including, on a daemon older than 2.53.0 (whose changes were built as 2.52.0, never released), the sweep and tach pairing, whose settling figures were wrong before that version.
-2. **Your setup (optional).** Things software cannot see: what is plugged into each header, how many fans share it (a splitter means the RPM is one fan's), the BIOS header mode, and your cooler's model and pump switch position. Anything you leave blank is recorded as *not supplied*. Your answers are remembered for this machine and never included in a settings export.
-3. **Review and consent.** The plan in plain words, what keeps it safe, and your go-ahead. Each stall probe also needs its own **"I'll stay at the machine"** tick, because the fan may stop for a short time.
-4. **Run.** Each test with its status, the fan under test live, the thermal state and time remaining. **Cancel run** stops the current test (the daemon puts the header back) and lists the rest as not tested. The run stops by itself if the daemon's thermal protection becomes active, and the tests left are listed as not tested. A single test also stops if a temperature passes the daemon's diagnostic limit or temperature readings go stale; the run carries on, but the daemon refuses each later test while that lasts, and those are listed as not tested. Closing the window asks first; quitting Ventulus saves what was done so far.
-5. **Report.** There is **no overall pass or fail**. You get what needs attention, observations, whether every header went back to how it was found (with **Re-apply profile** if one did not), a section per fan with charts and every reading, what was *not* tested and why — including things no report can test, like suspend/resume — and the environment: GUI, daemon, kernel and driver versions, and your board and BIOS. Every finding says what it is based on (measured, worked out, reported by the device, or something you told it) and the range it covers: a sweep from 20 % proves nothing about 10 %, and the report says so, especially when your profile can drive a fan lower than any test saw it turning.
-
-Reports are saved as you go to `~/.local/share/ventulus/reports/` and are never deleted automatically.
-
-**Your reports** (v2.82.0). The window opens on a list of every report this computer has saved, newest first. Select one to **Open** or **Export** it, select two to **Compare** them, or **Delete…** ones you no longer want (it asks first). **New report** starts a new run. **Open a report file…** shows a report from somewhere else — another machine, or a copy someone sent you — without copying it into your reports folder. A report you reopen shows what the machine was like *then*, so it does not offer **Re-apply profile**; run a new report to check the machine now.
-
-**Export** offers four formats:
-
-- **JSON** — the complete record.
-- **Markdown** — for a GitHub issue. If it is long, attach the file rather than pasting it.
-- **HTML** — one file with charts: each sweep and stall probe, and for each tested fan its RPM and duty over the whole run, with the hottest CPU temperature on its own chart. It follows your system's light or dark setting, needs no internet connection and runs no scripts.
-- **CSV** — choose a folder; you get up to three spreadsheets (sweep points, stall-probe steps, and the once-a-second trace of every fan and sensor). A reading the daemon did not report is left empty, never 0.
-
-**Compare** puts two reports side by side, earlier first. Fans are matched only by their exact header id; a header whose label changed between runs is listed as *possibly renamed* and not compared, so a reading is never pinned to the wrong fan. Differences are grouped into hardware and wiring, environment (versions, kernel, BIOS), configuration, measured response, and *not comparable* — a test that ran with different settings, ran or finished in only one report, or started in a different thermal state. Measured differences are shown as numbers next to how much each run's own readings varied; nothing is labelled significant and there is no overall verdict. Each run's starting CPU temperature is shown too, but it is up to you to judge. A comparison can be exported as Markdown or HTML.
-
-The report will not start in demo mode, while the daemon's thermal protection is active, or while another test or a validation session is running. That includes a **Verify All Writable** run on System State and a **Test Control** on a Hardware page header card, which must finish first. The message names the page the test was started on. In demo mode the window still opens on your saved reports, so you can open, compare and export them.
-
-On a board with two fan chips, two headers can have the same name, such as `pwm2`. The report adds the chip to those names, as in `pwm2 (it8696)`, so you can tell which is which. Where the chip cannot tell them apart — two OpenFan or GPU channels you named alike, or two headers on the same chip with the same name — the report adds the channel's id instead. A validation session window you opened before the report started stays open, but its **Start** is refused until the report finishes.
+- **PWM Test Report…**: the whole-machine assessment. While it runs, every other test
+  here and on System State is unavailable.
+- **Calibrate OpenFan Channel…**: where an OpenFan fan stops, where it starts again,
+  and the minimum that keeps it running.
+- **Update OpenFAN Firmware…**: installs a firmware file onto the controller; see
+  [OpenFan Controller](openfan-controller.md#updating-the-openfan-firmware).
+- **Test Control**, **Characterise** and **Discover Control Path** on each header
+  card, and **Characterise Pump** on a cooling-device card.
+- **Startup / Lifecycle Recording**, **AIO Validation** and **Thermal Observation**:
+  the recording sessions.
 
 ### Super-I/O Architecture
 
-The **Super-I/O Architecture** section answers *"which motherboard sensor/fan chip do I have, and is its driver loaded?"*. Most desktop boards route their fan headers and temperature sensors through a Super-I/O chip (ITE, Nuvoton/Winbond, SMSC, …); if its kernel driver is not loaded, the daemon can't see those fans at all. This section renders the Super-I/O half of that same combined response and shows **one card per detected chip** — its vendor, a confidence level, how the chip was detected (the board table, the kernel log, an already-bound driver, or the opt-in port probe), and whether its driver is bound. For a chip whose driver is *not* loaded, the card expands a **How to enable** section with the exact driver name and a copy-paste command to load it.
+*Which motherboard sensor and fan chip do I have, and is its driver loaded?* Most
+desktop boards route their fan headers and temperature sensors through a Super-I/O
+chip (ITE, Nuvoton/Winbond, SMSC…); if its driver is not loaded, the daemon cannot see
+those fans. The section shows one card per detected chip: vendor, a confidence level,
+how it was detected (the board table, the kernel log, an already-bound driver, or the
+opt-in port probe), and whether its driver is bound. For a chip whose driver is not
+loaded, **How to enable** gives the driver name and a command to load it.
 
-- The report is **passive and read-only** — the daemon composes signals it already has (DMI board table, bound hwmon chips, `/proc/modules`, `/dev/kmsg`, ACPI port overlaps). It never loads a module or changes your system.
-- **Detection is not control.** A card means a chip is present and a driver exists — it does *not* prove fan control works. Loading the driver (and a fan test under **Hardware Diagnostics**) is what confirms that.
-- On a non-x86 machine, or a daemon that predates the feature, the section reports that detection is unavailable.
+- The report is **passive and read-only**: the daemon combines signals it already has
+  (the board table, bound hwmon chips, `/proc/modules`, the kernel log, ACPI port
+  overlaps). It never loads a module or changes your system.
+- **Detection is not control.** A card means a chip is present and a driver exists,
+  not that fan control works. Loading the driver, and a fan test, confirm that.
+- On a non-x86 machine the section says detection is unavailable.
 
 #### Probe ports (advanced)
 
-Passive detection can't see a chip whose driver never loaded and that never appeared in the kernel log. For that case an **opt-in active probe** can access the Super-I/O configuration ports directly to identify an unbound chip. The **Probe ports (advanced)** button runs it — but it is **off by default** and stays disabled (with the reason in its tooltip) unless the daemon operator has deliberately enabled it, because it requires a root-equivalent capability (`CAP_SYS_RAWIO`). Enabling it takes three steps on the daemon host:
+Passive detection cannot see a chip whose driver never loaded and that never appeared
+in the kernel log. For that, an **opt-in active probe** reads the Super-I/O
+configuration ports directly. **Probe ports (advanced)** runs it, but it is **off by
+default** and disabled (with the reason in its tooltip) unless the daemon's operator
+has turned it on, because it needs a root-equivalent capability (`CAP_SYS_RAWIO`). To
+turn it on:
 
-1. Set `allow_port_probe = true` **under the `[detection]` table** in `/etc/ventulus/daemon.toml`.
+1. Set `allow_port_probe = true` **under the `[detection]` table** in
+   `/etc/ventulus/daemon.toml`.
 2. Install the drop-in the daemon package ships as an example:
    ```bash
    sudo install -Dm644 /usr/share/doc/ventulusd/superio-port-probe.conf.example \
@@ -252,134 +459,179 @@ Passive detection can't see a chip whose driver never loaded and that never appe
    ```
 3. Reload and restart: `sudo systemctl daemon-reload && sudo systemctl restart ventulusd`.
 
-**The probe is not read-only.** Where no chip answers a plain read, the daemon writes a vendor unlock and exit sequence to the port. On some boards that can hide a chip until the machine is unplugged from mains power, which is why the drop-in's comments and the button's confirmation both spell it out. It never writes a configuration value.
+**The probe is not read-only.** Where no chip answers a plain read, the daemon writes a
+vendor unlock and exit sequence to the port. On some boards that can hide a chip until
+the machine is unplugged from mains power, which is why the drop-in's comments and the
+button's confirmation both spell it out. It never writes a configuration value.
 
-**It refuses to run while any Super-I/O driver it recognises is bound** — the whole probe, not just the port that driver uses. With `it87` loaded on a dual-chip Gigabyte board it therefore never runs. It also refuses when `/proc/ioports` can't be read, skips a port that a driver or the firmware has reserved, and turns away a second run within 10 seconds. Each refusal appears as a note in the section.
+**It refuses to run while any Super-I/O driver it recognises is bound**, for the whole
+probe, not just that driver's port. With `it87` loaded on a dual-chip Gigabyte board it
+therefore never runs. It also refuses when `/proc/ioports` cannot be read, skips a port
+that a driver or the firmware has reserved, and turns away a second run within 10
+seconds. Each refusal appears as a note in the section.
 
-The Super-I/O Architecture section requires `ventulusd` ≥ v2.11.0, because it shares the checklist's request.
+### Voltages
+
+A read-only table of the analogue inputs your Super-I/O chip exposes, typically ten
+per chip. The **Identification** column says who named each row:
+
+- **Named by the driver**: the kernel driver labels a few of the chip's own internal
+  inputs (`3VSB`, `Vbat`, `+3.3V`) and has already scaled them. Read these at face
+  value.
+- **Named by the board catalogue**: on Gigabyte boards, the daemon recognises the board
+  from its firmware ID and names the other inputs from the it87 driver project's
+  per-board sensor configurations, including each rail's divider. The reading shown is
+  the rail voltage (the pin reading times the divider); hover the row for the pin
+  reading and the divider. On an X870E AORUS MASTER, for example, `in2` reads about
+  2 V at the pin and is shown as `+12V` at about 12 V.
+- **Not used by this board**: the catalogue does not map this input for your board. It
+  may be unconnected or unused, so the reading is the raw pin voltage and not a known
+  rail.
+- **Unnamed channel**: nobody named it, which is normal on a board the catalogue does
+  not cover.
+
+**Do not read an unnamed channel as a rail voltage.** A board feeds each rail through a
+resistor divider before it reaches the chip, and the driver cannot know the ratio. The
+number is a real measurement *at the chip's pin*, not the rail's voltage: a +12V rail
+commonly reads around 2 V there. An `lm_sensors` configuration under `/etc/sensors.d/`
+applies the dividers for the `sensors` command only; the kernel driver never reads it,
+so it changes nothing in this table.
+
+The table leaves out two things that mislead on real hardware: **voltage alarm bits**
+(on the reference board two channels raise their alarm while reading inside their own
+limits) and **per-channel min/max**, which are usually driver defaults rather than
+limits anyone set for your board.
+
+Voltages are information only: they are never offered as a curve sensor, and nothing
+in fan control reads them. They are not polled every second, because rails move by
+millivolts: Ventulus reads them when it connects, on **Re-scan**, and when you refresh
+or rescan on System State. The table says when its readings were taken ("Read at
+14:03."), and if a Re-scan cannot read them it keeps the previous readings and says
+why.
 
 ## Logs page
 
 ![Logs page](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/08_logs.png)
 
-A live, filterable list of in-process GUI events: daemon connect/disconnect, profile activations and override actions, alert onsets and recoveries, theme changes, and the like. The log retains up to 200 entries (oldest discarded first).
+A live, filterable list of the app's events: daemon connect and disconnect, profile
+activations and overrides, alerts starting and recovering, theme changes and the like.
+It keeps up to 200 entries, discarding the oldest first.
 
-The page is a **find it, then understand it** workflow: a compact alert bar and an
-activity strip across the top, the event list on the left, and an inspector on the right
-that explains whichever event you have selected — and which also holds the diagnostic
-probes, so they no longer take a strip along the bottom.
+The page works as *find it, then understand it*: a compact alert bar and an activity
+strip across the top, the event list on the left, and an inspector on the right that
+explains whichever event you select and also holds the diagnostic probes.
 
-**Newest entries are at the top.** Repeated identical events collapse into a single row
-carrying a `×N` badge rather than filling the list; the inspector tells you how many
-times it happened and when it started.
+**Newest entries are at the top.** Repeated identical events collapse into one row with
+a `×N` badge; the inspector says how many times it happened and when it started.
 
-Three concepts that look similar but answer different questions:
+Three things look alike but answer different questions:
 
 | Surface | Question it answers | Persistence |
 |---------|---------------------|-------------|
-| **Event Log** (this page) | *What has the GUI been doing in this session?* | In-process only, capped at 200 |
-| **Alerts** (this page) | *What is wrong right now — and what was wrong a moment ago?* | An alert stops being active when the condition resolves, but stays listed as **recovered** until you acknowledge it, so one that clears before you look at it can still be read afterwards. **"Acknowledge all"** records that you have seen them; it does not claim the condition is fixed, and it never suppresses the same problem happening again |
-| **System Journal** (inspector tab) | *What happened across restarts on the daemon side?* | Persisted by systemd |
+| **Event Log** (this page) | *What has the app been doing this session?* | In memory only, capped at 200 |
+| **Alerts** (this page) | *What is wrong right now, and what was wrong a moment ago?* | An alert stops being active when its condition resolves, but stays listed as **recovered** until you acknowledge it, so one that cleared before you looked can still be read. **Acknowledge all** records that you have seen them; it does not claim anything is fixed, and never suppresses the same problem happening again |
+| **System Journal** (inspector tab) | *What happened on the daemon side, across restarts?* | Kept by systemd |
 
 ### Activity strip
 
-A row of columns above the list showing how many events arrived over the retained feed,
-coloured by severity so a burst of errors is visible without reading a single line.
-Click a column to narrow the list to that slice of time; click it again, press
-<kbd>Esc</kbd>, or use **Clear time filter** to go back to everything. It is keyboard
-operable — <kbd>←</kbd>/<kbd>→</kbd> to move, <kbd>Space</kbd> to apply.
+A row of columns above the list showing how many events arrived over time, coloured by
+severity, so a burst of errors is visible without reading a line. Click a column to
+narrow the list to that slice of time; click it again, press <kbd>Esc</kbd>, or use
+**Clear time filter** to go back. It works from the keyboard too: <kbd>←</kbd>/<kbd>→</kbd>
+to move, <kbd>Space</kbd> to apply.
 
 The column heights count *events*, while the severity chips beside the search box count
-*rows*. Those differ whenever a run has collapsed, which is what the `×N` badge is
-telling you.
+*rows*. They differ whenever repeats have collapsed, which is what the `×N` badge shows.
 
 ### Alert bar
 
-One line above the table. When nothing is wrong it reads `✓ No active alerts` and takes
-almost no space; if something recently cleared without you seeing it, it adds
-`Recent alert: … recovered at 09:21:06` so a problem that fixed itself is still
-discoverable.
+One line above the table. With nothing wrong it reads `✓ No active alerts`; if
+something recently cleared without you seeing it, it adds
+`Recent alert: … recovered at 09:21:06`.
 
-When something *is* wrong it names the counts and the most serious alert —
-`✖ 1 critical   ⚠ 2 warnings` — and offers **View alerts**, which opens the **Alert
+When something *is* wrong it gives the counts and the most serious alert
+(`✖ 1 critical   ⚠ 2 warnings`) and offers **View alerts**, which opens the **Alert
 Centre**: every active alert with when it was first and last detected, where it came
 from, a suggested next step where one can be given reliably, and **Acknowledge** /
-**Show related logs**; plus a compact list of what recently recovered.
+**Show related logs**, plus a short list of what recently recovered.
 
-**Acknowledging is not fixing.** It records that you have seen the alert. The footer
-health rollup keeps reporting the condition for as long as it genuinely exists, and the
-same problem happening again later always raises a fresh alert.
+**Acknowledging is not fixing.** It records that you have seen the alert. The footer's
+health summary keeps reporting the condition while it lasts, and the same problem
+happening again later always raises a fresh alert.
 
 ### Filters
 
 | Control | Behaviour |
 |---------|-----------|
-| **All** | Re-checks every severity in one click. |
-| **INFO / WARN / ERR chips** | Independent severity filters, each showing how many rows it holds. Uncheck a level to hide every row at that severity; uncheck all three and the list is empty, which is a real state rather than a reset. The counts stay put when you uncheck a chip, so you can see what turning it back on would bring. |
-| **Source dropdown** | Single-select source filter — `gui`, `polling`, `profile`, `kernel`, etc. New sources appear automatically the first time they fire. |
-| **Search** | Case-insensitive substring match against message text and source. |
-| **Follow** | Follows new entries as they arrive at the top of the list. Scroll away and it pauses, showing `N new events ↑` — click that to jump back to the newest and resume. You are never yanked back while reading older rows. |
+| **All** | Turns every severity back on |
+| **INFO / WARN / ERR chips** | Independent severity filters, each showing how many rows it holds. Turn all three off and the list is empty, which is a real state rather than a reset. The counts stay put when you turn a chip off, so you can see what turning it back on would bring |
+| **Source dropdown** | One source at a time: `gui`, `polling`, `profile`, `kernel` and so on. New sources appear the first time they fire |
+| **Search** | Case-insensitive match against the message text and source |
+| **Follow** | Follows new entries as they arrive at the top. Scroll away and it pauses, showing `N new events ↑`; click that to jump back and resume. You are never pulled back while reading older rows |
 
-Keyboard shortcuts, active while the list has focus: <kbd>↑</kbd>/<kbd>↓</kbd> to move
-the selection, <kbd>/</kbd> to jump to the search box, <kbd>f</kbd> to toggle Follow,
-<kbd>Esc</kbd> to clear the selection.
+Keyboard shortcuts while the list has focus: <kbd>↑</kbd>/<kbd>↓</kbd> to move,
+<kbd>/</kbd> to jump to the search box, <kbd>f</kbd> to toggle Follow, <kbd>Esc</kbd> to
+clear the selection.
 
 ### Inspector
 
 The pane on the right. Selecting a row fills its first two tabs; the last two are
-session tools that do not depend on which event is selected. Close it with **✕** to give
-the list the full width. Selecting an event again brings it back.
+session tools that do not depend on the selection. Close it with **✕** to give the
+list the full width; selecting an event brings it back.
 
 | Tab | What it shows |
 |-----|---------------|
-| **Details** | Severity, the precise timestamp, source, and the full untruncated message. Where the event carried structured data — an alert's component, an exception type, a rescan's header count — it is listed as named fields; where it did not, nothing is shown rather than empty rows. A repeated event also reports how many times and when it started. Below that, **related events** and one-click actions. |
-| **Raw** | The stored event record in full, selectable and copyable. This is the event as it was recorded, not a reconstructed log line. |
-| **Diagnostics** | The three on-demand probes — **Daemon Status**, **Controller (OpenFan)**, **GPU State** — each with its own **Refresh**. |
-| **Journal** | Recent entries from the `ventulusd.service` systemd journal, with **Fetch** / **Refresh**. |
+| **Details** | Severity, the exact time, source and the full message. Where the event carried structured data (an alert's component, an exception type, a rescan's header count) it is listed as named fields; where it did not, nothing is shown. A repeated event also says how many times and since when. Below that, **related events** and one-click actions |
+| **Raw** | The stored event record in full, selectable and copyable, as it was recorded |
+| **Diagnostics** | Three on-demand probes, **Daemon Status**, **Controller (OpenFan)** and **GPU State**, each with its own **Refresh** |
+| **Journal** | Recent entries from the `ventulusd.service` systemd journal, with **Fetch** / **Refresh** |
 
-Diagnostics and Journal are fetched the first time you open their tab, not when you open
-the page — so simply visiting Logs never shells out to the system journal. Clearing the
-event log never wipes a probe you just fetched.
+Diagnostics and Journal are fetched the first time you open their tab, so simply
+visiting Logs never reads the system journal. Clearing the event log never wipes a
+probe you just fetched.
 
-#### Related events, and what "related" means here
+#### Related events
 
-An event carrying a **component** (an alert about a specific fan or sensor, say) lists
-other events about that same component. Otherwise it falls back to other events from the
-same source, and the panel says so — because "same source tag" is a weaker claim than
-"related", and it should not pretend otherwise. **Filter to these** narrows the list to
-that group.
-
-To jump to one, **activate** it: press **Enter** on the highlighted entry, or double-click
-it. On desktops that open items with a single click — KDE Plasma's default — a single
-click does it too. (One gesture, not two: the panel rebuilds itself the moment you jump,
-so a second activation of the same click would land on a list that no longer exists.)
+An event that names a **component** (an alert about a particular fan or sensor, say)
+lists other events about that component. Otherwise it falls back to other events from
+the same source, and says so, because "same source" is a weaker claim than "related".
+**Filter to these** narrows the list to that group. To jump to one, press **Enter** on
+it or double-click it; on desktops that open items with a single click (KDE Plasma's
+default), one click does it.
 
 #### Actions
 
 | Button | Action |
 |--------|--------|
-| **Copy event + context** | Copy the full record plus its related events. |
-| **Open Hardware / Open Controls** | Appears for events from a source with an obvious next place to look, and takes you there. |
-| **Clear Logs** (toolbar) | Empty the event log (does not affect the inspector's probes). |
-| **Copy** (toolbar) | Copy the *currently-visible* rows, after filters, search and time window are applied. |
+| **Copy event + context** | Copy the full record plus its related events |
+| **Open Hardware / Open Controls** | Shown for events from a source with an obvious next place to look, and takes you there |
+| **Clear Logs** (toolbar) | Empty the event log (the inspector's probes are kept) |
+| **Copy** (toolbar) | Copy the rows currently visible, after filters, search and time window |
 
-Exporting a support bundle is the footer's **Export Support Bundle** button, which is
-available from every page.
+## Export Support Bundle
 
-### Export Support Bundle
+The footer's **Export Support Bundle** button, available on every page, saves one JSON
+file (`ventulus_support_bundle.json` by default) containing:
 
-The footer's **Export Support Bundle** button saves one JSON file (`ventulus_support_bundle.json` by default) containing:
+- the GUI version, your kernel release, the fan- and GPU-driver boot parameters (not
+  the rest of the command line, which names your disks), and the loaded kernel modules;
+- the app's event log, with any OpenFAN board serial number replaced by *(redacted)*;
+- the daemon's version, capabilities and subsystem status, and each fan's RPM and last
+  reported duty (sensor readings are counted, not listed);
+- your settings, apart from window and chart layout, the export folder, and anything
+  you typed as free text (your hardware and cooler notes, the Logs search box). It
+  **keeps** machine-specific settings such as sensor classifications and the profile
+  and theme folder overrides, because those are often the cause of a problem;
+- the active profile's name, your profiles' names and ids (not their curves), and your
+  theme names;
+- your board, BIOS version and detected fan-control chips, once the app has read them
+  from the daemon;
+- the last 100 lines of the daemon's journal, with any OpenFAN board serial number
+  replaced by *(redacted)*, and any `amdgpu` kernel messages from this boot (with the
+  boot command line cut the same way).
 
-- the GUI version, your kernel release, the fan- and GPU-driver boot parameters (not the rest of the command line, which names your disks), and the loaded kernel modules
-- the app's event log, with any OpenFAN board serial number replaced by *(redacted)*
-- the daemon's version, capabilities and subsystem status, and each fan's RPM and last reported duty (sensor readings are counted, not listed)
-- your GUI settings, apart from window and chart layout, the export folder, and anything you typed as free text (your hardware and cooler notes, the Logs search box) — it **keeps** machine-specific settings such as sensor classifications and the profile and theme folder overrides, because those are often the cause of a problem
-- the active profile's name, your profiles' names and ids (not their curves), and your theme names
-- your board, BIOS version and detected fan-control chips, once the app has read them from the daemon
-- the last 100 lines of the daemon's journal, with any OpenFAN board serial number replaced by *(redacted)*, and any `amdgpu` kernel messages from this boot (with the boot command line cut the same way)
-
-Review it before sharing — it names your hardware and may name your folders.
+Review it before sharing: it names your hardware and may name your folders.
 
 ---
 
-Previous: [Settings](settings.md) | Next: [Fan Wizard](fan-wizard.md)
+Previous: [Settings](settings.md) | Next: [Fan Tests and Reports](fan-tests.md)

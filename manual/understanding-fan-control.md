@@ -12,34 +12,32 @@ Your motherboard's fan headers are driven by a small dedicated chip (the **Super
 
 **hwmon** ("hardware monitoring") is the part of the Linux kernel that exposes sensors and fan controls — temperatures, fan speeds, voltages, and PWM outputs — in one uniform place. Every chip that can report a temperature or drive a fan shows up under hwmon once the kernel has a driver for it.
 
-**What this means:** hwmon is Linux's standard "fan and sensor panel". Ventulus does not invent its own way to reach your fans; it uses the same hwmon interface that `lm_sensors`, CoolerControl, fancontrol, and every other Linux fan tool use.
+It is Linux's standard fan and sensor panel. Ventulus has no private way to reach your fans: it uses the same hwmon interface as `lm_sensors`, CoolerControl, fancontrol and every other Linux fan tool.
 
 ## What is sysfs (in this context)?
 
 **sysfs** is a virtual filesystem (mounted at `/sys`) where the kernel presents hardware as files and folders. These are not files on your disk — reading or writing one of them is really talking to the kernel and the hardware behind it.
 
-hwmon lives inside sysfs, under `/sys/class/hwmon/`. So when this manual says "the daemon writes a PWM value", it literally means the daemon writes a number into a file like `/sys/class/hwmon/hwmon3/pwm1`, and the kernel passes that on to the fan chip.
-
-**What this means:** "fan control" on Linux is mostly reading and writing small text files that the kernel maps onto real hardware. That is why permissions, drivers, and *who is writing the file* all matter so much.
+hwmon lives inside sysfs, under `/sys/class/hwmon/`. So when this manual says "the daemon writes a PWM value", it means the daemon writes a number into a file such as `/sys/class/hwmon/hwmon3/pwm1`, and the kernel passes it on to the fan chip. Fan control on Linux is mostly reading and writing small text files that the kernel maps onto real hardware, which is why drivers, permissions and *who else writes the file* all matter.
 
 ## The fan-control files
 
 For each controllable fan header, the driver exposes a small set of files. You rarely touch these directly — Ventulus does — but recognising them makes every other page clearer:
 
-| File | What it is | What this means |
+| File | What it is | Why it matters |
 |---|---|---|
 | `pwmN` | The speed command for fan *N*, a number from `0` (stopped) to `255` (full speed) | This is the dial Ventulus turns. The GUI shows it as a percentage |
 | `pwmN_enable` | The *mode* of the header: typically `2`/`5` = automatic (firmware decides), `1` = manual (software decides) | A header must be in manual mode before a `pwmN` write does anything. This is the file the BIOS most often steals back |
 | `fanN_input` | The measured speed of the fan, in RPM | Read-only. This is the real, hardware-measured RPM the dashboard shows — never a value software set |
 | `tempN_input` | A measured temperature, in thousandths of a degree Celsius (`45000` = 45 °C) | Read-only. Fan curves use these as their input |
 
-**What this means:** a *writable* fan header is one where the driver lets the daemon set `pwmN` **and** hold `pwmN_enable` in manual mode. A header that exposes `fanN_input` (so you can see its RPM) but has no writable `pwmN` is **read-only** — you can watch it but not control it.
+A *writable* fan header is one where the driver lets the daemon set `pwmN` **and** hold `pwmN_enable` in manual mode. A header with a `fanN_input` (so you can see its RPM) but no writable `pwmN` is **read-only**: you can watch it but not control it.
 
 ## "AMD board" or "Intel board" is the wrong question
 
 A common assumption is that fan control depends on whether you have an AMD or Intel CPU. It does not. The CPU vendor owns *temperature* sensors (`k10temp` for AMD, `coretemp` for Intel), but your **fans** are driven by a separate **Super I/O** chip soldered to the motherboard — made by ITE or Nuvoton (NCT), whichever CPU is in the socket. On some boards part of this job is handled by the board's **embedded controller (EC)** instead.
 
-**What this means:** which driver you need — and whether your fans are controllable at all — depends on your **motherboard** and its Super I/O chip, not your CPU brand. A Gigabyte AMD board and a Gigabyte Intel board can need the very same `it87` driver.
+So which driver you need, and whether your fans can be controlled at all, depends on your **motherboard** and its Super I/O chip, not your CPU brand. A Gigabyte AMD board and a Gigabyte Intel board can need the same `it87` driver.
 
 The vendor-by-vendor specifics live in their own reference pages, so this page does not repeat them:
 
@@ -53,11 +51,7 @@ Super I/O chips sit on an old-style bus with no automatic "plug-and-play" announ
 
 Mainline Linux already includes drivers for many chips (for example `nct6775` covers a lot of ASUS boards). Newer boards — most 2022-and-later Gigabyte and MSI, some ASRock — use chips whose driver is **out-of-tree**: not shipped with the kernel, installed separately from the AUR and rebuilt for your kernel by **DKMS**.
 
-**What this means:** "my motherboard fans don't show up" usually means "the driver for my Super I/O chip isn't loaded yet", not "my board is unsupported". The GUI's **Hardware** page identifies your chip and names the exact package to install.
-
-> ### Before you change anything
->
-> Some setup steps below can change how your system loads drivers, controls fans, or boots. Follow them only if you understand the change and accept the risk. This guidance is provided **as-is**; the project accepts **no liability** for changes made to your system (MIT License). The detailed, copy-paste version of each step — with a full rollback — lives on the [Driver Setup](driver-setup.md) page.
+So "my motherboard fans don't show up" usually means the driver for your Super I/O chip is not loaded yet, not that your board is unsupported. The **Hardware** page identifies your chip and names the package to install. Installing a driver changes how your system loads modules, and some steps change how it boots: [Driver Setup](driver-setup.md) has each step, what it risks, and how to undo it.
 
 ## Why the BIOS can fight Linux (Smart Fan / Q-Fan)
 
@@ -65,13 +59,13 @@ Motherboard firmware has its own fan controller — Gigabyte calls it Smart Fan,
 
 Usually no BIOS change is needed: a current driver takes each header over, and the daemon puts a header back into manual mode whenever the firmware takes it. Where a board keeps taking a header back, the remedy is per vendor — a driver update on Gigabyte, a driver option on some MSI boards — and is in the [Driver Setup BIOS step](driver-setup.md#step-5--bios-settings-the-half-people-skip) and the vendor guides above. Setting a header to *Full Speed* in BIOS is a fail-safe, not a fix: the fan runs at 100% whenever the firmware owns it, and on some boards Linux can then not control it at all.
 
-**What this means:** on some boards a correctly-installed driver can still "lose" to the BIOS. The GUI's **Test PWM Control** detects exactly this — it reports when the BIOS reverted control during the test.
+On some boards a correctly installed driver still loses to the BIOS. [Test PWM Control](fan-tests.md#test-pwm-control) catches exactly this: it reports when the BIOS took control back during the test.
 
 ## Why only one tool should control a header at a time
 
 `pwmN` and `pwmN_enable` are single values, and the **last writer wins**. If two programs both drive the same header — say Ventulus and a leftover `fancontrol` service — they overwrite each other every second and the fan oscillates.
 
-**What this means:** pick one fan controller per header. Before letting Ventulus manage your fans, stop other fan software (fancontrol, CoolerControl, fan2go, and GPU tools like LACT / CoreCtrl for GPU fans). The [Setup Checklist](setup-checklist.md#step-5--stop-competing-fan-control-software) lists the usual suspects and how to disable them.
+So pick one fan controller per header. Before letting Ventulus manage your fans, stop other fan software (fancontrol, CoolerControl, fan2go, and GPU tools like LACT / CoreCtrl for GPU fans). The [Setup Checklist](setup-checklist.md#step-5--stop-competing-fan-control-software) lists the usual suspects and how to disable them.
 
 ## Why DKMS, Secure Boot, kernel headers, and boot parameters can matter
 
@@ -82,7 +76,7 @@ These come up only on some systems, and the [Driver Setup](driver-setup.md) page
 - **Secure Boot**, when enabled, refuses to load unsigned out-of-tree modules — the driver builds but is rejected at load time. You either disable Secure Boot or sign the module.
 - **Boot parameters** (the kernel command line) are needed in one specific case: AMD **GPU** fan control on RDNA3+ cards needs `amdgpu.ppfeaturemask=0xffffffff`. Motherboard fan control needs no boot parameter.
 
-**What this means:** none of these are required for most boards. When one *is* required, the **System State** page says so, and Driver Setup has the exact steps — including how to undo them.
+Most boards need none of these. When one *is* needed, the **System State** page says so, and Driver Setup has the steps, including how to undo them.
 
 ## How Ventulus removes the guesswork
 
@@ -95,13 +89,74 @@ Four GUI features turn the concepts above into concrete answers:
 - **Test Control**, on each header's card on the **Hardware** page — writes a known value to that header, waits a few seconds, and reports what actually happened: control works, the BIOS reverted it, or the value was ignored. This is how you confirm a header is genuinely controllable instead of guessing.
 - **Rescan Hardware**, in the footer — re-checks the hardware after you load a driver or change a BIOS setting.
 
-[Hardware Troubleshooting](hardware-troubleshooting.md) explains how to read each part of these reports.
+[System Health](diagnostics.md) explains each part of these pages, and [Fan Tests and Reports](fan-tests.md) each test.
+
+## What keeps your machine safe
+
+The daemon looks after cooling safety by itself, whether or not the app is open and
+whatever your profile asks for. None of it can be turned off; the only setting is the
+coolant limit. Every forced speed is a **minimum over your profile**: a fan your curve
+already runs faster keeps its speed, so these rules can raise a fan but never lower one.
+
+- **CPU emergency.** If the hottest CPU sensor reaches the emergency limit, every
+  OpenFan channel and every writable motherboard fan header goes to 100 %, including
+  fans no profile controls. The limit is at least 105 °C. Where the kernel reports the
+  CPU's own design ceiling, the daemon raises the limit to that ceiling plus 5 °C,
+  capped at 115 °C, because a modern CPU is *meant* to sit at its ceiling under load.
+  **System State** shows the limit this machine uses. The emergency holds until a
+  *current* CPU reading is 80 °C or below; a sensor that stops updating or disappears
+  keeps it on. One reading at the limit is enough to start it, and the daemon never
+  decides afterwards that the reading was wrong, so a faulty sensor stuck high keeps
+  the fans at 100 % (see
+  [Hardware Troubleshooting](hardware-troubleshooting.md#fans-run-at-full-speed-regardless-of-profile)).
+- **Coolant emergency.** If a coolant sensor the daemon recognises (an AIO or
+  custom-loop coolant temperature) reaches the coolant limit, the same happens until a
+  current coolant reading is 5 °C below the limit. The limit is 60 °C unless you change
+  it in **Settings** (40–70 °C). A machine with no coolant sensor is unaffected, and a
+  sensor you only *treat as coolant* in the app does not arm it.
+- **Missing CPU sensor.** If there has been no current CPU reading for 5 seconds and no
+  emergency is under way, the fans your active profile controls are held at 40 % or
+  more. Fans no profile controls are left to the motherboard's own curve, which reads
+  its own sensor. If the last reading before the sensor went quiet was 80 °C or more,
+  your curves simply keep running on it.
+- **Frozen sensors.** Any other sensor that drives a curve and stops updating stops
+  driving it: the fans it controls hold their speed rather than follow a temperature
+  that is no longer real. They are never dropped.
+- **Pumps.** No curve, override or test drives a pump below 30 %, or 70 % on a
+  motherboard header the kernel reports in DC (voltage) mode, and fan identification
+  shifts a pump's speed instead of stopping it. A CPU fan in a profile is held at 30 %
+  or more too. The daemon knows a header drives a pump from its label, from the role
+  you give it, or from the active profile naming it a pump; on a board that publishes
+  no fan labels, give it the role yourself (**Set role… ▸ Pump** on the **Hardware**
+  page). A pump in your profile that has been spinning and then reads 0 RPM for 10
+  seconds is driven to full speed for 30 seconds to restart it, and stays at full
+  speed if it still does not turn.
+- **A CPU at its ceiling.** A modern CPU slows itself down at its own ceiling, which is
+  below the emergency limit, so a stopped pump usually shows up as a hot, slow CPU
+  rather than as an emergency. If the CPU sits at its ceiling for a minute while no fan
+  or pump runs at 50 % or more, you get a warning. It forces nothing.
+- **GPU fans are left to the GPU.** There is no GPU emergency: AMD's firmware protects
+  the card by slowing it at its own temperature limit. A GPU fan in your profile keeps
+  following its curve throughout.
+- **When the daemon stops,** it gives every motherboard header back to exactly what it
+  was doing before (usually the BIOS's own fan control), and every GPU fan it drove
+  back to the card. The hand-back runs again after the daemon has exited, even after a
+  crash. OpenFan fans and headers with no automatic mode have nothing to go back to, so
+  a clean stop leaves them at their last speed or the **exit minimum** (50 % unless you
+  change it in **Settings**), whichever is higher; after a crash they keep their last
+  speed until the daemon is back.
+
+Whenever one of these is acting, the footer's thermal chip, a banner on the Dashboard
+and an alert say so. The daemon's
+[User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md#safety)
+has the full operator-level detail.
 
 ## Where to go next
 
 - [Setup Checklist](setup-checklist.md) — the ordered path that puts all of this into practice
 - [Driver Setup](driver-setup.md) — copy-paste driver install, Secure Boot, BIOS, and rollback
-- [Hardware Troubleshooting](hardware-troubleshooting.md) — reading the System State page and the fan-test results
+- [Hardware Troubleshooting](hardware-troubleshooting.md) — from a symptom to its fix
+- [Fan Tests and Reports](fan-tests.md) — every fan test and what its results mean
 - [Hardware Compatibility](../docs/19_Hardware_Compatibility.md) — full chip and driver matrix
 - [Sensor Interpretation Guide](../docs/20_Sensor_Interpretation_Guide.md) — what each temperature sensor means
 - [AMD](../docs/21_AMD_Motherboard_Fan_Control_Guide.md) / [Intel](../docs/23_Intel_Motherboard_Fan_Control_Guide.md) fan-control guides — vendor-by-vendor depth

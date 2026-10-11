@@ -39,7 +39,7 @@ Launch the GUI and check:
 
 ## Step 3 — Read the health report
 
-Open the **System State** page (the daemon's hardware snapshot is fetched in the background at startup; **Rescan Hardware**, in the global footer, re-runs it) and read the **System Health Overview** — how many PWM headers were found and how many are writable, and a card for each issue. [What each section of the page means](hardware-troubleshooting.md#what-the-system-state-page-shows). The **Hardware** page's **Hardware Readiness Checklist** gives the daemon's own go/no-go answer beside it.
+Open the **System State** page (the daemon's hardware snapshot is fetched in the background at startup; **Rescan Hardware**, in the global footer, re-runs it) and read the **System Health Overview** — how many PWM headers were found and how many are writable, and a card for each issue. [What each section of the page means](diagnostics.md#system-state-page). The **Hardware** page's **Hardware Readiness Checklist** gives the daemon's own go/no-go answer beside it.
 
 ## Step 4 — Branch: what your hardware needs
 
@@ -75,15 +75,15 @@ Also worth knowing:
 
 ## Step 6 — Verify control end-to-end
 
-1. On the **Hardware** page, under **Cooling Hardware**, press **Test Control** on a **non-critical chassis fan** header (not CPU or pump). *"PWM control is working correctly"* is the finish line; every other verdict comes with a tailored next step — see [the result table](hardware-troubleshooting.md#test-pwm-control). To test several headers in one run, use **PWM Test Report…** under **Hardware Diagnostics** on the same page.
-2. If you have an AMD GPU with a write path, run **Test GPU Fan Control** from **Advanced actions** on the **System State** page — see [its result table](hardware-troubleshooting.md#test-gpu-fan-control).
+1. On the **Hardware** page, under **Cooling Hardware**, press **Test Control** on a **non-critical chassis fan** header (not CPU or pump). *"PWM control is working correctly"* is the finish line; every other verdict comes with a tailored next step — see [the result table](fan-tests.md#test-pwm-control). To test several headers in one run, use **PWM Test Report…** under **Hardware Diagnostics** on the same page.
+2. If you have an AMD GPU with a write path, run **Test GPU Fan Control** from **Advanced actions** on the **System State** page — see [its result table](fan-tests.md#test-gpu-fan-control).
 
 ## Step 7 — Create your first profile
 
 1. Run the [Fan Wizard](fan-wizard.md) to identify and label each fan — it changes one fan at a time so you can match headers to physical fans. Ordinary fans are stopped briefly; a pump has its speed shifted instead, never stopped.
 2. On [Controls](controls.md), create fan roles and assign curves. Concepts: [Profiles and Curves](profiles-and-curves.md).
 3. Click **Save** on the Controls page. Nothing you edit reaches the daemon until you do.
-4. Pick the profile in the selector (page header or sidebar) and click **Apply**. The daemon then runs it — and keeps running it after you close the GUI, and after a reboot — until you apply another or press **Stop** in the sidebar. Until you apply a profile, no curve controls any fan.
+4. Pick the profile in the selector (page header or sidebar) and click **Apply**. The daemon then runs it — and keeps running it after you close the GUI, and after a reboot — until you apply another or press **Stop** in the sidebar ([why](profiles-and-curves.md#the-daemon-drives-the-fans)). Until you apply a profile, no curve controls any fan.
 
 ## When to redo what
 
