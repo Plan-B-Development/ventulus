@@ -5,8 +5,8 @@
 ## Purpose
 This file defines how the GUI should consume the current daemon/API safely and predictably.
 
-**The GUI is no longer the only client (DEC-352).** `ventulus-tray`, shipped
-in the daemon package from daemon v2.44.0, is a second first-class client. It
+**The GUI is not the only client (DEC-352).** `ventulus-tray`, shipped
+in the daemon package, is a second first-class client. It
 uses a strict subset of this contract — `GET /status`, `GET /profiles`,
 `POST /profile/activate`, `POST /profile/deactivate` — and nothing else: no
 lease, no PWM write, no curve evaluation, no hardware read. **No endpoint,
@@ -125,7 +125,7 @@ Use this at startup and on explicit refresh to determine:
   It and the `pwm_percent_min`/`max` pair are deliberately unmodelled GUI-side (the daemon
   clamps authoritatively, DEC-163; the GUI's one reader of the stop timeout was removed by
   DEC-426) and are recorded as such in `tests/fixtures/wire_fields.json`.
-  `limits.diagnostic_max_temp_c` (float, daemon ≥ 2.55.0, DEC-411) is the temperature above
+  `limits.diagnostic_max_temp_c` (float, DEC-411) is the temperature above
   which any sensor makes a diagnostic refuse or stop — verify, characterisation, control-path
   discovery, the stall probe and OpenFan calibration all gate on it. **Interpolate it; never
   restate it.** A daemon that omits it said nothing, and a client must word the rule without a
@@ -142,23 +142,15 @@ Notable fields:
 - `devices.openfan.channels` is **10 when a controller is attached and `0` when
   none is** (OpenFan v1 hardware has 10 channels, and that is the only hardware
   the daemon speaks to — so the count varies with *presence*, never with the
-  device). `rpm_support` behaves the same way. **Changed in daemon 2.47.4
-  (`OFN-k`):** both were hardcoded `10`/`true` before it, so a machine with no
-  controller advertised ten RPM-capable channels of hardware that did not exist.
-  A client that reads `present` first — which it must — sees no difference
-  between the two daemons; one that does not is no longer lied to by the newer
-  one. Do not derive presence from `channels != 0`: read `present`.
+  device). `rpm_support` behaves the same way (`OFN-k`). Do not derive presence
+  from `channels != 0`: read `present`.
 - `devices.hwmon.write_support` and `features.hwmon_write_supported` mean
   **"at least one discovered `pwmN` is writable"**, which is not the same as
-  `devices.hwmon.present`. **Changed in daemon 2.49.0 (`OFN-ak`, DEC-376):**
-  before it both were the *same expression* as `present`, so a board whose every
-  `pwmN` is read-only (permissions, a driver exposing monitoring only, a BIOS
-  holding the headers) was told the daemon could write it — and any client
-  branch of the form `present and not write_support` was structurally
-  unreachable. The GUI's "headers detected but all are read-only" banner is
-  exactly that branch and could not fire before 2.49.0. `present` is unchanged
-  and still means "headers were discovered": a read-only header is a real header
-  and must still be listed. The same predicate gates the profile engine's hwmon
+  `devices.hwmon.present` (`OFN-ak`, DEC-376): on a board whose every `pwmN` is
+  read-only (permissions, a driver exposing monitoring only, a BIOS holding the
+  headers) `present` is `true` and `write_support` is `false`. The GUI's "headers
+  detected but all are read-only" banner is that branch. `present` means "headers
+  were discovered": a read-only header is a real header and must still be listed. The same predicate gates the profile engine's hwmon
   backend, so on such a board an `hwmon:` control is also reported as
   `backend_unavailable` (`OFN-ah`, under `skipped_controls` below). The two answers
   agree with one exception: if the hwmon controller was locked when the engine started,
@@ -171,18 +163,16 @@ Notable fields:
   this fan", and is true exactly for `"pmfw_curve"` (DEC-445, `DC-ch`).** A
   `"hwmon_pwm"` card is verify-only: `POST /gpu/{id}/fan/verify` and `/fan/reset`
   write its legacy `pwm1`, and no daemon engine has ever driven it, so a profile
-  control bound only to it is listed as `backend_unavailable`. Daemons before
-  DEC-445 report `true` for it, so a client must key "can a profile drive it" on the
-  method as well as the flag (the GUI's `AmdGpuCapability.profile_writable`); no
-  new field was added. **Narrowed by DEC-430 (daemon 2.56.2):** an
+  control bound only to it is listed as `backend_unavailable`. The GUI keys "can a
+  profile drive it" on the method as well as the flag
+  (`AmdGpuCapability.profile_writable`). **DEC-430:** an
   RDNA3/RDNA4 card the daemon knows — every one libdrm 2.4.134's `amdgpu.ids`
   lists — never reports `"hwmon_pwm"`, whatever files exist (an unlisted future
   id is judged by file presence, `DC-ci`). An RX 7000
   exposes `pwm1_enable` at 0644 but a write can silently no-op in the kernel, so
   without its `fan_curve` it reports `"read_only"` / `false`, and
   `POST /gpu/{id}/fan/reset` and `/fan/verify` answer `400 feature_unavailable`.
-  Older daemons report `"hwmon_pwm"` / `true` for that card. Same enum values,
-  so no client change is needed. `model_name` comes from libdrm's `amdgpu.ids` by
+  `model_name` comes from libdrm's `amdgpu.ids` by
   device **and revision**, and is absent for a card that table does not list;
   `display_label` compacts only an `"RX "` name (`"9070XT"`) and keeps any other
   as written (`"Pro W7900"`), falling back to `"AMD D-GPU"`.
@@ -204,36 +194,28 @@ Notable fields:
   no profile can drive). `kernel_warnings` is never set on an entry — the advisories
   stay on `devices.amd_gpu`, where they already cover every card. Order is the
   daemon's detection order; do not rely on it.
-- `devices.amd_gpu.kernel_warnings` (DEC-098, daemon ≥ 1.6.1) is a list of
+- `devices.amd_gpu.kernel_warnings` (DEC-098) is a list of
   `{id, severity, message}` entries describing kernel-version regressions
   applicable to **any AMD GPU on the machine**, not only the card `devices.amd_gpu`
-  describes (DEC-449, daemon ≥ 3.0.0 — older daemons evaluated the primary card
-  alone, so an RDNA3 iGPU behind an RDNA2 discrete card got no advisory). Each id
+  describes (DEC-449). Each id
   appears once however many cards it applies to, and its `message` names them — model
-  and PCI address, e.g. "the AMD Radeon 780M (0000:c5:00.0)". No field changed. **Since DEC-422** (daemon 2.56.1) the only id raised is `rdna_mes_hang_drm_amd_4765` (drm/amd #4765:
-  RDNA3/RDNA3.5/RDNA4 on 6.17.9–6.17.13 and 6.18.0–6.18.6, `critical`). Daemon
-  v2.56.0 and older raise `rdna_hang_kernel_6_18_6_19` and
-  `smu_mismatch_navi48_r9700` instead. Both were retired because their advice was
-  wrong. The GUI keeps guidance for them, and that guidance CORRECTS the older
-  daemon's own `message`, which the popup still shows as its main text. That
-  message, for `rdna_hang_kernel_6_18_6_19`, still says to pin 6.15–6.17, and the
-  details say to ignore that part. Ids are opaque, and a client must render an id it does not
-  know with the daemon's `message` (the GUI does). Field is omitted entirely when empty so
-  pre-1.6.1 daemons (which don't set it) yield an empty list on the GUI
-  side without parser changes. The GUI surfaces `high` and `critical`
+  and PCI address, e.g. "the AMD Radeon 780M (0000:c5:00.0)". The only id raised is
+  `rdna_mes_hang_drm_amd_4765` (DEC-422; drm/amd #4765:
+  RDNA3/RDNA3.5/RDNA4 on 6.17.9–6.17.13 and 6.18.0–6.18.6, `critical`). Ids are opaque,
+  and a client must render an id it does not know with the daemon's `message` (the GUI
+  does). Field is omitted entirely when empty; the GUI defaults it to an empty list.
+  The GUI surfaces `high` and `critical`
   entries as a popup gated by `app_settings.acknowledged_kernel_warnings`
-  ("Don't show again") and, since G159, shown at most once per id per GUI
-  session — capabilities are re-fetched every 300 s and on reconnect, and
-  each fetch used to re-open it.
-- `devices.intel_gpu` (DEC-121, daemon ≥ 1.12.0) describes an Intel **discrete**
+  ("Don't show again"), shown at most once per id per GUI
+  session (G159) — capabilities are re-fetched every 300 s and on reconnect.
+- `devices.intel_gpu` (DEC-121) describes an Intel **discrete**
   GPU (Arc — `xe`/`i915`). Read-only monitoring: fields are `present`,
   `model_name`, `display_label`, `pci_id`/`pci_bdf`, `pci_device_id`, `driver`
   (`"xe"`/`"i915"`), `fan_control_method` (always `"read_only"` or `"none"` —
   there is no userspace fan write path), `fan_rpm_available`, and `is_discrete`.
   There is deliberately **no** `fan_write_supported`/PMFW/overdrive/zero-RPM/
   kernel-warning field — Intel GPU fans are firmware-managed and never writable.
-  Omitted/`present:false` on daemons that predate the field (parser-tolerant).
-- `devices.nvidia_gpu` (DEC-204, daemon ≥ 2.8.0) describes an NVIDIA **discrete**
+- `devices.nvidia_gpu` (DEC-204) describes an NVIDIA **discrete**
   GPU (the open `nouveau` driver or the opt-in proprietary NVML backend).
   Read-only monitoring: fields are `present`, `model_name`, `display_label`,
   `pci_id`/`pci_bdf`, `driver` (the **kernel module** — `"nouveau"` or
@@ -242,50 +224,36 @@ Notable fields:
   `is_discrete`. There is deliberately **no** `fan_write_supported`/`pci_device_id`
   field — NVIDIA fans are never writable and the daemon has no NVIDIA
   device-id → model table. `model_name`/`driver_version` are NVML-only (the
-  nouveau leg yields the generic `"NVIDIA D-GPU"` label). Omitted/`present:false`
-  on daemons that predate the field (parser-tolerant).
-- `devices.aio_hwmon` (DEC-156, daemon ≥ 1.18.0) describes hwmon-attached liquid
+  nouveau leg yields the generic `"NVIDIA D-GPU"` label).
+- `devices.aio_hwmon` (DEC-156) describes hwmon-attached liquid
   cooling (AIO). Dynamic object: `present` (a liquid cooler or coolant sensor is
   detected), `status` (`"supported"` = a writable AIO pump/fan header exists;
   `"monitor_only"` = detected but nothing writable, e.g. NZXT Kraken2 or coolant
   sensing only — never offer control; `"unsupported"` = nothing detected),
-  `pump_writable`, and `coolant_available`. Additive superset of the legacy
-  `{present, status}` shape — pre-1.18.0 daemons send only the first two and the
-  GUI defaults the rest to `false`. `devices.aio_usb` stays
+  `pump_writable`, and `coolant_available`. `devices.aio_usb` stays
   `{present:false, status:"unsupported"}` permanently: USB-only coolers
   (liquidctl/USB-HID) are out of scope (the daemon never opens USB-HID).
 
-The top-level **`control` block** (daemon ≥ 1.19.0, DEC-159/160) advertises which
+The top-level **`control` block** (DEC-159/160) advertises which
 control responsibilities the daemon can own. Each flag defaults to the
-pre-migration/safe value when absent — a pre-1.19 daemon sends no block, so the
-GUI treats every flag as false / old behaviour (AIP-180):
+safe value when absent: the GUI treats a missing flag as false (AIP-180):
 - `profile_storage` (bool) — daemon exposes the `/profiles` CRUD + validate
-  surface; `true` since **1.19.0** (DEC-160). The GUI gates its one-time
-  profile-import offer on this flag.
+  surface (DEC-160). The GUI gates its one-time profile-import offer on this flag.
 - `curve_evaluation` (bool) — daemon evaluates fan curves headlessly; always
-  `true` (the profile engine has done this since DEC-096).
-- `manual_override` (bool) — daemon exposes the manual-override API (DEC-163);
-  `false` in 1.19–1.20, **`true` since 1.21.0**. Gates the GUI's Manual-card
-  override UI.
-- `fan_identify` (bool) — daemon exposes the fan-identify API (DEC-166);
-  `false` in 1.19–1.20, **`true` since 1.21.0**. Gates the Fan Wizard's
-  daemon-mediated identify.
+  `true` (DEC-096).
+- `manual_override` (bool) — daemon exposes the manual-override API (DEC-163).
+  Gates the GUI's Manual-card override UI.
+- `fan_identify` (bool) — daemon exposes the fan-identify API (DEC-166).
+  Gates the Fan Wizard's daemon-mediated identify.
 - `header_roles` (bool, DEC-311) — the daemon classifies PWM headers by role, refuses to *stop*
   a `role: "pump"` header during identify (perturbing it instead), keeps `/hwmon/{id}/verify`
-  above the pump floor, and accepts `POST /config/header-role`. **`true` since 2.28.0**; absent
-  → `false`.
+  above the pump floor, and accepts `POST /config/header-role`. Absent → `false`.
 
-  Gating on this is a **truthfulness** requirement, not merely a way to hide a button. A
-  pre-2.28.0 daemon drives every identified fan to 0 — pumps included — so a GUI that says "the
-  pump will only change speed" is lying against one, *even though the header may still report
-  `role: "pump"`* (an older daemon simply omits the field, but a mixed-version client could hold
-  a cached one). Keep the "the fan will stop" wording whenever this is `false`.
+  Gating on this is a **truthfulness** requirement, not merely a way to hide a button: keep
+  the "the fan will stop" wording whenever this is `false`.
 - `cooling_devices` (bool, DEC-316) — the daemon exposes the cooling-device topology surface:
   `GET /inventory/cooling-devices`, `POST /config/cooling-device`, `DELETE /config/cooling-device/{id}`.
-  **`true` since 2.31.0**; absent → `false`.
-
-  Gate on this rather than probing: an older daemon `404`s the POST, which is the same *status*
-  a `DELETE` returns for an unknown device id.
+  Absent → `false`. Gate on this rather than probing.
 
   It gates the **endpoints only**. The additive `PwmHeaderEntry` fields that shipped alongside
   (`effective_min_pwm_pct`, `stop_permitted`, `cooling_device_id`, and the capability-audit
@@ -294,57 +262,40 @@ GUI treats every flag as false / old behaviour (AIP-180):
 - `validation_sessions` (bool, DEC-317) — the daemon exposes the validation-session surface:
   `POST`/`GET`/`DELETE /validation/session`, `/validation/session/stop`,
   `/validation/session/event`, `/validation/session/measurement`, `GET /validation/sessions`
-  and `GET /validation/sessions/{id}`. **`true` since 2.32.0**; absent → `false`.
-
-  Gate on this rather than probing, for the same reason: an older daemon `404`s these routes
-  from the route fallback, which is indistinguishable from a genuine "no such session".
+  and `GET /validation/sessions/{id}`. Absent → `false`. Gate on this rather than probing:
+  the route fallback's `404` is indistinguishable from a genuine "no such session".
 - `thermal_observation` (bool, DEC-335) — `POST /validation/session` accepts
-  `kind: "thermal_observation"`. **`true` since 2.41.0**; absent → `false`. **Required, not a
-  convenience:** an older daemon does not reject an unknown `kind`, it falls back to
-  `"validation"` and returns `200`, so an ungated client would label an ordinary session as a
-  thermal observation. It does **not** gate the power and steady-state fields, which every
-  session from 2.41.0 carries whatever its kind (§ Session response — AIO Phase 8 Batch 3a
-  additions, below).
+  `kind: "thermal_observation"`. Absent → `false`. It does **not** gate the power and
+  steady-state fields, which every session carries whatever its kind (§ Session response —
+  AIO Phase 8 Batch 3a additions, below).
 - `validation_auto_stop` (bool, `P8-az`) — the daemon accepts
   `stop_when_diagnostics_complete` on `POST /validation/session` and echoes it back on the
   session document, so a session can finalise itself when its orchestrated diagnostics
-  finish. **`true` since 2.43.0**; absent → `false`.
-
-  Gate the OFFER on this, and do not fall back to a probe. An older daemon has the session
-  routes and `serde` **drops an unknown request field rather than rejecting it**, so a
-  request carrying the flag returns `200` and the session then records to the two-hour
-  sample cap. Neither the status code nor the response body distinguishes the two — the echo
-  is simply absent, which reads as `false` on a client that has the field. Same shape as
-  `thermal_observation`: the flag is the only thing that separates the two *before* the
-  request is made.
+  finish. Absent → `false`. Gate the offer on this, and do not fall back to a probe:
+  `serde` **drops an unknown request field rather than rejecting it**, so a probe cannot
+  tell.
 
 - `exit_floor` (bool, DEC-388) — the daemon applies an exit floor on a clean stop, accepts
   `POST /config/exit-floor` and reports `shutdown.exit_floor_pct` on `GET /config`.
-  **`true` since 2.50.0**; absent → `false`. **Gate the Settings control on this, and treat the key's absence the same way**:
-  an older daemon `404`s the write and leaves its OpenFan channels at their last duty on
-  stop, whatever a control shows.
-- `duty_reconciliation` (bool, DEC-406, daemon ≥ 2.53.0) — the engine reads back every
+  Absent → `false`. **Gate the Settings control on this, and treat the key's absence the same way.**
+- `duty_reconciliation` (bool, DEC-406) — the engine reads back every
   hwmon write it would coalesce and rewrites a duty that did not hold, and every hwmon
   `/fans` / `/poll` entry carries `duty_corrections` and `duty_not_holding`. Absent →
   `false`. **Gate any claim that the daemon corrects drift on this flag, never on the
-  fields' presence** (one flag, one gating shape): an older daemon omits both and leaves a
-  second writer's duty standing for as long as the curve output is steady, so a client
-  that inferred correction would be claiming a protection that daemon does not give.
-  A client can still *detect* drift on any daemon by comparing `pwm_readback_pct` with
+  fields' presence** (one flag, one gating shape).
+  A client can still *detect* drift by comparing `pwm_readback_pct` with
   `pwm_commanded_pct`.
-  **GUI use (DEC-408, GUI ≥ 2.82.0 — merged as 2.81.0, which was never published):**
+  **GUI use (DEC-408):**
   registered in `daemon_features` as `duty_reconciliation`. The System State page raises a condition card per header while
   `duty_not_holding` is `true` (one per episode, fingerprinted by `duty_corrections` at the
   give-up) and shows a header's `duty_corrections` as a reading in the Interference
   Monitor; the PWM Test Report reads the corrections **delta** across its run as evidence
-  of a second writer. It still runs the readback-against-command check itself on every
-  daemon, which is how it detects drift where the flag is absent.
-- `stall_probe` (bool, DEC-407, daemon ≥ 2.54.0) — the daemon exposes
+  of a second writer. It also runs the readback-against-command check itself.
+- `stall_probe` (bool, DEC-407) — the daemon exposes
   `POST /hwmon/{id}/stall-probe` plus the `GET`/`DELETE /diagnostics/stall-probe` pair and the
   `pwm_stall_probe` preflight: the opt-in stall/restart probe, the **only** diagnostic that
-  writes below 20 %. Absent → `false`. **Gate on this rather than probing**: an older daemon
-  `404`s the routes and answers the preflight token with `400 validation_error`.
-  **GUI use (DEC-408, GUI ≥ 2.82.0):** registered in `daemon_features` as `stall_probe`; the
+  writes below 20 %. Absent → `false`. **Gate on this rather than probing.**
+  **GUI use (DEC-408):** registered in `daemon_features` as `stall_probe`; the
   PWM Test Report offers the probe only where `daemon_supports("stall_probe", caps) is True`,
   and sends `acknowledge_below_floor: true` only for a header the user confirmed on its
   consent page — a gate enforced in the window and again in the report's runner.
@@ -366,16 +317,15 @@ GUI treats every flag as false / old behaviour (AIP-180):
   **GUI use (DEC-442, GUI ≥ 3.0.0):** registered in `daemon_features` as
   `canonical_chip_names`; `AppState.set_capabilities` records it, and the "a driver rebuild
   changes your ids" caution and the dual-chip warning's false-alarm paragraph render only
-  where it is not `True` — on an older daemon both remain true.
+  where it is not `True`.
 - `cooling_failure_detection` (bool, DEC-443, daemon ≥ 3.0.0) — the daemon runs the coolant
   emergency at `safety.coolant_limit_c` (settable with `POST /config/coolant-limit`), answers a
   stalled pump, floors a DC-mode pump at 70 %, raises the cooling advisory, and publishes
   `emergency_causes`, `pump_stalls[]` and `advisories[]` on `/status` and `coolant_limit_c` /
   `coolant_release_c` on `/diagnostics/hardware` — see
-  [Coolant emergency, pump stall response, cooling advisory](#coolant-emergency-pump-stall-response-cooling-advisory-dec-443-daemon--2570).
+  [Coolant emergency, pump stall response, cooling advisory](#coolant-emergency-pump-stall-response-cooling-advisory-dec-443-daemon--300).
   Absent → `false`. **Gate the Settings control on this, and treat the key's absence the same
-  way** (the `exit_floor` shape): an older daemon `404`s the write and has no coolant rung at all.
-  The `/status` fields need no gate — an older daemon omits them and a client reads that as quiet.
+  way** (the `exit_floor` shape). The `/status` fields need no gate: absent reads as quiet.
   **GUI use (DEC-443, GUI ≥ 3.0.0):** registered in `daemon_features` as
   `cooling_failure_detection`; gates the Settings ▸ Daemon Configuration "Coolant limit" row and
   the Hardware page's DC-pump note.
@@ -385,7 +335,7 @@ GUI treats every flag as false / old behaviour (AIP-180):
   share the mapping); the readiness item `pwm_control_unverified` counts against it and
   `pwm_control_failed` reports a failed one. Absent → `false`. **Gate on this, never on the
   field:** the field is absent for every header not yet verified, so its absence alone cannot
-  tell "not yet verified" from an older daemon that keeps no record.
+  tell "not yet verified" from a daemon that keeps no record.
   **GUI use (DEC-456, GUI ≥ 3.2.0):** registered in `daemon_features` as
   `pwm_verification_records`; where it is `True` the System State page derives its PWM-verified
   tri-state from the headers' records (`services/pwm_verification.py`) instead of the GUI-owned
@@ -462,16 +412,15 @@ GUI treats every flag as false / old behaviour (AIP-180):
   card's type line. The reverse skew is not detectable: a GUI older than the field (< 4.2.0)
   keeps no unknown curve fields, so saving a profile from it drops `hysteresis_c` and the curve
   returns to the 2 °C default. A GUI clamps a loaded value into 0–10, as the engine does.
-- `control_path_discovery` (bool, DEC-333, daemon ≥ 2.39.0) — the daemon exposes
+- `control_path_discovery` (bool, DEC-333) — the daemon exposes
   `POST /hwmon/{id}/discover-control-path` plus the `GET`/`DELETE /diagnostics/control-path`
   pair, and accepts `"control_path_discovery"` in a validation session's `diagnostics[]`.
-  **Gate on this rather than probing**, for the reason already stated under
-  `pwm_characterization`: an older daemon `404`s the route from the route fallback, and
-  `GET /diagnostics/control-path`'s own "no run" `404` carries the same `not_found` code, so
+  **Gate on this rather than probing**: the route fallback's `404` and
+  `GET /diagnostics/control-path`'s own "no run" `404` carry the same `not_found` code, so
   not even `error.code` tells the two apart (DEC-426, `DC-n`). It is also the
   gate on offering the session diagnostic — a session carrying an unknown token is rejected
   **whole**, so an ungated checkbox breaks validation rather than degrading it.
-- `diagnostic_preflight` (bool, DEC-333, daemon ≥ 2.39.0) — the daemon exposes
+- `diagnostic_preflight` (bool, DEC-333) — the daemon exposes
   `GET /diagnostics/preflight`. **A separate flag from `control_path_discovery` on purpose:**
   the preflight is read-only and covers the two pre-existing diagnostics as well, so a client
   may want the safety summary without offering discovery. **Unlike its neighbours here, this
@@ -483,93 +432,60 @@ GUI treats every flag as false / old behaviour (AIP-180):
   (`P8-as`).
 - `pwm_characterization` (bool, DEC-313) — the daemon exposes `POST /hwmon/{id}/characterize`
   plus the `GET`/`DELETE /diagnostics/characterization` pair: the deeper PWM/RPM response sweep
-  that sits **alongside** the quick verify. **`true` since 2.29.0**; absent → `false`.
-
-  Gate on this rather than probing. An older daemon returns `404` for the POST — the same
-  **status** this route returns for an unknown header id. The two are not literally identical
-  (the route fallback sends `code: "not_found"`, the handler's unknown-header branch sends
-  `code: "validation_error"`), but keying feature detection on which error code came back is
-  precisely the undocumented internal coupling this capability exists to replace, and a probe
-  needs a valid header id to aim at before it can learn anything at all.
+  that sits **alongside** the quick verify. Absent → `false`. Gate on this rather than
+  probing: keying feature detection on which `404` error code came back is the undocumented
+  coupling this capability exists to replace.
 - `pwm_behaviour_characterization` (bool, DEC-334) — `POST /hwmon/{id}/characterize` accepts
   `bidirectional` and `stability_seconds`, the run publishes the behaviour derivations
   (hysteresis, stability, plateaus, provenance), and a validation session accepts the
-  `"pwm_behaviour_characterization"` diagnostic. **`true` since 2.40.0**; absent → `false`.
-  **Gate on this, never on `pwm_characterization`**: an older daemon has that flag and ignores
-  the two request fields rather than rejecting them, so an ungated client gets a plain ascending
+  `"pwm_behaviour_characterization"` diagnostic. Absent → `false`.
+  **Gate on this, never on `pwm_characterization`**: a daemon without it ignores the two
+  request fields rather than rejecting them, so an ungated client gets a plain ascending
   sweep and renders empty hysteresis and stability panels.
 - `autonomous_control` (bool) — the daemon engine is the sole authoritative
-  fan writer (the `gui_active` defer was deleted at the 2.0.0 cutover, DEC-165),
-  so it writes every tick a profile is active. **The single safety-critical
-  flag**: the loop-less GUI refuses to drive control unless this is `true`, and
-  a pre-2.0 daemon omits it (so the GUI defaults it to `false` and stays in the
-  capability gate rather than leaving fans uncontrolled). Drives the startup
-  control gate. `true` since **2.0.0**.
+  fan writer (DEC-165), so it writes every tick a profile is active. **The single
+  safety-critical flag**: the loop-less GUI refuses to drive control unless this is
+  `true`; a daemon that omits it gets a persistent upgrade banner and no control,
+  rather than fans left uncontrolled. Drives the startup control gate.
 - `min_supported_gui` (string) — the minimum **GUI** version this daemon supports.
-  Empty until the 2.0.0 cutover sets it. **`2.23.0` since daemon 2.36.0**; `2.0.0`
-  before that.
 
-  **This field is the single source of the pairing floor (`WIRE-ac`).** Until
-  2.36.0 three numbers claimed to be it: the handler said `2.0.0`, every release
-  note from 2.23.0 onward said "Pairs with `ventulus` >= v2.23.0", and the
-  2.16.0 entry said `>= v2.38.0` (a forward reference to the GUI that consumes
-  `GET /config`, not a floor). The daemon now publishes the number and the prose
-  quotes it; do not restate it anywhere else.
+  **This field is the single source of the pairing floor (`WIRE-ac`).** The daemon
+  publishes the number and the prose quotes it; do not restate it anywhere else.
 
   Note the direction: this is a floor the *daemon* places on the *GUI*, the
   opposite of the `autonomous_control` gate, which is about the daemon being too
-  old. It does **not** drive that gate — an earlier revision of this document said
-  it did, and the GUI's one consumer had the direction backwards too, rendering it
-  as "this GUI needs ventulusd ≥ X". Both read correctly only because the
-  two numbers happened to be `2.0.0` (DEC-257).
+  old. It does **not** drive that gate (DEC-257).
 
-  Since GUI **2.41.0** it is compared against the GUI's own version and drives a
+  The GUI compares it against its own version, and it drives a
   persistent but **non-blocking** warning banner. Non-blocking by design: the
   daemon is the sole PWM writer and is controlling fans correctly whatever the
   GUI's age, so refusing to run would strand the user for no safety gain. An empty
   value means the daemon declares no floor and is treated as satisfied — not as
   version zero.
 
-- `openfan_rescan` (bool, daemon ≥ 2.18.0) — the daemon exposes
-  `POST /fans/openfan/rescan` (DEC-265). Omitted by older daemons, so a client
-  defaults it to `false` (AIP-180) and skips the call rather than issuing one
-  that can only `404`.
+- `openfan_rescan` (bool) — the daemon exposes
+  `POST /fans/openfan/rescan` (DEC-265). Absent → `false` (AIP-180): a client
+  skips the call rather than issuing one that can only `404`.
 
-- `profile_search_dir_remove` (bool, daemon ≥ 2.23.0) — `POST /config/profile-search-dirs`
-  accepts a `remove` array (DEC-285). Omitted by older daemons, so a client
-  defaults it to `false` and hides the affordance.
+- `profile_search_dir_remove` (bool) — `POST /config/profile-search-dirs`
+  accepts a `remove` array (DEC-285). Absent → `false`: a client hides the
+  affordance. **Gate on the flag; do not probe**: a daemon without it parses only
+  `add` and silently ignores the rest, so a probe would read that partial success
+  as a whole one.
 
-  Load-bearing in a way `openfan_rescan`'s flag is not, and the difference is
-  worth stating: an older daemon does **not** `404` a `remove`. It parses only
-  `add` and silently ignores the rest, so a client that probed instead of
-  checking would read that partial success as a whole one and tell the user a
-  directory had been pruned when it had not. This is the case where "try it and
-  see" is wrong.
+- **Five route flags** (`WIRE-k`):
 
-- **Five flags for features that shipped before they had one** (`WIRE-k`, all
-  `true` since daemon **2.36.0**; omitted and therefore `false` before that):
+  | Flag | Route it advertises |
+  | --- | --- |
+  | `gpu_fan_verify` | `POST /gpu/{id}/fan/verify` (DEC-120) |
+  | `hardware_readiness` | `GET /inventory/hardware-readiness` (DEC-207) |
+  | `superio_port_probe` | `POST /inventory/superio/probe` (DEC-203) |
+  | `preferred_sensors` | `GET /inventory/hwmon` (DEC-200) |
+  | `daemon_config_report` | `GET /config` (DEC-243) |
 
-  | Flag | Route it advertises | Feature since |
-  | --- | --- | --- |
-  | `gpu_fan_verify` | `POST /gpu/{id}/fan/verify` | 1.11.0 (DEC-120) |
-  | `hardware_readiness` | `GET /inventory/hardware-readiness` | 2.11.0 (DEC-207) |
-  | `superio_port_probe` | `POST /inventory/superio/probe` | 2.7.0 (DEC-203) |
-  | `preferred_sensors` | `GET /inventory/hwmon` | 2.6.0 (DEC-200) |
-  | `daemon_config_report` | `GET /config` | 2.16.0 (DEC-243) |
-
-  Each existed for between one and five minor versions with no key, so a client
-  detected it by comparing the daemon's **version string** or by calling the route
-  and reading a `404` as "unsupported". Neither is a contract, for the reason
-  already stated under `pwm_characterization`: the route fallback's `404` is
-  indistinguishable from a handler's own `404` for an unknown id.
-
-  **An absent flag is NOT a denial, and a client must not treat it as one.** These
-  keys exist only from daemon 2.36.0, while the features behind them shipped
-  between daemon 1.11.0 and 2.16.0 — so collapsing "absent" into `false` would
-  stand each feature down on every daemon from its "Feature since" version up to
-  2.35.x. The
-  reference GUI models them as tri-state (`bool | None`) and keeps its existing
-  fallback for `None`.
+  Gate on these rather than comparing the daemon's version string or reading a
+  `404` as "unsupported". The reference GUI models them as tri-state
+  (`bool | None`) and keeps a fallback for `None`.
 
   `superio_port_probe` advertises the **route**, not that a probe will act: the
   active probe is separately gated by daemon configuration and by `CAP_SYS_RAWIO`,
@@ -603,10 +519,8 @@ Endpoints with known long upper bounds:
 - `openfan_rescan` — the daemon opens and identity-probes candidate
   `ttyACM*`/`ttyUSB*` at `serial.timeout_ms` (500 ms default, up to 1000 ms)
   until one identifies, so the sweep scales with how many USB-serial devices are
-  attached. **On daemon ≥ 2.23.5 each candidate is opened once, not twice**
-  (DEC-291 removed a redundant identifying probe that ran while merely
-  *enumerating* the ports), and a rescan refused by the cooldown opens nothing at
-  all; client timeout is **25 s** (`OPENFAN_RESCAN_TIMEOUT_S`). Aborting
+  attached. Each candidate is opened once (DEC-291), and a rescan refused by the
+  cooldown opens nothing at all; client timeout is **25 s** (`OPENFAN_RESCAN_TIMEOUT_S`). Aborting
   early is merely slow, not lossy — the daemon performs the adoption in a
   detached task, so a client that gives up does not discard a controller that was
   found (DEC-266).
@@ -623,8 +537,7 @@ Endpoints with known long upper bounds:
 
 ### Daemon endpoints the GUI does not call
 
-As of 2.0.0 the GUI is not a writer, so it does not call the daemon's runtime
-PWM-write endpoints — the daemon's own engine drives fans. A few endpoints
+The GUI is not a writer; the daemon's own engine drives fans. A few endpoints
 remain on the daemon surface but are unused (or only curl-exercised) by the GUI:
 
 - `POST /fans/openfan/{channel}/calibrate` — the **deprecated** synchronous
@@ -636,15 +549,14 @@ remain on the daemon surface but are unused (or only curl-exercised) by the GUI:
   into `GET /inventory/hardware-readiness`, which is what the GUI calls (DEC-257).
   Documented below for the daemon surface they still are.
 
-(The bare PWM, hwmon-lease and `POST /fans/openfan/{channel}/target_rpm` routes
-the v1 GUI could call were retired at 2.0.0 — see "Write endpoints" below. The
+(There are no PWM-write, lease or `target_rpm` routes — see "Write endpoints" below. The
 daemon engine is duty-cycle based, so closed-loop RPM control is out of scope for
 the API.)
 
 ### GET /status
 Sent by every current daemon: `api_version`, `daemon_version` (the daemon's package
-version, e.g. `"2.56.3"` — render it, do not gate on it; gate on `GET /capabilities`),
-`overall_status`, `subsystems[]`, `thermal_state` (daemon ≥ 1.13.0), and `uptime_seconds`
+version, e.g. `"5.0.0"` — render it, do not gate on it; gate on `GET /capabilities`),
+`overall_status`, `subsystems[]`, `thermal_state`, and `uptime_seconds`
 (whole seconds since the daemon process started; declared optional on the wire, but always
 filled in). The other fields below are additive and each states when it is omitted.
 
@@ -669,20 +581,15 @@ falls back to `"unknown"`, shown neutral.
 Emitted by the daemon's `HealthStatus::Display` and pinned on both sides by
 `health_status_display_wire_strings` (daemon) and the dashboard health tests (GUI).
 
-`subsystems[]` is `openfan`, `hwmon`, then — on daemon ≥ 2.17.0 — **`engine`**
-(DEC-249), then — on daemon ≥ 2.22.0 — **`controls`** (DEC-279). Both additive;
-`api_version` unchanged. The order is stable and each new entry is appended, never
-inserted, so an index-based reader is unaffected; the GUI iterates the array and
-needs no change to display either. The first two report *data* freshness from the
+`subsystems[]` is `openfan`, `hwmon`, **`engine`** (DEC-249), then **`controls`**
+(DEC-279). The order is stable and a new entry is appended, never
+inserted; the GUI iterates the array. The first two report *data* freshness from the
 poll loops. `engine` reports the profile engine's **liveness**: the daemon's sole
 PWM writer also evaluates the thermal-emergency rule.
 
-On daemon ≥ 2.24.2 the **`openfan`** entry reports the **worse** of two limbs
+The **`openfan`** entry reports the **worse** of two limbs
 (DEC-302): poll-loop *liveness* (a poll returned) and *data* freshness (reduced over
 each channel's own `updated_at`, counting only channels a poll has actually measured).
-Before that it reported liveness alone while this document promised freshness, so a
-frame covering three of ten channels reported `ok — readings fresh` while `/poll`
-showed seven channels ageing without bound.
 
 **`hwmon` deliberately keeps reporting poll liveness alone**, and that asymmetry is a
 decision rather than an omission. Every cached OpenFan channel is expected to be
@@ -696,21 +603,19 @@ and `unavailable_sensors[]`, which answer it directly.
 
 Two consequences for a client:
 
-- Two new `reason` wordings appear for the partial case — `"N of M readings stale — the
+- The partial case has two `reason` wordings — `"N of M readings stale — the
   poll loop is running but is not refreshing them"` while the poll loop itself is healthy,
   and `"N of M readings older than the poll itself"` when the loop is degraded too.
   `reason` is **daemon prose, not contract**: render it, never match on it. `status` and `age_ms` carry the meaning,
-  and `age_ms` is now the *oldest reading's* age when the freshness limb is the worse
+  and `age_ms` is the *oldest reading's* age when the freshness limb is the worse
   one, rather than the poll stamp's.
-- On a machine with **no OpenFanController**, `subsystems[0]` now reports
+- On a machine with **no OpenFanController**, `subsystems[0]` reports
   `ok — "no OpenFanController connected"` with `age_ms: null`. (A subsystem's `age_ms`
-  is always serialised; `null` means no age is known, never that the key is missing.) It previously reported
-  `crit — "never received data"` for the process lifetime, which pinned
-  `overall_status` to `"crit"` on every hwmon-only machine. The entry is still
-  present at index 0 — the wire shape is unchanged — and still reports `crit`
-  normally when a controller *is* attached and its poll loop has died.
+  is always serialised; `null` means no age is known, never that the key is missing.) The
+  entry is still present at index 0, and reports `crit` when a controller *is* attached
+  and its poll loop has died.
 
-On daemon ≥ 2.18.0 the engine task is **supervised** (DEC-266): if it ends —
+The engine task is **supervised** (DEC-266): if it ends —
 including by a panic inside a tick, which the runtime otherwise contains — the
 daemon runs its ordinary shutdown restore and exits non-zero so systemd restarts
 it. That restore is not "every fan back to firmware": each hwmon header the daemon
@@ -719,32 +624,27 @@ took gets back the mode or duty it had before (DEC-382 — an NZXT Kraken's is f
 the daemon drove gets PMFW's automatic curve (DEC-435), and an output with no
 firmware to return to — an OpenFan channel, a header with no `pwmN_enable` — is
 left at `max(its last duty, [shutdown] exit_floor_pct)`, or full speed where that
-duty is unknown (DEC-388). So a *stopped* engine now presents to the GUI as a dropped socket,
-not as a green `/status`. Before 2.18.0 nothing supervised the task and a panic
-inside a tick ended fan control and thermal safety while every other signal
-stayed green and `/status` kept answering 200 — this field was the only client-
-visible sign. It remains the signal for a **degraded** engine (slow ticks),
-which supervision does not cover, and the only signal at all on older daemons.
+duty is unknown (DEC-388). So a *stopped* engine presents to the GUI as a dropped socket,
+not as a green `/status`. The `engine` entry is the signal for a **degraded** engine
+(slow ticks), which supervision does not cover.
 
-Since DEC-387 a **hung** engine is restarted too, when the daemon runs under its
+A **hung** engine is restarted too (DEC-387), when the daemon runs under its
 systemd unit. The unit is `Type=notify` with `WatchdogSec=15`, and the daemon pings
 the watchdog from each *completed* tick and nowhere else — so an engine that is alive
 but no longer completing ticks (a deadlock, an await that never resolves) is stopped
-15 s after its last completed tick — gracefully: since DEC-388 systemd sends SIGTERM, so
+15 s after its last completed tick — gracefully: systemd sends SIGTERM (DEC-388), so
 the normal shutdown and its exit floor run, and SIGKILL follows after 10 s only if they
 cannot — and then restarted, and a client sees the same dropped
 socket and reconnect as for a DEC-266 death. A device write that is slow or wedged
 does **not** stop the pings: the loop keeps ticking past it (DEC-289), and that case
-is still reported only through the write-stall ladder below. What changes for a
-client: `engine` still passes through `warn` and `crit` ("not ticking") while the
-gap is under 15 s, but the mid-tick "stuck" state past 30× the period is now
-reachable only when the daemon runs outside systemd. There is no wire change.
+is reported only through the write-stall ladder below. `engine` passes through `warn`
+and `crit` ("not ticking") while the gap is under 15 s; the mid-tick "stuck" state past
+30× the period is reachable only when the daemon runs outside systemd.
 Around a system sleep the window is wider (DEC-396): the daemon package's
 `system-sleep` hook has the daemon widen its watchdog to 120 s before a suspend or
 hibernate and put its configured 15 s back as soon as the system resumes, because device suspend and resume count
 against the watchdog while the daemon is frozen. It narrows again by itself 120 s
-after the widen if the resume call never comes. There is no wire change here
-either.
+after the widen if the resume call never comes.
 
 **A slow tick is not a stopped engine, and the daemon distinguishes them
 (DEC-259).** The engine stamps both the start and the completion of every tick,
@@ -760,12 +660,9 @@ so `engine` reports one of two situations:
 
 That second case is why the pair exists. A thermal `force_all_with_floor` walks all ten
 OpenFan channels, each bounded by `serial.timeout_ms` (up to 1 s), so a
-degraded-but-open link makes a **legitimate** tick take 5–10 s. With a single
-timestamp the daemon reported `crit` / "not ticking — fan control and thermal
-safety are stalled" *while it was actively driving the thermal emergency* — the
-inverse of the truth, in the state where a client can least afford to be misled.
-Widening the threshold would have traded that false alarm for blindness to a real
-death; splitting the stamps distinguishes the cases instead.
+degraded-but-open link makes a **legitimate** tick take 5–10 s. A single
+timestamp would report `crit` / "not ticking" *while the daemon was actively driving
+the thermal emergency*; splitting the stamps distinguishes the cases.
 
 Reasons are engine-specific: `"evaluating on schedule"`, `"tick overdue"`,
 `"tick still running — a slow write is holding it up"`, `"tick stuck — the engine
@@ -773,35 +670,29 @@ has not finished a pass"`, `"not ticking — fan control and thermal safety are
 stalled"`, `"never ticked"`. `age_ms` is always time since the last **completed**
 pass, so a client can read "mid-tick, last full pass N ms ago" coherently.
 
-**Two further reasons on daemon ≥ 2.23.5 (DEC-289):** `"a backend write has not
+**Two further reasons (DEC-289):** `"a backend write has not
 returned yet — it is still in flight"` (`warn`) and `"writes wedged — a backend
-write has not returned and nothing is reaching those fans"` (`crit`). These
-describe a state that could not previously be reported at all. Before DEC-289 a
-write wedged in a kernel driver froze the whole engine loop, so the condition
-surfaced — if at all — as a stuck *tick*. The loop is now bounded and keeps
-running, which is the fix; the cost is that both tick stamps then advance
-normally and the engine would otherwise look perfectly healthy while nothing
-reached the hardware. These two reasons are that missing signal. **Treat
-`reason` as free text and render it** — the set has now grown twice, and a
-client that matches on exact strings will silently stop reporting the newest
-and most serious cases.
+write has not returned and nothing is reaching those fans"` (`crit`). The engine
+loop is bounded and keeps running past a write wedged in a kernel driver, so both
+tick stamps advance normally; these two reasons are the signal that nothing is
+reaching the hardware. **Treat `reason` as free text and render it**: a client that
+matches on exact strings will silently stop reporting new cases.
 
 A `crit` engine escalates `overall_status` to `"crit"` — that escalation is the
-point of the surface. Daemons < 2.17.0 emit two entries and no `engine`; a client
-must treat its absence as "unknown", never as healthy.
+point of the surface. A client must treat an absent `engine` entry as "unknown",
+never as healthy.
 
-**`controls` (daemon ≥ 2.22.0, DEC-279) reports whether every control is actually
+**`controls` (DEC-279) reports whether every control is actually
 being commanded**, which is a different question from whether the engine is
 ticking. It is `warn` while `skipped_controls[]` is non-empty and `ok` otherwise,
 with `age_ms` = the **longest** `skipped_for_ms` in that list (the oldest
 unresolved control — a flapping one must not mask a permanent one) and a reason of
 the form `"N controls not being commanded — their fans hold their last speed"`.
-**Since daemon 2.56.2 the tail depends on the skip reasons (DEC-426, `DC-k`).** A
+**The tail depends on the skip reasons (DEC-426, `DC-k`).** A
 `backend_unavailable` control's fans were never commanded by the daemon, so when every
 listed control has that reason the tail is `"their fans' speed is up to the hardware, not
 this daemon"`, and a mix is counted per kind: `"3 controls not being commanded — 2 hold
-their fans' last speed, 1 has fans this daemon cannot drive"`. Older daemons send the hold
-wording for every reason, `backend_unavailable` included. The reason is display prose: read
+their fans' last speed, 1 has fans this daemon cannot drive"`. The reason is display prose: read
 `skipped_controls[].reason` for anything a client decides on.
 
 **It is `warn` and never `crit`, deliberately.** Those fans are not stopped, and
@@ -809,8 +700,7 @@ the thermal-emergency rule reaches every OpenFan channel and writable hwmon head
 the machine has, regardless of what is listed — it writes them all, commanded or not (`force_all_with_floor`). `crit`
 stays reserved for a subsystem that has actually failed. But it *does* move
 `overall_status` to `"warn"`, so a client whose ribbon reads only `overall_status`
-will now show a warning in a state that previously read fully healthy — this is
-the intended behaviour change, not a regression.
+shows a warning.
 
 **This is deliberately louder than `unavailable_sensors[]`, which does not move
 `overall_status` at all (DEC-193).** The asymmetry is recorded so it is not
@@ -818,24 +708,22 @@ the intended behaviour change, not a regression.
 benign (a powered-down WiFi radio), and often drives nothing; a skipped control is
 the *consequence* and by construction means a real fan is uncommanded right now.
 
-Daemons < 2.22.0 emit no `controls` entry; a client must treat its absence as
-"unknown", never as healthy — the same rule as `engine`.
+A client must treat an absent `controls` entry as "unknown", never as healthy — the
+same rule as `engine`.
 
-`thermal_state` (daemon ≥1.13.0, additive — `api_version` unchanged) is one of
-`"normal" | "emergency" | "no_sensor_fallback"`, and `"recovery"` from daemons before
-2.50.0 (DEC-386) — **a client must still render `"recovery"`**, which older daemons send for the
-two ticks of their 60 % recovery rung. While it is not `"normal"` the daemon is forcing
+`thermal_state` is one of
+`"normal" | "emergency" | "no_sensor_fallback"` (DEC-386). A client renders an
+unrecognised token rather than dropping it. While it is not `"normal"` the daemon is forcing
 fans — in `emergency`, every OpenFan channel and writable hwmon header **this machine
-has**; in `no_sensor_fallback` (and an older daemon's `recovery`), since daemon 2.50.0
+has**; in `no_sensor_fallback`
 (DEC-382) only the ones the active profile controls, with every other fan the emergency took given back
 (GPU fans excluded throughout — DEC-130) — and holding the
 hwmon lease as `thermal-safety`; the GUI has no loop to stand down (DEC-165) and simply shows a
-single poll-driven thermal warning. Older daemons omit the field — the GUI
-defaults it to `"normal"`.
+single poll-driven thermal warning. The GUI defaults an absent field to `"normal"`.
 
 **A non-`"normal"` `thermal_state` does NOT imply that any fan was written**
 (DEC-371). On a machine with no fan output the daemon can drive — a GPU-only box,
-a VM, or (since 2.47.6, DEC-372) a board whose every hwmon `pwmN` is read-only —
+a VM, or a board whose every hwmon `pwmN` is read-only (DEC-372) —
 the ladder still latches, still publishes `"emergency"`, and reaches nothing,
 because GPU fans are excluded by design. **There is no wire field for this**: the
 daemon reports it only in its log, at `error` level (*"Thermal safety override
@@ -847,18 +735,10 @@ client that wants to bound the case can note that `fans[]` carrying no `openfan:
 and no writable `hwmon:` entry is the same condition, but that is inference, not
 contract.
 
-On daemon ≥ 2.19.0, `"no_sensor_fallback"` has a **second trigger**: a CPU
-reading that is merely *stale* now counts as no reading (DEC-267). The safety
-rule reads a cached sensor map with no freshness filter of its own, so a sensor
-that stopped updating used to freeze the last temperature — the thermal ladder
-then evaluated forever against a number that could not rise, the no-sensor
-fallback never engaged because the sensor was present rather than missing, and
-the engine's liveness heartbeat stayed green because the engine genuinely was
-ticking. A reading older than five poll intervals (floored at 5 s, capped at
-30 s) is now treated as no reading.
-
-**No client change is required** — the state and its meaning are unchanged, only
-how often it can be reached.
+`"no_sensor_fallback"` has a **second trigger**: a CPU
+reading that is merely *stale* counts as no reading (DEC-267), so a sensor that
+stopped updating cannot freeze the last temperature. A reading older than five poll
+intervals (floored at 5 s, capped at 30 s) is treated as no reading.
 
 Two things worth knowing about the shape of it:
 
@@ -874,11 +754,11 @@ Two things worth knowing about the shape of it:
 - **Reaching the state normally takes the budget *plus* the existing 5-cycle
   debounce** (~10 s at defaults), not the budget alone.
 
-`"no_sensor_fallback"` therefore means what it always meant — the daemon is
-forcing `NO_SENSOR_SAFE_PCT` — but only with nothing latched, and a stale reading
+`"no_sensor_fallback"` means the daemon is
+forcing `NO_SENSOR_SAFE_PCT`, only with nothing latched, and a stale reading
 only reaches it when the last known temperature was **cool**. The rest divert, on
 the principle that losing sight of a sensor must never *lower* cooling (DEC-269;
-since DEC-386 one exhaustive decision table in `profile_engine::safety_tick`):
+one exhaustive decision table in `profile_engine::safety_tick`, DEC-386):
 
 | CPU reading | daemon response | `thermal_state` |
 | --- | --- | --- |
@@ -886,37 +766,32 @@ since DEC-386 one exhaustive decision table in `profile_engine::safety_tick`):
 | stale, at/above the 80 °C release temp, nothing latched | no force — fan curves keep running on it | `normal` |
 | stale and cool, or absent, nothing latched | `NO_SENSOR_SAFE_PCT` after the debounce | `no_sensor_fallback` |
 
-**Two rows changed in daemon 2.50.0 (DEC-386).** A latched emergency whose sensor vanishes entirely
-now holds 100 % — DEC-190 dropped it to 40 %, on the reasoning that a vanished sensor
-cannot confirm a live emergency; the latch is itself that confirmation, and it stands
-until a fresh reading says otherwise. And the 60 % recovery rung is gone: a fresh
-reading at or below release hands control straight back to the profile. Under the
+A latched emergency whose sensor vanishes entirely holds 100 % (DEC-386): the latch is
+itself the confirmation, and it stands until a fresh reading says otherwise. A fresh
+reading at or below release hands control straight back to the profile; there is no
+recovery rung. Under the
 no-sensor floor, a control **skipped** that tick (its sensor gone) keeps its fans at
 their last duty rather than taking the bare floor (`TS-p`). For an OpenFan channel
 whose duty the controller reconnecting or the host resuming made unknown, that is the
-duty it had before (DEC-466, daemon ≥ 3.3.0 — 2.51.3 to 3.2.x gave it 100 %, DEC-401);
-a duty unknown for any other reason still takes the bare floor. **No wire shape
-changed:** the remembered duty reaches `last_commanded_pwm` only once a write of it
-lands.
+duty it had before (DEC-466, daemon ≥ 3.3.0 — 3.0.x to 3.2.x gave it 100 %, DEC-401);
+a duty unknown for any other reason still takes the bare floor. The remembered duty
+reaches `last_commanded_pwm` only once a write of it lands.
 
-**`cpu_sensor_found`** on `/diagnostics/hardware` changed meaning with the same
-release: it used to answer *"is a CpuTemp sensor present?"* and now answers *"is
+**`cpu_sensor_found`** on `/diagnostics/hardware` answers *"is
 there a **current** reading?"*, so it is `false` for a sensor that is listed but
-no longer updating. Clients rendering it as "found / not found" should reword —
-`{"state": "emergency", "cpu_sensor_found": false}` is a normal pairing now.
+no longer updating. `{"state": "emergency", "cpu_sensor_found": false}` is a normal
+pairing.
 
 #### Coolant emergency, pump stall response, cooling advisory (DEC-443, daemon ≥ 3.0.0)
 
-**Contract change in both repos** (capability `control.cooling_failure_detection`). The three
-`/status` fields below are additive (`api_version` unchanged) and **omitted when empty**; an older
-daemon never sends them, and a client defaults each to `[]`.
+Capability `control.cooling_failure_detection`. The three
+`/status` fields below are **omitted when empty**; a client defaults each to `[]`.
 
 **`emergency_causes`** (string[]) — why `thermal_state` is `"emergency"`: `"cpu"` and/or
 `"coolant"`, in that order, present only while it is. The state is still one token — an emergency
 is the same force with the same reach whichever rule tripped it — so a client reading
 `thermal_state` alone stays correct; the causes let it *explain* the emergency truthfully. Render
-an unrecognised token. `emergency` with no causes means a daemon older than 3.0.0, whose only
-emergency is the CPU one.
+an unrecognised token.
 
 **The coolant rung.** The hottest FRESH reading of kind `coolant_temp` at or above
 `safety.coolant_limit_c` (whole °C; default 60, settable 40–70, no off switch — `GET`/`POST
@@ -962,15 +837,14 @@ sees. Quiet without a fresh CPU reading or with nothing commanded. Render an unr
 name, an advisory is a warning-level alert, and the thermal-safety detail names the emergency's
 cause. None of the three is capability-gated: absence reads as quiet.
 
-`overrides` and `fan_identify` (daemon ≥ 1.21.0, additive — `api_version`
-unchanged, omitted when empty) make `/status` the poll-authoritative source for
+`overrides` and `fan_identify` (omitted when empty) make `/status` the poll-authoritative source for
 active manual overrides and fan-identify holds (DEC-163 / DEC-166): `overrides[]`
 of `{control_id, pwm_percent, expires_in_secs}` and `fan_identify[]` of
 `{fan_id, expires_in_secs, mode, identify_pwm_percent}`. `mode` (`"stop"` or
-`"pump_perturb"`) and `identify_pwm_percent` (the duty the fan is held at) are daemon
-≥ 2.28.0 (DEC-311), so a client that polls into an identify it did not start can still
-describe it truthfully — a pump is perturbed, never stopped. Both arrays are absent on
-daemons < 1.21.0 and when nothing is held; the GUI defaults them to empty.
+`"pump_perturb"`) and `identify_pwm_percent` (the duty the fan is held at, DEC-311) let
+a client that polls into an identify it did not start
+describe it truthfully — a pump is perturbed, never stopped. Both arrays are absent
+when nothing is held; the GUI defaults them to empty.
 
 The GUI **consumes** these read-only (DEC-169). Crucially, the entries carry **no
 `override_token`**, and renew/release both require it — so an override this GUI
@@ -987,16 +861,15 @@ and the support bundle records them. `fan_identify[]` is display-only — the fa
 wizard owns its own stop/restore + deadman lifecycle and is not driven from poll
 state.
 
-`unavailable_sensors` (daemon ≥ 2.3.0, additive — `api_version` unchanged, omitted when empty) lists
+`unavailable_sensors` (omitted when empty) lists
 sensors the daemon discovered but currently cannot read — the canonical case is an `ath12k` WiFi
 temperature returning `ENETDOWN` while the radio is soft-blocked. Each entry is `{id, label, reason,
 unavailable_for_ms}` where `reason` is the daemon's hwmon read error, formatted as
 `read error: <path>: <cause>`. Two classes of cause occur: an I/O failure (`ENETDOWN`, `ENODATA`),
-and — since **DEC-288**, daemon ≥ 2.23.5 — a reading rejected as implausible, e.g.
+and a reading rejected as implausible (DEC-288), e.g.
 `read error: /sys/.../temp2_input: implausible temperature 2147483.6°C outside [-50, 250]°C`.
-The second class is why a **CPU** sensor can now appear here: before DEC-288 an out-of-range value
-was clamped to 250 °C and served as a live reading, which latched a permanent thermal emergency.
-A third cause (DEC-491, unreleased daemon): an `spd5118` DDR5 memory sensor whose `temp1_enable`
+The second class is why a **CPU** sensor can appear here.
+A third cause (DEC-491, daemon ≥ 4.3.0): an `spd5118` DDR5 memory sensor whose `temp1_enable`
 is 0. The driver keeps returning the last value with no error, so the daemon reports the sensor as
 unreadable, with a `reason` naming `temp1_enable` and the word "disabled", instead of serving a
 frozen number.
@@ -1005,9 +878,9 @@ time since the sensor was quarantined. These are evicted from `/sensors` (so a s
 served) and the daemon suppresses its own per-tick read-failure logging for them (DEC-193). The GUI
 consumes this **display-only**: the Overview page shows a low-key panel + an "N unavailable"
 summary count, and these sensors do **not** raise a staleness warning (they are absent from the live
-sensor list). Older daemons omit the array — the GUI defaults it to empty.
+sensor list). The GUI defaults an absent array to empty.
 
-`runtime_config_degraded` (daemon ≥ 2.35.0 — merged as 2.34.0, which was never published; additive — `api_version` unchanged, **omitted when the
+`runtime_config_degraded` (**omitted when the
 config loaded cleanly**) is set when the daemon's own `runtime.toml` could not be read or parsed and
 it fell back to defaults (`AUD3-m`, DEC-321). Shape:
 `{reason, path, detail, phase, kept_as?}`.
@@ -1017,7 +890,7 @@ it fell back to defaults (`AUD3-m`, DEC-321). Shape:
 | `reason` | `unreadable` (I/O error, or larger than the daemon's 4 MiB config read cap) or `malformed` (the bytes were read but are not valid TOML for that daemon version — canonically a **downgrade**, since each section is `deny_unknown_fields`) |
 | `path` | The file that failed to load |
 | `detail` | The underlying I/O or TOML error, verbatim — daemon prose, not a stable token |
-| `phase` | `startup`, `reload` or (daemon ≥ 2.51.0) `update`. **These cost different things** — see below |
+| `phase` | `startup`, `reload` or `update`. **These cost different things** — see below |
 | `kept_as` | (daemon ≥ 3.6.0, `TS-at`; **omitted** until a copy is kept) Where a setter kept the unreadable original (`runtime.toml.invalid-<unix-ts>`) before replacing `path`. Set on an `update` record and carried onto a standing `startup` record — see below |
 
 **[SAFETY] Why this is on the wire at all.** The daemon's `RuntimeConfig::load_from` degrades
@@ -1025,8 +898,8 @@ it fell back to defaults (`AUD3-m`, DEC-321). Shape:
 But those defaults carry **no `header_roles`**, and on a board whose Super-I/O publishes no
 `pwmN_label` files (the case the whole AIO-MB programme exists for) a user's `pump` assignment via
 `POST /config/header-role` is the *only* evidence a header drives a pump. A failed load therefore
-removes that header's 30% floor, its stop exemption and its pump-safe identify — and before this
-field the entire notification was one `warn!` in the daemon's journal. **No client could tell.**
+removes that header's 30% floor, its stop exemption and its pump-safe identify, and this field is
+how a client learns of it.
 
 A `phase: "startup"` degradation is the one that drops header roles, because the boot load seeds
 every runtime-mutable key. A `phase: "reload"` degradation (a SIGHUP that could not parse the file)
@@ -1035,17 +908,14 @@ reload commits nothing else either — `profile_search_dirs`, the exit floor (DE
 limit (DEC-443) keep their running values. Up to 3.6.0 an exit floor or coolant limit set in
 `runtime.toml` fell back to the value in `daemon.toml`.
 
-A `phase: "update"` degradation (daemon ≥ 2.51.0, `TS-r`) means a `POST /config/*` setter found the
+A `phase: "update"` degradation (`TS-r`) means a `POST /config/*` setter found the
 file unreadable, kept the original as `runtime.toml.invalid-<unix-ts>` (DEC-255) and replaced it.
 **The replacement carries the header roles and cooling devices the daemon is running with, not
 bare defaults, and is written before the setter runs** — so a setter that is then refused, or
 fails its own write, still leaves a readable file and no role is lost. The record is published only
 once that replacement is on disk; if it cannot be written, nothing on disk changes and the setter
 answers `503 persistence_failed`. Every other key that existed only in the original is gone from
-the next boot. Before 2.51.0 the setter started from defaults and published nothing, and
-because `POST /config/header-role` and the cooling-device routes rebuild their in-memory maps from
-the file they write, one role assignment over an unreadable file dropped every other assigned role
-from the engine's floor union on the next tick. A setter that finds **no** file also starts from the
+the next boot. A setter that finds **no** file also starts from the
 running daemon's maps (a quarantine whose write failed leaves none) but publishes nothing, since a
 missing file is first-write, not damage.
 
@@ -1065,13 +935,13 @@ Two properties a client must not get wrong:
   defaults are the correct answer — treating it as damage would put a permanent warning on every
   fresh install, and a warning that is always on is one nobody reads when it matters.
 - **The field is sticky for the daemon's lifetime.** A later successful `POST /config/*` repairs the
-  *file*, and `header_roles` / `cooling_devices` (and, since DEC-388, the exit floor) are
+  *file*, and `header_roles` / `cooling_devices` (and the exit floor, DEC-388) are
   re-committed live by their setters — but nearly every other runtime-mutable key is consumed
   once at startup, so the daemon genuinely is still
   running on defaults for those. Do not treat a successful write as clearing the condition; only a
   daemon restart does that.
-- **When more than one phase fails, the more severe record is kept — not the latest (`WIRE-ao`,
-  daemon ≥ 2.36.0; `update` joined the order in 2.51.0).** The order is `startup` > `update` >
+- **When more than one phase fails, the more severe record is kept — not the latest (`WIRE-ao`).**
+  The order is `startup` > `update` >
   `reload`, so a `startup` record survives any number of later failures and an `update` record
   survives a later failed reload. The two are
   not equally costly: a startup failure drops every `header_roles` assignment, and on a board with
@@ -1080,22 +950,12 @@ Two properties a client must not get wrong:
   nothing, because startup's roles are still in force. Latest-wins is kept *within* the reload
   phase, so a second failed reload still refreshes `detail`.
 
-  **Daemons 2.35.x are latest-wins and can therefore under-report**, which is why the
-  client-side rule below is stated as unconditional rather than as a workaround.
-
-Older daemons omit the key entirely, which reads the same as "fine" — the safe direction here, since
-it is exactly the (absent) warning such a daemon shows today.
-
-**The GUI renders this from v2.58.0** (`WIRE-a`, formerly `AUD3-z`): a persistent Dashboard
+**The GUI renders this** (`WIRE-a`): a persistent Dashboard
 banner plus a keyed `AppState` warning, re-rendered on a poll-diff of `{reason, path, phase, kept_as}` and
 cleared when a repaired daemon reconnects. The wording is phase-differentiated, and note the
 one thing a client must NOT do — **`phase: "reload"` is not evidence that header roles
-survived.** On daemons before 2.36.0 the record was latest-wins, so a *failed* reload overwrote an
-earlier startup degradation whose roles were already gone; a client that reads `reload` as "roles
-are fine" reassures the user at exactly the wrong moment. `WIRE-ao` fixed that at source in 2.36.0,
-but the rule stands unchanged: a client cannot tell which daemon it is talking to from this field,
-and the safe reading costs nothing. **`update` is the exception, and may say the roles were kept**
-(GUI ≥ 2.79.1): only daemons that keep the more severe record emit it, so an `update` record also
+survived**; the safe reading costs nothing. **`update` is the exception, and may say the roles
+were kept**: the more severe record wins, so an `update` record also
 proves the boot load was clean. The GUI says a copy of the unreadable file was kept and the file
 replaced, that the roles and cooling devices were kept, and that other settings only in the old
 file must be copied back from the copy, naming it when `kept_as` is present. A `startup`
@@ -1105,7 +965,7 @@ and start it. An
 unrecognised `phase` still gets the hedged wording. `detail` is logged rather than shown, being
 verbatim daemon prose that can run to several lines.
 
-`skipped_controls` (daemon ≥ 2.21.0, additive — `api_version` unchanged, omitted when empty) lists
+`skipped_controls` (omitted when empty) lists
 logical controls the daemon's profile engine **cannot resolve**, and is therefore not commanding at
 all (273-i). Each entry is `{control_id, control_name, reason, skipped_for_ms}`.
 
@@ -1120,7 +980,7 @@ resolution.
 
 `skipped_for_ms` counts from when the control was **listed**, i.e. after the debounce, not from the
 first skipped tick — so a freshly-listed control reads ~0 and the field understates the real outage
-by up to three seconds. It is display-only; since GUI 2.59.0 the "Not controlled" chip and its
+by up to three seconds. It is display-only; the "Not controlled" chip and its
 tooltip show it as a duration, beside the daemon's `control_name` (`WIRE-q`).
 
 `reason` is a **stable token, not prose** — the daemon deliberately leaves the wording to the client:
@@ -1131,7 +991,7 @@ tooltip show it as a duration, beside the daemon's `control_name` (`WIRE-q`).
 | `sensor_unavailable` | The curve's sensor is absent — not present on this machine, or age-filtered out as stale. Never a `flat` curve from daemon 4.2.0: it reads no sensor. Earlier daemons looked a flat curve's `sensor_id` up like any other and skipped the control under this token when it was empty or missing |
 | `mix_unresolvable` | A Mix produced no value at all (no children, none resolvable, a `subtract` missing its minuend, a cycle, or the depth backstop). A Mix with *some* inputs resolvable is **not** skipped — it runs on the survivors (DEC-272) |
 | `sync_unresolvable` | A Sync whose target is unset, is the control itself, or was not computed this tick |
-| `backend_unavailable` | **daemon >= 2.47.0 (`OFN-j`).** No member of the control can be written by this daemon — its source's backend is absent, or (from 2.55.0, below) its header is one the daemon cannot write — so the control resolves perfectly and commands nothing. NOT a curve-resolution failure — the curve evaluated and an output was computed; the *delivery* has nowhere to go. Canonically an `openfan:` member on a machine with no OpenFanController, but not OpenFan-specific: an `hwmon:` member on a board with no writable header reports identically **from daemon >= 2.49.0** (`OFN-ah`, DEC-376 — before that the engine took an hwmon backend from any discovered header, writable or not, so this token was unreachable for hwmon and the control published a duty nothing applied). **From daemon >= 2.55.0 it is resolved per member (`OFN-al`, DEC-412):** an `hwmon:` member is undeliverable whenever its header is not one the daemon can write — read-only, or not discovered on this board at all (a profile imported from another machine) — so a control bound only to such headers is listed on a board that has writable ones too. One exception: if the hwmon controller was busy when the engine started, the writable set is not measured for that boot and every `hwmon:` member is taken as deliverable, as before 2.55.0 (the daemon logs a warning at startup when this happens). Before 2.55.0 the answer was per backend, and on such a board the control published a duty its read-only header never received. **From the daemon release carrying DEC-445 (`GPU-a`) GPU members are resolved the same way:** an `amd_gpu:` member is deliverable only when its card is detected with a PMFW `fan_curve`, so a control bound only to a pre-RDNA3 card (verify-only, `fan_write_supported: false`), a read-only RX 7000/9000 or a card not on this machine is listed; `intel_gpu`, `nvidia_gpu` and any unknown source are never deliverable. Earlier daemons counted every such member deliverable, and the control published a duty nothing applied. Raised only when **every** member is undeliverable — a control with one live member and one dead one is still commanding fans, so it is **not** listed (the daemon logs that case once per activation instead) |
+| `backend_unavailable` | (`OFN-j`) No member of the control can be written by this daemon — its source's backend is absent, or its header is one the daemon cannot write — so the control resolves perfectly and commands nothing. NOT a curve-resolution failure — the curve evaluated and an output was computed; the *delivery* has nowhere to go. Canonically an `openfan:` member on a machine with no OpenFanController, but not OpenFan-specific: an `hwmon:` member on a board with no writable header reports identically (`OFN-ah`, DEC-376). **It is resolved per member (`OFN-al`, DEC-412):** an `hwmon:` member is undeliverable whenever its header is not one the daemon can write — read-only, or not discovered on this board at all (a profile imported from another machine) — so a control bound only to such headers is listed on a board that has writable ones too. One exception: if the hwmon controller was busy when the engine started, the writable set is not measured for that boot and every `hwmon:` member is taken as deliverable (the daemon logs a warning at startup when this happens). **GPU members are resolved the same way (DEC-445, `GPU-a`):** an `amd_gpu:` member is deliverable only when its card is detected with a PMFW `fan_curve`, so a control bound only to a pre-RDNA3 card (verify-only, `fan_write_supported: false`), a read-only RX 7000/9000 or a card not on this machine is listed; `intel_gpu`, `nvidia_gpu` and any unknown source are never deliverable. Raised only when **every** member is undeliverable — a control with one live member and one dead one is still commanding fans, so it is **not** listed (the daemon logs that case once per activation instead) |
 
 Adding a token is additive; renaming one is breaking. A client **must** render an unrecognised token
 rather than dropping the entry — otherwise a newer daemon reintroduces exactly the silence this field
@@ -1151,19 +1011,17 @@ must restore it when the override lapses, not discard it.
 
 The GUI consumes this **display-only** — it never writes PWM (DEC-165), so there is nothing for it to
 do beyond telling the user. The Controls page reconciles `skipped_controls[]` each poll and paints a
-**"Not controlled"** chip on the affected card, with the reason in its tooltip. (Since GUI 2.45.0 the reference GUI
-also shows a live output figure on the card, fed from `control_outputs[]` below — so a skip chip and
-an output figure now co-exist there, and the chip is no longer the whole of the signal. **A client
+**"Not controlled"** chip on the affected card, with the reason in its tooltip. (The reference GUI
+also shows a live output figure on the card, fed from `control_outputs[]` below, so a skip chip and
+an output figure co-exist there. **A client
 showing an output must drop it to "unknown" when the daemon stops reporting that control**, exactly
 as the `control_outputs[]` section below requires; it must NOT keep displaying the last commanded
-value. An earlier revision of this note advised the opposite, which contradicted that section and
-would have a card state a duty nothing is applying for the whole of a thermal event.) The
+value.) The
 chip is cleared when the daemon stops reporting the control, and on disconnect (polling stops, so
 nothing else would clear it, and an offline GUI does not know whether it is still true). A
-user-owned Manual state wins the chip. Older daemons omit the array — the GUI defaults it to empty,
-so it never needs to know the daemon's version to read this field.
+user-owned Manual state wins the chip. The GUI defaults an absent array to empty.
 
-`validation_session` (daemon ≥ 2.32.0, additive — omitted when no session has ever run) carries the
+`validation_session` (omitted when no session has ever run) carries the
 current or most recent validation session in miniature (DEC-317): `{session_id, kind, state,
 elapsed_ms, sample_count, event_count, sample_limit_reached, cooling_device_id}`. It rides the poll so
 a live panel needs no second request — the static-vs-dynamic split DEC-316 established, applied again:
@@ -1171,10 +1029,9 @@ the session's *topology* is fetched once from `GET /validation/session`, while i
 and belongs here. Deliberately tiny — the samples are megabytes and must never ride a 1 Hz poll.
 
 `state` is an opaque token; render an unrecognised one rather than dropping the row. Absence means no
-session has ever run **or** the daemon predates 2.32.0, and the two are deliberately
-indistinguishable, because nothing should behave differently between them.
+session has ever run.
 
-`control_outputs` (daemon ≥ 2.22.0, additive — `api_version` unchanged, omitted when empty) carries
+`control_outputs` (omitted when empty) carries
 the output each logical control is currently applying (277-k, DEC-279). Each entry is
 `{control_id, output_pct}`, sorted by `control_id`, `output_pct` a float 0–100.
 
@@ -1193,21 +1050,16 @@ never be conflated.
 **Absence is meaningful and a client must not carry a previous value forward.** A control is absent
 whenever the engine did not evaluate it, which covers: no profile active; the control is listed in
 `skipped_controls[]`; and — importantly — the **whole duration of a thermal event**. During a thermal
-event no single control-wide number is true: since DEC-307 (daemon ≥ 2.26.0) the forced duty is a
-**floor** over the profile's own output rather than a replacement for it, so a control's OpenFan and
+event no single control-wide number is true: the forced duty is a
+**floor** over the profile's own output rather than a replacement for it (DEC-307), so a control's OpenFan and
 hwmon members sit at `max(commanded, forced)` while its GPU members sit at their own curve's value —
-GPU fans are excluded from the force by design (DEC-130), and since DEC-399 they keep following their
-curve through it (older daemons wrote no GPU fan on a forced tick, so each held whatever it last had).
+GPU fans are excluded from the force by design (DEC-130) and keep following their
+curve through it (DEC-399).
 Publishing the curve figure would understate the first set and publishing the floored figure would
-overstate the second, so the daemon publishes neither. Before DEC-307 the reason was simpler and is recorded here because the wording
-outlived it: the force *replaced* every control's output, so there was no control-wide output at
-all. Render absence as "unknown" (the reference GUI's
-`"—"`), never as `0`.
+overstate the second, so the daemon publishes neither. Render absence as "unknown" (the reference GUI's
+`"—"`), never as `0`. A client defaults an absent array to `[]` and shows no figure.
 
-Older daemons omit the array entirely — a client defaults it to `[]` and simply shows no figure,
-which is what it already did before the field existed.
-
-`verify_active` (daemon ≥ 2.36.0, additive — `api_version` unchanged, **always serialised**, `false`
+`verify_active` (**always serialised**, `false`
 by default) says whether the daemon's engine is **evaluating but not applying** (`WIRE-n`). A
 hardware verify, PWM characterisation, OpenFan calibration or validation sweep takes the engine's
 write pause for its duration; the engine keeps evaluating every control and keeps publishing the
@@ -1226,26 +1078,22 @@ emergency. It qualifies the **commanded duty** and nothing else. The reference G
 writing".
 
 Unlike the arrays above it is serialised even when `false`, because its safe default is also its
-common value; an older daemon omits it and a client reads `false`, which is what it rendered before
-the field existed.
+common value; a client reads an absent key as `false`.
 
-`active_profile_id` and `active_profile_name` (daemon ≥ 2.4.0, additive — `api_version` unchanged,
-**both omitted when no profile is active**) mirror the daemon's currently-active profile onto the
+`active_profile_id` and `active_profile_name` (**both omitted when no profile is active**) mirror the daemon's currently-active profile onto the
 `/status` + `/poll` surface (DEC-194). This lets the GUI reflect an *external* activation (another
 client, `--profile`, a systemd unit) within one 1 Hz poll instead of waiting up to the ~5-minute
 `GET /profile/active` refresh. The GUI reads them from every `/poll`: a present `active_profile_name`
 updates the shown profile immediately (edge-triggered), while an **absent** key is parsed as `None`.
 
-`has_active_profile` (daemon ≥ 2.45.0, additive — `api_version` unchanged, **always serialised,
+`has_active_profile` (**always serialised,
 including when false**) answers the question the two fields above cannot, and is the reason they are
-still allowed to be omitted (DEC-355). Before it, an absent `active_profile_id` meant *either* "an
-older daemon that never sends it" *or* "genuinely no active profile", and nothing on the wire
-separated them — so a client could not clear a profile name it had already shown, and the GUI left a
-stale one in its sidebar and status banner until it reconnected. Three readings:
+still allowed to be omitted (DEC-355): an absent `active_profile_id` alone does not let a client
+clear a profile name it has already shown. Three readings:
 
 | wire | meaning | GUI behaviour |
 | --- | --- | --- |
-| key absent | daemon < 2.45.0 — unknown | leave the `GET /profile/active` fallback authoritative |
+| key absent | unknown | leave the `GET /profile/active` fallback authoritative |
 | `false` | authoritatively nothing is active | clear the cached id **and** name |
 | `true` | the id + name are present and current | reflect them |
 
@@ -1261,12 +1109,11 @@ is deliberately NOT changed to an always-serialised `""`:** `ventulus-tray` read
 `AppState.active_profile_id_changed` into `ProfileService.set_active`, which is what marks the profile
 active in the sidebar and decides which one the Controls page edits; an id the GUI does not hold clears
 that mark rather than leaving the previous profile marked (DEC-476). A response with `active: false`
-clears both, which is the only correction available against a daemon below 2.45.0. Against a daemon at
-or above it, external *deactivation* now also reconciles on the 1 Hz fast path rather than only on the
-periodic fallback.
+clears both. External *deactivation* also reconciles on the 1 Hz fast path through
+`has_active_profile`.
 
-`readiness` (daemon ≥ 2.10.0, additive — `api_version` unchanged, **omitted until the daemon has
-cached a rollup**, and by daemons predating the field) is a compact hardware-readiness rollup mirrored
+`readiness` (**omitted until the daemon has
+cached a rollup**) is a compact hardware-readiness rollup mirrored
 onto the `/status` + `/poll` surface for the GUI's Dashboard cooling-readiness health chip (DEC-206):
 `{overall, critical, warning, info, top_summary, top_code}` — the rollup severity (`ok`/`info`/
 `warning`/`critical`), the per-severity item counts, and the most-severe item's one-line summary +
@@ -1277,7 +1124,7 @@ startup, by a preferred-sensor change, by `POST /hwmon/rescan`, by each `GET /in
 by `GET /inventory/hardware-readiness?refresh=true`; `GET /inventory/hardware-readiness` without it,
 `GET /inventory/superio` and `POST /inventory/superio/probe` rescan only when the cached scan is more
 than 3 s old. The **full** item list stays on `GET /inventory/readiness` — this rollup is a summary,
-not a replacement. The GUI parses an absent key to `None` and hides the chip (older daemon, demo, or
+not a replacement. The GUI parses an absent key to `None` and hides the chip (demo, or
 before the daemon's startup seed runs); `top_summary` is a daemon string, rendered as plain text.
 
 #### OpenFAN link and firmware update (DEC-481, daemon ≥ 4.0.0)
@@ -1341,7 +1188,7 @@ support bundle — and pointing at the update window, and it stands in for the
 Use as the primary sensor snapshot source.
 Expected fields:
 - id — `hwmon:<chip>:<device_id>:<label>` for hwmon sources. A memory-module sensor
-  (`spd5118`, `jc42`; DEC-492, unreleased daemon) has a bus-independent device id,
+  (`spd5118`, `jc42`; DEC-492, daemon ≥ 4.3.0) has a bus-independent device id,
   `<controller>[-p<N>|-ch<K>]…-<addr4>` (`hwmon:spd5118:0000:00:14.0-p0-0051:temp1`),
   where an older daemon, or this one when it cannot name the SMBus topology, sends the
   bus-numbered `<bus>-<addr4>`. Both sides carry a saved id across the two forms by one
@@ -1354,7 +1201,7 @@ Expected fields:
   forms. A pre-DEC-492 daemon matches exactly, and `PUT /profiles/{id}` does not reload the
   active profile, so after a downgrade the active profile needs re-activating.
 - kind — one of `cpu_temp`, `mb_temp`, `disk_temp`, `gpu_temp`, or `coolant_temp`
-  (DEC-156, daemon ≥ 1.18.0 — liquid-cooler coolant temperature, surfaced by the GUI
+  (DEC-156 — liquid-cooler coolant temperature, surfaced by the GUI
   as a first-class **Liquid** sensor). The GUI treats `kind` as an opaque string and
   layers its own richer `sensor_knowledge` classification on top.
 - label
@@ -1374,16 +1221,16 @@ Expected fields:
   - `offset_c` — userspace-applied calibration offset (°C)
   - `alarm`, `max_alarm`, `crit_alarm` — chip-asserted alarm bits (bool); sampled at discovery only, not refreshed per poll cycle
   - `fault` — chip-reported sensor fault (bool)
-- control_eligible (bool, DEC-193, daemon ≥ 2.3.0) — `false` when this temperature must **not** be
+- control_eligible (bool, DEC-193) — `false` when this temperature must **not** be
   offered as a fan-curve source. Currently set only for wireless-radio PHY temps (e.g. `ath12k`
   WiFi, chip names `ath*_hwmon` / `iwlwifi*` / `iwlmvm*`), which read `ENETDOWN` whenever the radio is down and
   would strand a curve. Advisory and display-agnostic: the GUI drops `control_eligible == false`
   sensors from the curve sensor picker (mirroring how `is_writable: false` headers are dropped from
   the member picker, DEC-102) but still shows them everywhere else; the daemon engine never consults
-  it. Omitted by pre-2.3.0 daemons → the GUI defaults it to `true` (every sensor stays selectable).
+  it. The GUI defaults an absent value to `true` (the sensor stays selectable).
 
 Entries are sorted by `id` — deterministic across daemon restarts and rescans
-(DEC-146; fans were already sorted, sensors now match).
+(DEC-146), as fans are.
 
 Sensors that exist but currently fail every read are **not** in this array — the daemon evicts them
 and reports them under `unavailable_sensors` on `/status` + `/poll` instead (DEC-193, see below), so
@@ -1395,16 +1242,16 @@ Expected fields:
 - id
 - source
 - rpm (optional, omitted when unavailable)
-- last_commanded_pwm (optional, omitted until first write). **For an hwmon header this field has two producers and they mean different things** (register row `AIO5-a`): the daemon's poll writes the sysfs *readback* here, and the engine writes the value it *commanded*, so for an uncontrolled header it reports the readback despite its name. They agree while writes are landing, which is why it went unnoticed. Where the distinction matters, read `pwm_readback_pct` (readback, one producer) and `pwm_commanded_pct` (command, one producer, DEC-318) rather than inferring either from this field. Unambiguous for OpenFan and GPU sources, which have no readback attribute. **For an OpenFan channel it is withdrawn when the daemon stops knowing the duty (DEC-412, `TS-ad`, daemon ≥ 2.55.0):** after a write whose reply failed (the frame may or may not have landed), and for every channel on a serial reconnect or a system resume (the device may have come back at its power-on default). It reappears with the next write that lands — the next tick, for a channel a profile drives. An older daemon kept reporting the previous duty in both cases. Absent means "not known", never 0 %.
-- duty_pct (optional; DEC-204) — firmware-**measured** current fan duty %, present only for sources with a duty readback (NVIDIA via NVML). Distinct from `last_commanded_pwm` (commanded) — never conflate. May exceed 100 (NVML expresses it as a % of max noise tolerance), but it is a `u8` on the wire (`responses.rs`) and so saturates at **255** — a larger reading is not representable. Omitted when absent (and on pre-DEC-204 daemons).
+- last_commanded_pwm (optional, omitted until first write). **For an hwmon header this field has two producers and they mean different things** (register row `AIO5-a`): the daemon's poll writes the sysfs *readback* here, and the engine writes the value it *commanded*, so for an uncontrolled header it reports the readback despite its name. They agree while writes are landing, which is why it went unnoticed. Where the distinction matters, read `pwm_readback_pct` (readback, one producer) and `pwm_commanded_pct` (command, one producer, DEC-318) rather than inferring either from this field. Unambiguous for OpenFan and GPU sources, which have no readback attribute. **For an OpenFan channel it is withdrawn when the daemon stops knowing the duty (DEC-412, `TS-ad`):** after a write whose reply failed (the frame may or may not have landed), and for every channel on a serial reconnect or a system resume (the device may have come back at its power-on default). It reappears with the next write that lands — the next tick, for a channel a profile drives. Absent means "not known", never 0 %.
+- duty_pct (optional; DEC-204) — firmware-**measured** current fan duty %, present only for sources with a duty readback (NVIDIA via NVML). Distinct from `last_commanded_pwm` (commanded) — never conflate. May exceed 100 (NVML expresses it as a % of max noise tolerance), but it is a `u8` on the wire (`responses.rs`) and so saturates at **255** — a larger reading is not representable. Omitted when absent.
 - age_ms
-- stall_detected (optional bool) — daemon-asserted; set when a fan's duty is above the daemon's `STALL_PWM_THRESHOLD` (20%, i.e. ≥21%) but measured RPM is zero. Evaluated for OpenFan and hwmon fans only — **never for a GPU fan, which always reports `null`**. For an OpenFan channel the duty is `last_commanded_pwm`. **For an hwmon header (DEC-458, daemon ≥ 3.2.0) it depends on who drives the header:** one the daemon commands is measured against `pwm_commanded_pct`; one it does not command — never taken, or given back (a hand-back, or the release of a header with no mode switch, DEC-451) — is measured against `pwm_readback_pct`, **but only once the daemon has seen that header's fan spinning (RPM above 0) since it started**, and otherwise reports `null`. That is what tells a fan that stopped from a header with no fan: both read 0 RPM under a firmware duty, and only the fan ever turned. The record is never cleared, so a fan unplugged while the daemon runs reads as stalled. Older daemons read `last_commanded_pwm` for hwmon too, which for a header nothing controls is the sysfs readback (`AIO5-a`, above), so there a BIOS-held or stale duty above 20 % on a header with no fan reports `true` (register row `PTR-k`). **A diagnostic's writes (any diagnostic holding the verify slot: verify, characterisation, stall probe, control-path discovery) are not commands (`PTR-ag`, daemon ≥ 3.7.0):** a header a diagnostic has written reports `null` while that diagnostic holds the write pause (`verify_active`), and once it has ended is judged as a header the daemon does not command (the readback rule above) until the engine commands it again or the header is given back — so the duty a test restored on a header with no mode switch is never taken for a command. Other headers keep their verdict during a diagnostic. `pwm_commanded_pct` still reports the duty the test wrote. Older daemons measured a header under test against the test's duty, and a no-mode header against the duty the test restored until a profile commanded it. Evaluated per-tick from the latest snapshot (no multi-cycle counter); `null`/omitted when RPM is not polled, and whenever the duty it is measured against is absent — so for an OpenFan channel from daemon ≥ 2.55.0 it is also withdrawn while that channel's duty is unknown (after a failed reply, a reconnect or a resume; DEC-412), and from daemon ≥ 4.0.0 while a firmware update suspends OpenFan writes (DEC-481): the duty is then the update's parking 100 %, and no tach is read after it. `null` means *not evaluated*, never *not stalled*. Surfaced by the GUI as an `error`-level warning.
-- fan_alarm (optional bool, DEC-316, daemon ≥ 2.31.0) — the driver's own `fanN_alarm` bit for an hwmon header. Carried on the **1 Hz poll** rather than on `/hwmon/headers` deliberately: it is *state*, and clients refetch headers only occasionally, so an alarm frozen into the discovery snapshot would read "clear" while a fan is failing. `null`/absent means **not known** — either the driver exposes no alarm attribute, or the cache entry was refreshed by a PWM write without re-reading it — and must never be rendered as "no alarm". Distinct from `stall_detected`, which the daemon infers; this is what the hardware itself asserts.
-- pwm_readback_pct (optional int, DEC-317, daemon ≥ 2.32.0) — the **hardware readback** of `pwmN`, as a percent, for an hwmon header. Distinct from `last_commanded_pwm`, which for an hwmon header carries whichever of the poll's readback and the engine's command wrote last (register row `AIO5-a`) — the two axes are separable only through this field. It is what makes a device-side override diagnosable at all: that classification is `command low + readback low + RPM high`, which cannot be expressed while command and readback share a value. `null`/absent means **the daemon did not say** — never 0% — and is what a pre-2.32 daemon, an OpenFan channel and a GPU fan all report, since neither of the latter has an equivalent attribute. Do not synthesise one by echoing the command back.
-- pwm_commanded_pct (optional int, DEC-318, daemon ≥ 2.33.0) — the duty the daemon last **commanded** for an hwmon header, as a percent. The command half of the pair whose readback half is `pwm_readback_pct`, and the field to read whenever the value the daemon actually chose matters. **Single-producer:** only the hwmon write path sets it, which is exactly what `last_commanded_pwm` is not (register row `AIO5-a`). Together the two fields are the separate axes the Hardware page shows as *Requested PWM* and *Readback PWM*; collapsing them makes a write failure, a BIOS/EC reclaim and a device-side override indistinguishable. `null`/absent means **the daemon has never commanded this header, or has given it back since** (a hand-back that lands clears it, DEC-382, and so does the release of a header with no mode switch, DEC-451) — never 0% — and is what a pre-2.33 daemon reports for every fan. hwmon only: an OpenFan channel and a GPU fan already carry an unambiguous single-producer command in `last_commanded_pwm` and report `null` here rather than duplicating it. **Client fallback:** with this field absent, `last_commanded_pwm` may be shown as the requested duty only if it is flagged as approximate — never presented as a command.
-- duty_corrections (optional int, DEC-406, daemon ≥ 2.53.0, capability `control.duty_reconciliation`) — how many times the engine has **rewritten** this hwmon header's duty since the daemon started, because a coalesced tick read `pwmN` back more than 2 points (the readback tolerance characterisation uses) from the duty the header **took** — what `pwmN` read immediately after the daemon's last write, or the command where that read failed. Measured against what the header took, not against the command, so a coarse driver (`dell_smm`'s three levels, `thinkpad_acpi`'s eight) or a clamping chip is never counted; a clamp shows as a `pwm_readback_pct` that differs from `pwm_commanded_pct` from the first write on. Each correction is evidence of a second writer (a vendor tool, a script, firmware) or of a header that will not hold the duty it is given. **Present on every hwmon entry from a daemon with the capability — `0` for a header never corrected**; absent on OpenFan and GPU entries and from older daemons. Never reset while the daemon runs, so a client measures a window by the **delta** between two reads. Only the engine's own writes (profile curves, overrides) are reconciled: a diagnostic's writes under a verify lease never add to it, and a thermal-force write is not a correction.
-- duty_not_holding (optional bool, DEC-406, daemon ≥ 2.53.0, same capability and presence rule as `duty_corrections`) — the engine has **stopped** rewriting this header: 3 corrections in a row landed and were contradicted by the next tick's readback (a correction whose write failed is not counted, so this is never `true` beside `duty_corrections: 0`). While `true` the daemon commands the curve's duty but does not re-assert it, so the readback is whatever the other writer or the clamping chip left. Returns to `false` when the command changes (corrections resume), when a coalesced readback agrees again, or when the engine stops commanding the header (hand-back, profile deactivation). An unreadable duty register is never a mismatch and never sets this.
-- pwm_enable_mode (optional int, DEC-316, daemon ≥ 2.31.0) — the **live** `pwmN_enable` mode for an hwmon header: 0 = no control / full speed, 1 = manual, 2+ = driver-specific automatic modes. On the poll rather than on `/hwmon/headers` because the daemon writes this attribute itself when it takes a header over; a value captured at discovery would report the pre-takeover mode forever, while the field's whole diagnostic value is answering "is something else controlling this header *now*?" (a BIOS reclaim, say). `null`/absent means not known. Use `PwmHeaderEntry.supported_pwm_enable_modes` to interpret a value above 1.
+- stall_detected (optional bool) — daemon-asserted; set when a fan's duty is above the daemon's `STALL_PWM_THRESHOLD` (20%, i.e. ≥21%) but measured RPM is zero. Evaluated for OpenFan and hwmon fans only — **never for a GPU fan, which always reports `null`**. For an OpenFan channel the duty is `last_commanded_pwm`. **For an hwmon header (DEC-458, daemon ≥ 3.2.0) it depends on who drives the header:** one the daemon commands is measured against `pwm_commanded_pct`; one it does not command — never taken, or given back (a hand-back, or the release of a header with no mode switch, DEC-451) — is measured against `pwm_readback_pct`, **but only once the daemon has seen that header's fan spinning (RPM above 0) since it started**, and otherwise reports `null`. That is what tells a fan that stopped from a header with no fan: both read 0 RPM under a firmware duty, and only the fan ever turned. The record is never cleared, so a fan unplugged while the daemon runs reads as stalled. Older daemons read `last_commanded_pwm` for hwmon too, which for a header nothing controls is the sysfs readback (`AIO5-a`, above), so there a BIOS-held or stale duty above 20 % on a header with no fan reports `true` (register row `PTR-k`). **A diagnostic's writes (any diagnostic holding the verify slot: verify, characterisation, stall probe, control-path discovery) are not commands (`PTR-ag`, daemon ≥ 3.7.0):** a header a diagnostic has written reports `null` while that diagnostic holds the write pause (`verify_active`), and once it has ended is judged as a header the daemon does not command (the readback rule above) until the engine commands it again or the header is given back — so the duty a test restored on a header with no mode switch is never taken for a command. Other headers keep their verdict during a diagnostic. `pwm_commanded_pct` still reports the duty the test wrote. Older daemons measured a header under test against the test's duty, and a no-mode header against the duty the test restored until a profile commanded it. Evaluated per-tick from the latest snapshot (no multi-cycle counter); `null`/omitted when RPM is not polled, and whenever the duty it is measured against is absent — so for an OpenFan channel it is also withdrawn while that channel's duty is unknown (after a failed reply, a reconnect or a resume; DEC-412), and from daemon ≥ 4.0.0 while a firmware update suspends OpenFan writes (DEC-481): the duty is then the update's parking 100 %, and no tach is read after it. `null` means *not evaluated*, never *not stalled*. Surfaced by the GUI as an `error`-level warning.
+- fan_alarm (optional bool, DEC-316) — the driver's own `fanN_alarm` bit for an hwmon header. Carried on the **1 Hz poll** rather than on `/hwmon/headers` deliberately: it is *state*, and clients refetch headers only occasionally, so an alarm frozen into the discovery snapshot would read "clear" while a fan is failing. `null`/absent means **not known** — either the driver exposes no alarm attribute, or the cache entry was refreshed by a PWM write without re-reading it — and must never be rendered as "no alarm". Distinct from `stall_detected`, which the daemon infers; this is what the hardware itself asserts.
+- pwm_readback_pct (optional int, DEC-317) — the **hardware readback** of `pwmN`, as a percent, for an hwmon header. Distinct from `last_commanded_pwm`, which for an hwmon header carries whichever of the poll's readback and the engine's command wrote last (register row `AIO5-a`) — the two axes are separable only through this field. It is what makes a device-side override diagnosable at all: that classification is `command low + readback low + RPM high`, which cannot be expressed while command and readback share a value. `null`/absent means **the daemon did not say** — never 0% — and is what an OpenFan channel and a GPU fan report, since neither has an equivalent attribute. Do not synthesise one by echoing the command back.
+- pwm_commanded_pct (optional int, DEC-318) — the duty the daemon last **commanded** for an hwmon header, as a percent. The command half of the pair whose readback half is `pwm_readback_pct`, and the field to read whenever the value the daemon actually chose matters. **Single-producer:** only the hwmon write path sets it, which is exactly what `last_commanded_pwm` is not (register row `AIO5-a`). Together the two fields are the separate axes the Hardware page shows as *Requested PWM* and *Readback PWM*; collapsing them makes a write failure, a BIOS/EC reclaim and a device-side override indistinguishable. `null`/absent means **the daemon has never commanded this header, or has given it back since** (a hand-back that lands clears it, DEC-382, and so does the release of a header with no mode switch, DEC-451) — never 0%. hwmon only: an OpenFan channel and a GPU fan already carry an unambiguous single-producer command in `last_commanded_pwm` and report `null` here rather than duplicating it. **Client fallback:** with this field absent, `last_commanded_pwm` may be shown as the requested duty only if it is flagged as approximate — never presented as a command.
+- duty_corrections (optional int, DEC-406, capability `control.duty_reconciliation`) — how many times the engine has **rewritten** this hwmon header's duty since the daemon started, because a coalesced tick read `pwmN` back more than 2 points (the readback tolerance characterisation uses) from the duty the header **took** — what `pwmN` read immediately after the daemon's last write, or the command where that read failed. Measured against what the header took, not against the command, so a coarse driver (`dell_smm`'s three levels, `thinkpad_acpi`'s eight) or a clamping chip is never counted; a clamp shows as a `pwm_readback_pct` that differs from `pwm_commanded_pct` from the first write on. Each correction is evidence of a second writer (a vendor tool, a script, firmware) or of a header that will not hold the duty it is given. **Present on every hwmon entry from a daemon with the capability — `0` for a header never corrected**; absent on OpenFan and GPU entries. Never reset while the daemon runs, so a client measures a window by the **delta** between two reads. Only the engine's own writes (profile curves, overrides) are reconciled: a diagnostic's writes under a verify lease never add to it, and a thermal-force write is not a correction.
+- duty_not_holding (optional bool, DEC-406, same capability and presence rule as `duty_corrections`) — the engine has **stopped** rewriting this header: 3 corrections in a row landed and were contradicted by the next tick's readback (a correction whose write failed is not counted, so this is never `true` beside `duty_corrections: 0`). While `true` the daemon commands the curve's duty but does not re-assert it, so the readback is whatever the other writer or the clamping chip left. Returns to `false` when the command changes (corrections resume), when a coalesced readback agrees again, or when the engine stops commanding the header (hand-back, profile deactivation). An unreadable duty register is never a mismatch and never sets this.
+- pwm_enable_mode (optional int, DEC-316) — the **live** `pwmN_enable` mode for an hwmon header: 0 = no control / full speed, 1 = manual, 2+ = driver-specific automatic modes. On the poll rather than on `/hwmon/headers` because the daemon writes this attribute itself when it takes a header over; a value captured at discovery would report the pre-takeover mode forever, while the field's whole diagnostic value is answering "is something else controlling this header *now*?" (a BIOS reclaim, say). `null`/absent means not known. Use `PwmHeaderEntry.supported_pwm_enable_modes` to interpret a value above 1.
 
 Note: fans do **not** include `label` or `kind` from the daemon — every display name is
 derived GUI-side by `AppState.fan_display_name` / `fan_fallback_name`, in this order:
@@ -1448,7 +1295,7 @@ tier. The control surfaces resolve through `AppState.member_display_name`
 `infer_member_role` and the daemon's `member_is_pump_or_cpu` match "cpu"/"pump"/"aio"
 against it to apply the DEC-095/162 30% CPU/pump floor.
 
-**As of daemon 2.17.0 this is no longer a pure mirror (DEC-252).** The daemon's
+**This is not a pure mirror (DEC-252).** The daemon's
 *eval-time* classifier is a **union**: the hard floor applies if the client's
 `member_label` says cpu/pump/aio **or** the label the daemon itself discovered does —
 the latter travelling in the member's own stable id (`hwmon:{chip}:{device}:pwmN:{label}`).
@@ -1462,39 +1309,35 @@ Two consequences a client must know:
   cannot start refusing profiles the GUI still bakes. **One exception: the daemon's
   liquid-cooler chip list grows.** That list is a term of the narrow classifier too, so
   when a daemon learns a new cooler, a profile saved earlier with a fan control on it
-  below 30 % is refused on save and on activation. Daemon 2.56.1 added the NZXT Kraken
-  2024 Elite (`kraken2024elite`, DEC-423). A GUI from 2.83.2 raises such a control to
-  30 % every time it loads a profile, so it saves and activates the healed copy; an
-  older GUI does not, and its user must upgrade the GUI with the daemon.
-- **The GUI adopted the same union in v2.41.0** (DEC-257), so the displayed floor now
+  below 30 % is refused on save and on activation (DEC-423). The GUI raises such a
+  control to 30 % every time it loads a profile (below), so it saves and activates the
+  healed copy.
+- **The GUI applies the same union** (DEC-257), so the displayed floor
   matches what the daemon enforces: `infer_member_role` parses the daemon-discovered
   label out of the member id exactly as the daemon does. Safe in either skew direction —
   a GUI stamping a *higher* floor is accepted by any daemon, which is why the daemon's
   `validate()` rejection was deliberately left on the narrower classifier.
-- **Every profile load raises a pump/CPU control to 30 % (GUI ≥ 2.83.2, DEC-423).**
+- **Every profile load raises a pump/CPU control to 30 % (DEC-423).**
   `heal_pump_floor` runs on both load paths and only ever raises; it enforces the floor
   `validate()` checks and the engine clamps to, so a stored value below it cannot
   survive a load. The chassis 20 % stays a default: `apply_role_floor` applies it when
-  members are edited, never on load, so a user's lower chassis value is kept. Before
-  2.83.2 neither ran on load, and a profile written before v2.41.0 kept its stored
-  `minimum_pct` until it was next edited.
+  members are edited, never on load, so a user's lower chassis value is kept.
 
 The limit is worth stating: where a chip publishes no label file the daemon synthesises
 `pwmN`, and it reads no `/etc/sensors.d`, so on such a board the author's label is still
 the only signal. This is a backstop, not an independent pump detector — `member_label`
 remains a safety input.
 
-**Fan telemetry is only reported when it was actually measured (DEC-309, daemon ≥ 2.27.0).** Three
-consequences a client must handle, none of which change a field's type or presence rules:
+**Fan telemetry is only reported when it was actually measured (DEC-309).** Three
+consequences a client must handle:
 
 - **`rpm` is absent, not `0`, for an OpenFan channel nothing has polled.** The daemon tracks whether a
-  channel's RPM was ever read; a channel it has only ever *written* now omits `rpm` rather than
-  publishing the struct's initial `0`, which was indistinguishable on the wire from a genuinely
-  stalled fan. `stall_detected` was already absent in that state and is unchanged. A channel that
+  channel's RPM was ever read; a channel it has only ever *written* omits `rpm` rather than
+  publishing `0`, which would be indistinguishable on the wire from a genuinely
+  stalled fan. `stall_detected` is absent in that state too. A channel that
   *was* polled and genuinely read zero still reports `rpm: 0` with `stall_detected: true`.
-- **`age_ms` on a GPU fan no longer resets when the daemon commands it.** It is the age of the
-  *reading*, and a command is not a reading. Before this it could report ~0 beside an `rpm`/`duty_pct`
-  frozen at whatever the last poll saw. Same rule the OpenFan path adopted in DEC-302.
+- **`age_ms` on a GPU fan does not reset when the daemon commands it.** It is the age of the
+  *reading*, and a command is not a reading. Same rule as the OpenFan path (DEC-302).
 - **A hwmon fan can disappear from the list.** An entry nothing has refreshed for 5 poll intervals is
   evicted, rather than being published forever with an `age_ms` climbing without bound. A fan under
   active control cannot vanish this way — every engine write refreshes its entry. Treat a fan's
@@ -1518,11 +1361,10 @@ Use to discover:
   other chip whose `pwmN` lacks write permission appears here with
   `is_writable: false` — the GUI must not offer such headers in the
   member-picker (DEC-102). **The daemon does not reject a profile that binds
-  one**: it saves and activates it, and its engine never writes the header. From
-  daemon 2.55.0 (DEC-412) a control whose members are all such headers is listed
-  in `skipped_controls[]` as `backend_unavailable`; a control with a writable
-  member keeps driving that member. Before 2.55.0 the control published a duty
-  its read-only header never received. Control-path discovery and the stall
+  one**: it saves and activates it, and its engine never writes the header. A
+  control whose members are all such headers is listed
+  in `skipped_controls[]` as `backend_unavailable` (DEC-412); a control with a writable
+  member keeps driving that member. Control-path discovery and the stall
   probe refuse a read-only header with `400 feature_unavailable`.
 - `chip_name` — **canonical** (DEC-442, daemon ≥ 3.0.0): on an it87 v2.0
   Gigabyte chip the driver's board suffix is stripped, so this reads `it8696`
@@ -1533,8 +1375,8 @@ Use to discover:
   it87 v2.0 Gigabyte chip. **Match `/etc/sensors.d` `chip "…"` blocks against
   this and nothing else** — libsensors does, and upstream's per-board configs are
   written against the suffixed name, so matching them against `chip_name` would
-  apply another board's labels. Never build or compare an id from it. Omitted by
-  older daemons; the GUI then uses `chip_name` (`HwmonHeader.sysfs_chip_name`,
+  apply another board's labels. Never build or compare an id from it. Where it is
+  absent the GUI uses `chip_name` (`HwmonHeader.sysfs_chip_name`,
   `hwmon_label_resolver.resolve_hwmon_header_label`). The same struct serves
   `GET /inventory/hwmon`'s `pwm_controls`, so the field appears there too.
 - `pwm_mode` (optional integer) — `0` = DC (voltage) mode, `1` = PWM
@@ -1543,56 +1385,50 @@ Use to discover:
   DC-driven fans differently from PWM-driven ones (`models.py`
   `HwmonHeader.pwm_mode`, daemon `responses.rs`
   `PwmHeaderEntry.pwm_mode`).
-- `is_aio` (boolean, DEC-156, daemon ≥ 1.18.0) — `true` when the header belongs to a
+- `is_aio` (boolean, DEC-156) — `true` when the header belongs to a
   liquid cooler (NZXT Kraken / Aquacomputer). Daemon-authoritative hint so the GUI can
   cluster and floor pumps without re-deriving hardware knowledge; per-driver pump
-  writability still rides `is_writable`. Omitted/`false` on daemons that predate it.
+  writability still rides `is_writable`.
   **Chip-level.** It answers "is this hwmon *device* a liquid cooler?", which is the wrong
   question for the commonest AIO topology — a pump on a motherboard header, where the device
   is a Super-I/O chip. `role` below answers the per-channel question instead. Both ship; neither
   replaces the other.
-- `role` (string, DEC-311, daemon ≥ 2.28.0) — what this channel **drives**:
+- `role` (string, DEC-311) — what this channel **drives**:
   `"unknown"` | `"cpu_fan"` | `"pump"` | `"radiator_fan"` | `"chassis_fan"` | `"no_fan"` (daemon ≥ 3.4.0,
   `control.header_role_no_fan`; always `role_source: "user_assigned"`), with the user's
   `POST /config/header-role` assignment already applied. A pump on a motherboard `AIO_PUMP`
   header is `role: "pump", is_aio: false`.
 
   **Treat it as an opaque token.** Render a value you do not recognise rather than dropping the
-  header (the 273-i rule), and never grant an unknown token pump semantics. Omitted by daemons
-  before 2.28.0 → default `"unknown"`.
+  header (the 273-i rule), and never grant an unknown token pump semantics. Absent → default
+  `"unknown"`.
 
   Deliberately conservative: `CPU_OPT` classifies `"unknown"`, not `"pump"`. It is both where an
   AIO pump most often lands *and* where a second CPU-radiator fan lands, and there is nothing in
   the label to tell them apart — guessing `pump` would floor a radiator fan at 30 %, guessing
   `radiator_fan` would let identify stop a pump. `CPU_FAN` is `"cpu_fan"`, never `"pump"`.
-- **AIO-MB Phase 4 fields (DEC-316, daemon ≥ 2.31.0).** Every one is **optional on the wire and
+- **AIO-MB Phase 4 fields (DEC-316).** Every one is **optional on the wire and
   absent when the daemon or the driver cannot answer**. That is load-bearing, not tidiness:
-  `effective_min_pwm_pct` typed as a plain integer would parse as `0` against a pre-2.31.0
-  daemon, i.e. the GUI would believe a **0% floor on a pump**. Absent means "fall back to your
-  own reconstruction", never "zero".
+  a client that parsed an absent `effective_min_pwm_pct` as `0` would believe a **0% floor on
+  a pump**. Absent means "fall back to your own reconstruction", never "zero".
 
   - `effective_min_pwm_pct` (int, optional) — the duty floor the daemon **will actually
     enforce** for this header: its resolved device policy, clamped by the absolute pump
     backstop (20%). Prefer this over re-deriving a floor from labels and chip names. With the
-    generic-only policy table shipped in 2.31.0 it is `30` for every pump-protected header and
-    `0` for every other header — identical to what the engine already enforces. **Since daemon
+    generic-only policy table it is `30` for every pump-protected header and
+    `0` for every other header — identical to what the engine enforces. **Since daemon
     3.0.0 (DEC-443) a pump-protected header whose `pwm_mode` is `0` (DC) reports `70`** — the DC
     pump floor, which the engine, identify, verify, characterisation, discovery and the stall probe
     all apply to it: a voltage-driven pump stalls much higher in its range than a PWM one. A
     non-pump header in DC mode is unaffected, and a driver that publishes no `pwmN_mode` (it87)
     keeps the 30 % floor.
 
-    **Daemons 2.31.0 – 2.35.3 over-claimed for one case (`WIRE-b`, fixed in 2.35.4).** A
-    *radiator or auxiliary member of a cooling device* resolved that device's policy —
-    `generic_pump` by default — and so published `30`, while every enforcement site keys on the
-    pump-protection union, in which membership is not a term. Nothing held that floor. The tell
-    is a header reporting a non-zero floor **and** `stop_permitted: true` together: from 2.35.4
-    that pairing cannot occur, and against an older daemon it means the floor is decorative.
-    Note this was a *reporting* defect only — no cooling behaviour changed in the fix.
+    A *radiator or auxiliary member of a cooling device* reports the floor the pump-protection
+    union gives it, in which membership is not a term (`WIRE-b`), so a header never reports a
+    non-zero floor **and** `stop_permitted: true` together.
   - `stop_permitted` (bool, optional) — whether the header may be driven to 0 at all. `false`
     wherever the daemon's pump-protection union holds, whatever a policy claims. **`null`/absent
-    is not `false`** — read it as unknown and fall back, or an older daemon's pump becomes
-    "stoppable".
+    is not `false`** — read it as unknown and fall back, never as "stoppable".
 
     **It can change when the active profile does (DEC-384).** One input of the union is a member
     of the active profile whose label names a pump, so activating, switching or deactivating a
@@ -1602,27 +1438,19 @@ Use to discover:
     other two the running controller's headers). A client that caches the list is advisory only between fetches — the GUI
     re-reads it within one poll of an activation, switch or deactivation (`TS-ae`, DEC-416) — the daemon
     decides at the call and reports what it did in identify's `mode`, which is the value to
-    trust. The client-side reconstruction for daemons that omit this field must **not** add the
-    profile term: no such daemon has it.
+    trust. A client-side reconstruction, where this field is absent, must **not** add the
+    profile term.
 
-    **Daemons 2.31.0 – 2.33.x did not honour that sentence, and this paragraph is what they
-    diverged from (`AIO7-d`, fixed in 2.35.0 / DEC-322; the unpublished 2.34.0 had it too).** The published value was
-    `!pump_protected && policy.supports_stop`, and `PwmHeaderEntry::from_descriptor` resolves
-    **one** policy for *every member* of a cooling device — so a radiator fan in an AIO
-    inherited the pump policy's `supports_stop: false` and was published as unstoppable, while
-    `POST /fans/{id}/identify` branches on the pump-protection union alone (membership is not a
-    term in it) and stopped it. Measured on an X870E AORUS MASTER: `pwm1`, a `radiator_members`
-    entry with `role: unknown`, no pump label and not a liquid-cooler channel 1, reported
-    `stop_permitted: false` while its identify predicate was `false`. Both directions were
-    wrong, and the second is the one that mattered: a header named as a `pump_member`
-    **without** a pump role — reachable by `curl`, and something this document already notes
-    confers no floor — was promised `stop_permitted: false` while identify drove it to 0.
-    From 2.35.0 the published value is exactly `!header_is_pump_protected`, pinned by
-    `stop_permitted_matches_identify_for_every_shipped_policy`.
+    The published value is exactly `!header_is_pump_protected` (`AIO7-d`, DEC-322), the same
+    predicate `POST /fans/{id}/identify` branches on, pinned by
+    `stop_permitted_matches_identify_for_every_shipped_policy`. Cooling-device membership is not
+    a term in it: a radiator fan in an AIO, or a header named as a `pump_member` without a pump
+    role, is not protected.
 
-    **Related, and it changes what one diagnostic field means (daemon ≥ 2.35.0, `AUD3-l`).**
+    **Related: what one diagnostic field means (`AUD3-l`).**
     A diagnostic captures the pre-test duty and restores it on the way out. For a
-    **pump-protected** header that restore is now clamped to the 30% floor, because
+    **pump-protected** header that restore is clamped to the pump floor (30%, or 70% on a
+    DC-mode header, DEC-443), because
     `set_pwm` always asserts `pwm_enable=1` and restoring a captured 0 would convert *0 under
     firmware control* into *0 under manual control with no writer* — a stopped pump. So
     `restore_failed: false` and `restore_outcome: "restored"` mean **"restored, floor-clamped"**
@@ -1631,13 +1459,9 @@ Use to discover:
     on a pump — read it back from `/poll`. A non-pump header is still restored exactly as
     captured, 0 included, so the two agree there.
 
-    **Two consequences for a client.** Against 2.31.0 – 2.33.x, a `false` on a *radiator or
-    auxiliary member of a cooling device* is not evidence of pump protection and must not be
-    used to suppress a stop warning; there is no capability flag distinguishing the two
-    behaviours, so branch on the daemon version if that matters to you. And do **not** derive
-    `stop_permitted` and `effective_min_pwm_pct` from one another. From 2.35.4 both are
-    functions of the pump-protection union alone and therefore perfectly correlated
-    (`WIRE-b`, formerly `AIO4-a`/`AUD3-r`) — but **that correlation is a property of the
+    **Do not derive `stop_permitted` and `effective_min_pwm_pct` from one another.** Both are
+    functions of the pump-protection union (and, for the floor, `pwm_mode`) and therefore
+    correlated (`WIRE-b`) — but **that correlation is a property of the
     generic-only policy table, not a contract.** A future validated policy lowers the floor
     toward the 20% backstop without changing `stop_permitted` at all, at which point a client
     that inferred one from the other is wrong about a pump.
@@ -1692,7 +1516,7 @@ Use to discover:
     so a client watching `verify_active` should re-read one poll after it falls. The record is persisted (`{state_dir}/pwm_verification.json`),
     survives a restart, and is dropped at boot when its header id is no longer discovered.
 
-- `role_source` (string, DEC-311, daemon ≥ 2.28.0) — how `role` was established:
+- `role_source` (string, DEC-311) — how `role` was established:
   `"none"` | `"label"` | `"chip_mapping"` | `"user_assigned"`. Lets a client distinguish a
   confident classification from a header worth asking the user about. Note that on boards whose
   Super-I/O publishes no `pwmN_label`/`fanN_label` files — common; measured on `it8696`, which
@@ -1743,13 +1567,13 @@ Comprehensive hardware readiness report. Stable v1 fields documented in
 the daemon's `responses.rs::HardwareDiagnosticsResponse`.
 
 **`thermal_safety.emergency_threshold_c` is PER-MACHINE, not a constant
-(DEC-308, daemon ≥ 2.26.0).** The daemon derives the trip point from the CPU's
+(DEC-308).** The daemon derives the trip point from the CPU's
 own reported design ceiling (`tempN_crit`) as `min(ceiling + 5 °C, 115 °C)`,
 falling back to 105 °C where the kernel publishes nothing usable, and this field
 reports the value the engine **actually acted on** — published in the same write
 as `thermal_state`, so the two cannot disagree by a tick. Render it; never
-compare it to a literal and never assume 105. `release_threshold_c` is still the
-fixed 80 °C. Older daemons report the constant, which remains a correct floor.
+compare it to a literal and never assume 105. `release_threshold_c` is the
+fixed 80 °C.
 
 **`hwmon.chips_detected[].bound_driver` (DEC-469, `BRD-g`, daemon ≥ 3.3.0; additive — omitted
 when not observed).** The kernel driver actually bound to the chip, read from its hwmon device's
@@ -1771,11 +1595,9 @@ report show the bound driver and a `BOUND` status wherever it is present, fallin
 
 **`thermal_safety.coolant_limit_c` / `coolant_release_c` (DEC-443, daemon ≥ 3.0.0)** — the
 coolant emergency's limit and release point (limit − 5 °C) as the engine acted on them, published
-in the same write as `thermal_state`; before the engine's first tick, the configured limit. Absent
-on an older daemon, which has no coolant rung.
+in the same write as `thermal_state`; before the engine's first tick, the configured limit.
 
-**Environment facts (DEC-405, daemon ≥ 2.53.0 — merged as 2.52.0, which was never
-published; `PTR-f`).** The facts that tell
+**Environment facts (DEC-405, `PTR-f`).** The facts that tell
 a driver, kernel or BIOS update apart from a hardware change are published, each
 `null` when absent — never `""` — and capped at 128 bytes: top-level
 `kernel_release` (`/proc/sys/kernel/osrelease`), `board.bios_date` (DMI, passed
@@ -1784,25 +1606,22 @@ through unparsed), and per `kernel_modules[]` entry `version`, `srcversion` and
 **loaded** module, so an unloaded one is `null` throughout; `out_of_tree: false`
 means the module's taint was read and carries no `O`, while `null` means it could
 not be read — never a guessed in-tree. Render every one as plain text.
-**GUI use (DEC-408, GUI ≥ 2.82.0):** the PWM Test Report records all five in its
+**GUI use (DEC-408):** the PWM Test Report records all five in its
 environment section (beside the GUI's own `uname`, since the two are separate processes),
-and the wire oracle now pins `HardwareDiagnosticsResponse`, `BoardInfo` and
+and the wire oracle pins `HardwareDiagnosticsResponse`, `BoardInfo` and
 `KernelModuleInfo` in both repos (`PTR-r`).
 
 **The PWM Test Report's gate on this surface (DEC-408).** DEC-405 corrected what a sweep's
 `settled_ms`/`stability` and discovery's noise floor *mean* without adding a capability flag,
-so the report withholds its sweep and tach pairing from a daemon whose `daemon_version` is
-below **2.52.0** — the one version comparison in the GUI's capability registry
-(`settled_diagnostic_evidence`); every other offer is flag-gated. The code compares against
-2.52.0, where DEC-405 was merged; since no 2.52.x was published, the first daemon that passes
-is 2.53.0.
+so the report gates its sweep and tach pairing on `daemon_version` — the one version
+comparison in the GUI's capability registry (`settled_diagnostic_evidence`); every other
+offer is flag-gated.
 
-**`hwmon.enable_revert_last_seen_ms` dates the reclaim counts (DEC-360, daemon
-≥ 2.46.0).** `hwmon.enable_revert_counts` is cumulative **for the life of the
+**`hwmon.enable_revert_last_seen_ms` dates the reclaim counts (DEC-360).** `hwmon.enable_revert_counts` is cumulative **for the life of the
 PWM controller and has no reset path** — `POST /hwmon/rescan` deliberately does
 not rebuild the controller — so a client reading it alone cannot tell an active
 BIOS fight from a single reclaim hours ago that the daemon's watchdog already
-remediated, and was forced to present both identically and permanently. This map
+remediated. This map
 reports, per header id, the age in milliseconds of the most recent **counted**
 reclaim.
 
@@ -1812,7 +1631,7 @@ reclaim.
   the busy headers whose activity matters most.
 * It shares a lifetime with the counts — both live on the controller and reset
   together — so an age here can never describe a different daemon's count.
-* `skip_serializing_if = "HashMap::is_empty"`, so an older daemon emits nothing
+* `skip_serializing_if = "HashMap::is_empty"`, so an empty map is omitted
   and the GUI parser defaults to `{}`. **A header present in
   `enable_revert_counts` but absent here means the age is UNKNOWN, never "just
   now" and never "ancient".** Clients must not default it either way: absence of
@@ -1823,8 +1642,8 @@ reclaim.
   Monitor keeps showing the count and relabels it. The daemon reports the age
   and takes no view on what "old" means.
 
-New optional fields added in DEC-101 — both serialise with
-`skip_serializing_if = "Vec::is_empty"`, so older daemons emit nothing
+Optional fields from DEC-101 — both serialise with
+`skip_serializing_if = "Vec::is_empty"`, so an empty list is omitted
 and the GUI parser defaults to `[]`:
 
 - `expected_chips: list[str]` — chip names this DMI board is known to
@@ -1834,8 +1653,8 @@ and the GUI parser defaults to `[]`:
   uses `set(expected_chips) − set(detected_chip_names)` to drive a
   warning banner with the recovery ladder (DEC-421: stop the trigger, reboot,
   then remove mains power; the `mmio=on` modprobe.d line only on pre-2026-03
-  driver builds). Since daemon 2.56.1 (DEC-421) a few single-chip Gigabyte boards are listed
-  with **one** chip, so the list is not always a pair. The comparison is exact.
+  driver builds). A few single-chip Gigabyte boards are listed
+  with **one** chip (DEC-421), so the list is not always a pair. The comparison is exact.
   The list is resolved against the bound chips in one case: where a board's row
   accepts an alternative primary (today the Gigabyte Z390 AORUS boards, whose
   firmware ID the it87 catalogue gives both an `it8688` and an `it8686` stanza;
@@ -1847,8 +1666,7 @@ and the GUI parser defaults to `[]`:
   support use. The GUI reads it into `HwmonChipInfo.sysfs_chip_name` and writes it
   beside `chip_name` in the support bundle's `hardware_diagnostics.hwmon.chips`
   objects and the PWM Test Report's `environment.chips` (DEC-473, `BRD-x`);
-  `wire_fields.json` pins the struct in both repos. On an older daemon the suffixed names do not match and
-  the warning is a false alarm, which the GUI's copy then says.
+  `wire_fields.json` pins the struct in both repos.
 - `expected_fanless_chips: list[str]` (daemon ≥ 3.7.0, `BRD-j`, additive, same
   omit-when-empty rule) — the chips in `expected_chips` that carry **no fan
   header** on this board, from the same curated row (today the B450 AORUS PRO's
@@ -1856,7 +1674,7 @@ and the GUI parser defaults to `[]`:
   GUI then heads the warning "fan headers unaffected" instead of "missing PWM
   headers" and drops the verify-result dual-chip hint. Empty means "carries fans,
   or not known not to" — never "fanless" by absence — so an older daemon keeps
-  the old wording. Where `board_firmware_counts` is present and its `fan_count`
+  the "missing PWM headers" wording. Where `board_firmware_counts` is present and its `fan_count`
   exceeds `hwmon.total_headers`, that measured deficit wins over the list. A
   count that matches cannot clear the fan headers: `total_headers` sums every
   PWM-capable chip, AIO and USB fan controllers included.
@@ -1864,14 +1682,12 @@ and the GUI parser defaults to `[]`:
   detection parsed from `/dev/kmsg` `it87:` lines. **In the shipped
   deployment this is always empty** (DEC-421): the packaged systemd unit sets
   `ProtectKernelLogs=true`, which denies `/dev/kmsg`, and Arch and CachyOS
-  kernels are built with `CONFIG_SECURITY_DMESG_RESTRICT=y`. (This entry used
-  to say "Arch default `kernel.dmesg_restrict=0`", which is false.) Even where
+  kernels are built with `CONFIG_SECURITY_DMESG_RESTRICT=y`. Even where
   it is readable, the driver's `Unsupported chip (DEVID=…)` line is `pr_debug`,
   so a blocked secondary never appears in it. Not authoritative — the source
   of truth for "what works" is `hwmon.chips_detected`.
 
-`board_firmware_counts` (daemon ≥ 2.36.0, additive — `api_version` unchanged,
-**omitted when the firmware did not say**) is what the board itself declares it
+`board_firmware_counts` (**omitted when the firmware did not say**) is what the board itself declares it
 has (`X87-d`), decoded from the Gigabyte SIV descriptor the `it87` driver exports
 at `/sys/class/gigabyte/id/gigabyte_siv`:
 `{platform, special, fan_count, temp_count, volt_count}`, each a small integer.
@@ -1894,13 +1710,12 @@ board with tach-only headers on a *detected* chip that overstates the deficit by
 exactly those headers. The reference GUI phrases it as "N expose a controllable
 fan header", which is true from this response alone.
 
-The key is **absent** on every non-Gigabyte board, when `it87` is not loaded, when
-the descriptor does not decode, and on older daemons — never a zeroed object. A
+The key is **absent** on every non-Gigabyte board, when `it87` is not loaded, and
+when the descriptor does not decode — never a zeroed object. A
 defaulted `fan_count: 0` would claim the board has no fan headers, a far stronger
 and wrong claim; a client must parse absence as "did not say".
 
-`voltages` (daemon ≥ 2.37.0, additive — `api_version` unchanged, omitted when
-empty) is the board's voltage rails, discovered from hwmon `inN_input`
+`voltages` (omitted when empty) is the board's voltage rails, discovered from hwmon `inN_input`
 (`WIRE-ag`). Each entry:
 `{id, chip_name, channel, label, value_v, identified}`, plus the optional
 board-catalogue fields `board_label`, `board_multiplier` and `board_unmapped` (daemon
@@ -1976,8 +1791,8 @@ are GPU voltages, not board rails, and are excluded).
 Entries are ordered by `(chip_name, device_id, channel)` — numerically by channel,
 so a chip with more than ten channels does not emit `in10` before `in2`.
 
-Additional optional field added in DEC-105 (same wire convention —
-`skip_serializing_if = "Vec::is_empty"`, so older daemons emit nothing
+Optional field from DEC-105 (same wire convention —
+`skip_serializing_if = "Vec::is_empty"`, so an empty list is omitted
 and the GUI parser defaults to `[]`):
 
 - `module_collisions: list[ModuleCollisionInfo]` — pairs of simultaneously
@@ -2008,8 +1823,7 @@ and the GUI parser defaults to `[]`):
   restore cannot be confirmed goes to 100 %, retried every tick if even
   that fails), and a thermal emergency still drives writable headers to
   100 %. Only removing the wrong driver — blacklist it, then reboot —
-  stops writes to the chip. Daemons before 2.56.3 (DEC-433) said "Do NOT write
-  PWM" instead, which a user of this daemon never does.
+  stops writes to the chip.
 
   The reference GUI renders the entry as a critical *Driver module
   collision* condition on System State, with the remediation in the
@@ -2026,11 +1840,10 @@ and the GUI parser defaults to `[]`):
   banner on legitimate dual-Nuvoton boards (e.g. ASRock X870E Taichi
   Lite, which ships NCT6686 at 0x0a20 + NCT6799 at 0x0290, each bound
   by its own driver). The single-chip brick scenario from DEC-105 still
-  emits CRITICAL. Older daemons (pre-DEC-106) emit the broader
-  result; the GUI parser handles both shapes identically.
+  emits CRITICAL.
 
-Additional optional field added in DEC-110 (`skip_serializing_if =
-"String::is_empty"` — older daemons emit nothing and the GUI parser
+Optional field from DEC-110 (`skip_serializing_if =
+"String::is_empty"` — omitted when empty, and the GUI parser
 defaults to `""`):
 
 - `cpu_vendor: str` — CPU vendor normalised from `/proc/cpuinfo`
@@ -2041,18 +1854,15 @@ defaults to `""`):
   that declare a `platform` scope (`"intel"` / `"amd"`) match only when
   `cpu_vendor` is non-empty AND matches; empty `cpu_vendor` suppresses
   platform-scoped quirks (the truthful direction: "we don't know, so
-  don't claim"). Quirks without a `platform` scope fire on any vendor,
-  preserving pre-DEC-110 behaviour.
+  don't claim"). Quirks without a `platform` scope fire on any vendor.
 
-  Also added to `KernelModuleInfo` indirectly: the daemon's
-  `KNOWN_MODULES` table now lists `intel_pch_thermal` (mainline=true) so
+  The daemon's `KNOWN_MODULES` table (reported through `KernelModuleInfo`) lists `intel_pch_thermal` (mainline=true) so
   Intel users see it reported honestly. `x86_pkg_temp` is deliberately
   excluded because its kernel driver registers with `.no_hwmon = true` —
   it appears as a thermal zone only, not under `/sys/class/hwmon`.
 
-Additional optional fields added in DEC-119 (daemon ≥ 1.10.0). All use
-`#[serde(default)]` / `skip_serializing_if`, so older daemons emit nothing
-and the GUI parser defaults safely:
+Optional fields from DEC-119. All use
+`#[serde(default)]` / `skip_serializing_if`, and the GUI parser defaults safely:
 
 - Top-level `amd_pci_devices: list[AmdPciDeviceInfo]` — AMD VGA-class PCI
   devices and their driver binding, detected by scanning
@@ -2072,7 +1882,7 @@ and the GUI parser defaults safely:
   on RDNA3+, but board-specific — one R9700 reports about 30). The firmware
   minimum is why a PMFW GPU fan cannot be driven lower via the curve: the
   kernel rejects a point below it, and the daemon clamps to it. Surfaced so it
-  is not mistaken for a GUI/daemon policy floor. `null` for non-PMFW GPUs (and, on daemon ≥ 2.18.0, for a PMFW GPU whose reported `OD_RANGE` speed pair is inverted or outside 0–100 — the daemon rejects an implausible range rather than trusting it, DEC-266).
+  is not mistaken for a GUI/daemon policy floor. `null` for non-PMFW GPUs (and for a PMFW GPU whose reported `OD_RANGE` speed pair is inverted or outside 0–100 — the daemon rejects an implausible range rather than trusting it, DEC-266).
 - `gpu.fan_minimum_pwm: int | None` — best-effort percent parse of the
   `gpu_od/fan_ctrl/fan_minimum_pwm` attribute. `null` when absent /
   unparseable.
@@ -2084,25 +1894,23 @@ and the GUI parser defaults safely:
   AMD GPU as that one does (DEC-449), duplicated so the diagnostics support bundle is self-contained. Omitted
   (→ `[]`) when none apply. Hand-parsed by the GUI (nested objects can't
   round-trip through the flat dataclass unpack).
-- `intel_gpu: object` (optional; DEC-121, daemon ≥ 1.12.0) — Intel discrete GPU
+- `intel_gpu: object` (optional; DEC-121) — Intel discrete GPU
   diagnostics: `pci_bdf`/`pci_id`, `pci_device_id`, `pci_revision`, `model_name`,
   `driver` (`"xe"`/`"i915"`), `fan_control_method` (`"read_only"`/`"none"`),
   `fan_rpm_available`, and `fan_control_note` (a daemon-supplied, display-ready
   explanation of why fan control is unavailable). **Absent** — omitted, never
-  `null` — when no Intel GPU is present or the daemon predates the field.
-- `nvidia_gpu: object` (optional; DEC-204, daemon ≥ 2.8.0) — NVIDIA discrete GPU
+  `null` — when no Intel GPU is present.
+- `nvidia_gpu: object` (optional; DEC-204) — NVIDIA discrete GPU
   diagnostics: `pci_bdf`/`pci_id`, `model_name`, `driver` (kernel module —
   `"nouveau"`/`"nvidia"`), `driver_version` (NVML only), `fan_control_method`
   (`"read_only"`/`"none"`), `fan_rpm_available`, and `fan_control_note`. No
   `pci_device_id`/`pci_revision`. **Absent** — omitted, never `null` — when no
-  NVIDIA GPU is present or the daemon predates the field.
+  NVIDIA GPU is present.
 
-> **Note — `GET /events` (SSE) removed.** The daemon exposed a Server-Sent Events
-> stream that no client ever consumed (the GUI is poll-only; DEC-164 deferred SSE
-> past 2.0.0). It was removed entirely in daemon v2.5.1 (DEC-198; merged as 2.5.0, which was never published). All data flows
+> **Note — there is no event stream** (DEC-164, DEC-198). All data flows
 > through the 1 Hz `PollingService` over `GET /poll`.
 
-### GET /inventory/cooling-devices (DEC-316, daemon ≥ 2.31.0)
+### GET /inventory/cooling-devices (DEC-316)
 
 The configured cooling-device topology — a named assembly binding a pump header, radiator fan
 headers, auxiliary members and a temperature source. Capability-gated on
@@ -2110,7 +1918,7 @@ headers, auxiliary members and a temperature source. Capability-gated on
 
 **One read is deliberately ungated: the PWM Test Report's snapshot (DEC-408).** It fetches this
 route (and `GET /diagnostics/control-path`) on any daemon and records the answer *with its
-status*, so an older daemon's `404` is kept as evidence of what that daemon lacked. Nothing is
+status*, so a `404` is kept as evidence of what that daemon lacked. Nothing is
 decided from the status — no feature is offered or withheld on it — which is what separates
 recording a route from probing one.
 
@@ -2119,20 +1927,11 @@ recording a route from probing one.
 Naming a header as a device's `pump_member` is a *description*, not a protection grant — the 30%
 floor and pump-safe identify come from `POST /config/header-role`, which is a separate call.
 
-**Concurrent `/config/*` writes are serialised from daemon 2.35.0 (`AIO1-d`, DEC-321; merged as
-2.34.0, which was never published) — and were not before.** Every setter is load the whole
-`runtime.toml` → change one key → write it back → commit in memory. Before 2.35.0 nothing ordered
-two of them, so two setters loading the same base
-each overwrote the other's key: the later write won the file, the later commit won the cache, and
-**both requests answered `200 {"updated": true}`**. The Configure-AIO flow is exactly this pattern —
-it posts `POST /config/header-role` and then `POST /config/cooling-device` in one user action — and
-the loss was asymmetric: the cooling-device write is metadata the engine never reads, but landing it
-from a stale base **dropped the header-role edit before it**, i.e. a pump's 30% floor at the next
-daemon restart. Against a daemon **< 2.35.0 the GUI must keep issuing these calls strictly
-sequentially, waiting for each response**, which is what `fan_wizard.py` already does — that is why
-the shipped GUI never raced *itself*. Against ≥ 2.35.0 the ordering is enforced daemon-side. On an
-older daemon, two clients writing at the same time can still lose an edit, however carefully each
-one orders its own calls.
+**Concurrent `/config/*` writes are serialised (`AIO1-d`, DEC-321).** Every setter loads the whole
+`runtime.toml`, changes one key, writes it back and commits in memory, and the daemon orders them,
+so two setters cannot overwrite each other's key. The Configure-AIO flow posts
+`POST /config/header-role` and then `POST /config/cooling-device` in one user action;
+`fan_wizard.py` also issues them sequentially, waiting for each response.
 
 - `api_version: int` — always `1`.
 - `cooling_devices: list` — each entry:
@@ -2155,16 +1954,16 @@ one orders its own calls.
 **Trust model.** Device-policy values are compiled into the daemon and selected **by id**. The
 Rust `DevicePolicy` type deliberately derives no `Deserialize`, so no inbound payload can
 construct one — "a normal user profile must not be able to submit `minimum_safe_pwm = 1`" is a
-compile-time property, not a review convention. 2.31.0 ships generic policies only
-(`generic_pump`, whose floor *is* the engine's hard pump floor, and `generic_fan`), so **no floor
-moves in this release**; the mechanism exists so a validated device policy can later land as data.
+compile-time property, not a review convention. The daemon ships generic policies only
+(`generic_pump`, whose floor *is* the engine's hard pump floor, and `generic_fan`), so **no policy
+moves a floor**; the mechanism exists so a validated device policy can later land as data.
 
-### Validation sessions (DEC-317, daemon ≥ 2.32.0)
+### Validation sessions (DEC-317)
 
 A validation session records what an already-configured cooling device actually did, and
 produces typed evidence about it. Capability-gated on `control.validation_sessions`.
-**Gate on the flag rather than probing** — an older daemon 404s these routes from the route
-fallback, and a genuine "no such session" is also `404 not_found`, so not even `error.code`
+**Gate on the flag rather than probing** — the route fallback's `404` and a genuine "no such
+session" are both `404 not_found`, so not even `error.code`
 tells the two apart (DEC-426, `DC-n`). Only the message differs, and messages are not a
 contract.
 
@@ -2183,20 +1982,17 @@ a second definition of a safety rule, and the two would drift.
 
 Body:
 - `cooling_device_id` (string, **required**) — must name a configured device.
-- `kind` (string, optional) — `"validation"` (default), `"lifecycle"`, or, from daemon
-  2.41.0, `"thermal_observation"` (DEC-335). One engine and one wire type; the discriminator
+- `kind` (string, optional) — `"validation"` (default), `"lifecycle"`, or
+  `"thermal_observation"` (DEC-335). One engine and one wire type; the discriminator
   selects which findings matter and what a client presets.
   **Gate `"thermal_observation"` on `control.thermal_observation`, and note that this gate is
   unlike the `diagnostics[]` one.** An unrecognised `diagnostics[]` token makes the daemon
   reject the whole session — a loud failure a client cannot miss. An unrecognised `kind` does
-  **not**: it falls back to `"validation"` and returns **200**. So against a pre-2.41.0 daemon
-  an ungated client starts what it believes is a thermal observation, receives a perfectly
-  valid ordinary validation session, and mislabels it for the rest of its life. The capability
-  flag is the only thing that distinguishes the two before the request is made. (The fallback
-  itself is pre-existing and unchanged — register row `P8-k`.)
+  **not**: it falls back to `"validation"` and returns **200** (register row `P8-k`), so the
+  capability flag is the only thing that distinguishes the two before the request is made.
 - `diagnostics` (string[], optional) — what the session should **run**: `"pwm_verify"`
-  and/or `"pwm_characterization"`; from daemon 2.39.0 `"control_path_discovery"`
-  (DEC-333) when `control.control_path_discovery` is advertised; and from daemon 2.40.0
+  and/or `"pwm_characterization"`; `"control_path_discovery"`
+  (DEC-333) when `control.control_path_discovery` is advertised; and
   `"pwm_behaviour_characterization"` (DEC-334) when `control.pwm_behaviour_characterization`
   is advertised — **an unknown token is rejected with the whole session, not skipped**, so a
   client must gate the option rather than send it hopefully. **Requesting both
@@ -2206,14 +2002,11 @@ Body:
   session — and yields `not_tested`, never `pass`. An unrecognised token is
   `400 validation_error` rather than a silent skip, which would look like a diagnostic that
   ran and found nothing.
-  **From daemon 2.43.3, repeats are dropped at ingest and the echo is authoritative
-  (DEC-341, `P8-s`).** The list was validated per token and not by count, so a request naming
-  the same diagnostic 2000 times was accepted, persisted verbatim, and walked once per member
-  per repeat. It is now reduced to at most one of each, keeping first-occurrence order, and
+  **Repeats are dropped at ingest and the echo is authoritative (DEC-341, `P8-s`).** The
+  list is reduced to at most one of each, keeping first-occurrence order, and
   the started session's `requested_diagnostics` is what the daemon actually took — **render
-  that, not the request you sent**, which is the same rule `stop_when_diagnostics_complete`
-  already follows and for the same reason. No request that used to succeed now fails; an
-  older daemon simply runs the repeats.
+  that, not the request you sent**, the same rule `stop_when_diagnostics_complete`
+  follows.
 - `sweep_members` (string[], optional) — which members those diagnostics sweep. **Omitted
   defaults to the device's `pump_member`.** Capped at 8; each adds roughly three minutes. An
   entry not belonging to the named device is `400 validation_error`; a non-writable one is
@@ -2222,20 +2015,18 @@ Body:
   pump mode, workload name, ambient notes. **Metadata only** — it reaches no safety decision,
   and the daemon does not claim to have detected any of it electronically. Capped at 16 keys
   × 512 bytes.
-- `stop_when_diagnostics_complete` (bool, optional, default `false`; daemon 2.43.0,
+- `stop_when_diagnostics_complete` (bool, optional, default `false`;
   `control.validation_auto_stop`, `P8-az`) — finalise the session as soon as the
   orchestrated diagnostics have all run, instead of recording until it is stopped.
   **Requires at least one entry in `diagnostics`**: the orchestration task is not spawned
   for an empty one, so there would be nothing to carry the terminal stop, and the session
   would record to the cap while the echo promised otherwise. The daemon **rejects** that
   combination with `400 validation_error` rather than accepting a flag nothing can act on.
-  The default is `false` so an existing client and every `curl` user keep exactly today's
-  behaviour; the caller opts in.
+  The default is `false`; the caller opts in.
 
 Returns `200` with the full session. `409 already_exists` if an operator-started session is
 already recording (single-flight). **A recording the daemon started itself at boot
-(`auto_started: true`, `[startup] record_startup`) does not block a start** (daemon ≥ 2.41.0,
-DEC-335): it is finalised as `completed`, noted as superseded by an operator-started session,
+(`auto_started: true`, `[startup] record_startup`) does not block a start** (DEC-335): it is finalised as `completed`, noted as superseded by an operator-started session,
 and the new session starts. `404 not_found` for an unknown device, `503 persistence_failed` if
 it cannot be written to disk. `400 validation_error` covers a `sweep_members` entry that is not
 a member of the device, an unknown `diagnostics` token, a metadata or list over its cap, and
@@ -2247,13 +2038,12 @@ nothing recorded.
 
 **The returned body is an ADMISSION-TIME snapshot, not a live one.** It is serialised when
 the session is admitted, before the orchestration task is spawned, so it always reads
-`state: "recording"` with `completed_unix_ms: null`. That was harmless while every session
-outlived its diagnostics; with `stop_when_diagnostics_complete` a short walk — or a sweep
+`state: "recording"` with `completed_unix_ms: null`. With `stop_when_diagnostics_complete` a
+short walk — or a sweep
 over a non-writable member, which records `unavailable` and returns at once — can finalise
 the session before the client has finished reading the reply. **Do not render the start
 document as live state**; treat it as the admission receipt and take the session's state
-from the next `GET /validation/session`. The GUI already polls at 1 Hz and self-corrects,
-so this is a rule for new clients rather than a change to an existing one.
+from the next `GET /validation/session`. The GUI polls at 1 Hz and self-corrects.
 
 Orchestration order is `pwm_verify`, then `pwm_behaviour_characterization` — or
 `pwm_characterization` when the behaviour sweep was not requested — then
@@ -2304,21 +2094,17 @@ token: render one you do not recognise.
   `outcome`, and either `characterization` (the Phase 3 run **verbatim**) or `verify`.
   `outcome` describes how the *orchestration* went, not the hardware: a diagnostic the
   daemon refused is `unavailable`, which never means failure.
-  **A verify's evidence was empty before daemon 2.53.0 (DEC-405, `PTR-e`; merged as 2.52.0,
-  which was never published).** Its
-  `readback_pct`, `rpm_before` and `rpm_after` were read from paths the verify response
-  does not have and were always `null`, and every 200 was filed `observed`. Since 2.53.0
-  they are read from `final_state` / `initial_state`, the verify's own `result` token and
-  `restore_failed` are stored, and `outcome` maps the token: `effective` → `pass`;
+  **A verify's evidence (DEC-405, `PTR-e`):** its
+  `readback_pct`, `rpm_before` and `rpm_after` are read from `final_state` / `initial_state`,
+  the verify's own `result` token and `restore_failed` are stored, and `outcome` maps the token: `effective` → `pass`;
   `no_rpm_effect`, `pwm_enable_reverted`, `pwm_value_clamped` → `observed`;
-  `rpm_unavailable`, `pwm_readback_unavailable`, and — daemon ≥ 2.56.0, DEC-418 — `pump_protected_mid_run` → `unavailable`; anything else → `unknown`;
+  `rpm_unavailable`, `pwm_readback_unavailable`, and `pump_protected_mid_run` (DEC-418) → `unavailable`; anything else → `unknown`;
   a refused verify → `unavailable`. **A verify never maps to `fail`**, and the
-  `pwm_header_control` finding follows the same table — before 2.53.0 it filed a refused
-  verify as `fail`. A completed session keeps the findings it was saved with; the one
-  case that re-summarises an older record is a session left `recording` by a daemon
-  restart, which is finalised as `interrupted` at boot — there an older verify record (no
-  `result`) now yields `unknown` for `pwm_header_control` where it would have yielded `pass`.
-- `findings[]` — the summary: `{id, state, detail, member_id, evidence_kind}`. **Every run-derived finding is per member (DEC-411, `PTR-n`, daemon ≥ 2.55.0):** the characterisation, verify and control-path findings (`pwm_header_control`, `pwm_readback`, `pwm_response_characterization`, `response_latency`, `pwm_hysteresis`, `rpm_stability`, `effective_control_range`, `learned_response_range`, `possible_device_override`, `control_path_mapping`) appear once per member that has evidence, each with its `member_id`, where an older daemon reported the first run it found for the whole session. Key a finding by `(id, member_id)`, never by `id` alone. A member no sweep covered takes `pwm_header_control` from its own verify. With no evidence at all, each still appears once, without a `member_id`, as `not_tested` or `interrupted`.
+  `pwm_header_control` finding follows the same table. A completed session keeps the findings
+  it was saved with; a session left `recording` by a daemon restart is re-summarised when it is
+  finalised as `interrupted` at boot, and a verify record there with no `result` yields
+  `unknown` for `pwm_header_control`.
+- `findings[]` — the summary: `{id, state, detail, member_id, evidence_kind}`. **Every run-derived finding is per member (DEC-411, `PTR-n`):** the characterisation, verify and control-path findings (`pwm_header_control`, `pwm_readback`, `pwm_response_characterization`, `response_latency`, `pwm_hysteresis`, `rpm_stability`, `effective_control_range`, `learned_response_range`, `possible_device_override`, `control_path_mapping`) appear once per member that has evidence, each with its `member_id`. Key a finding by `(id, member_id)`, never by `id` alone. A member no sweep covered takes `pwm_header_control` from its own verify. With no evidence at all, each still appears once, without a `member_id`, as `not_tested` or `interrupted`.
 - `external_measurements[]` — see the measurement endpoint below.
 
 #### Result semantics — the part a client must not reinterpret
@@ -2357,14 +2143,14 @@ the recorder runs for the remaining ~1 h 56 m. Neither factor is on the wire, so
 that states the figure is holding a second copy of a daemon constant — state it
 approximately, or not at all.
 
-Since daemon 2.43.0 a caller may opt into a third ending with
+A caller may opt into a third ending with
 `stop_when_diagnostics_complete` (above). **Render the ECHOED field, never the request the
-client sent**: the two disagree on exactly the daemons where it matters, because an older
-one accepts the request and drops the field. The field is echoed on the session document
+client sent**: a daemon without `control.validation_auto_stop` accepts the request and drops
+the field. The field is echoed on the session document
 for that purpose, and it survives finalisation.
 
 - `POST /validation/session/stop` — finalise and compute the summary. Returns the session.
-- `DELETE /validation/session` — finalise and persist, recording the session as `cancelled`. **Not a discard, and not the opposite of `stop`** (`P8-bc`): the daemon's `cancel()` is `finish(STATE_CANCELLED)` and `finish` finalises unconditionally, so findings, steady state, startup fingerprints and samples are all computed and stored exactly as they are for `stop`. The only difference is the `state` token. A client must not present this as "throw the recording away" — this document said "end without finalising" and was wrong.
+- `DELETE /validation/session` — finalise and persist, recording the session as `cancelled`. **Not a discard, and not the opposite of `stop`** (`P8-bc`): the daemon's `cancel()` is `finish(STATE_CANCELLED)` and `finish` finalises unconditionally, so findings, steady state, startup fingerprints and samples are all computed and stored exactly as they are for `stop`. The only difference is the `state` token. A client must not present this as "throw the recording away".
 - `POST /validation/session/event` — place a user marker: `{detail?, member_id?}`. A session
   holds at most 4096 events, the engine's own included.
 - `POST /validation/session/measurement` — attach an externally measured observation:
@@ -2373,46 +2159,33 @@ for that purpose, and it survives finalisation.
   `value` that is not a finite number is `400 validation_error`.
 
 Both answer `200 {"recorded": true}` when the entry was appended and `404 not_found` ("no
-validation session is recording") when no session is recording. **At a cap, daemon ≥ 2.56.2
+validation session is recording") when no session is recording. **At a cap the daemon
 answers `409 session_full`** (not retryable, `details.limit` = the cap) and appends nothing
-(DEC-426, `DC-m`). Older daemons answered `200 {"recorded": true}` for a marker dropped at the
-event cap, and `404` "no validation session is recording" for a measurement at its cap while a
-session was recording. The GUI shows the error's message either way. Engine events past the
-event cap are dropped silently, as they always were.
+(DEC-426, `DC-m`). The GUI shows the error's message. Engine events past the
+event cap are dropped silently.
 
-**Free-text fields on both routes are bounded at 512 bytes each (daemon ≥ 2.33.1)** —
+**Free-text fields on both routes are bounded at 512 bytes each** —
 an event's `detail` and `member_id`, a measurement's `kind`, `unit`, `note` and `member_id`.
 Over-long is `400 validation_error`, never silently truncated. A user-metadata *key* on
-`POST /validation/session` is bounded at 128 bytes; its value was already bounded at 512.
-These arrays are capped by *count*, so unbounded text made the session document unbounded —
-and since a session too large to read back is now pruned (see the byte-cap note above),
-that would have been a way to destroy an operator's evidence rather than merely waste disk.
+`POST /validation/session` is bounded at 128 bytes and its value at 512. These arrays are
+capped by *count*, and a session too large to read back is pruned, so unbounded text would be
+a way to destroy an operator's evidence.
 
-**The byte budgets these bounds feed were re-derived from a measurement in daemon 2.43.3
-(DEC-341, `P8-s`).** They are internal and no client sees them, but the number a client
-*can* reach matters: the reservation for non-sample content was estimated in prose at
-~3.4 MiB and measures **7,938,808 bytes** as a realised file, because an event may carry
-*both* bounded text fields rather than one, a measurement all four, and the `evidence`,
-`findings` and `startup_fingerprints` arrays were never counted at all. **No session was
-being lost:** the worst-case document measures 24,710,972 bytes against a 25,165,824-byte
-cap, so it fitted by 444 KiB — but that margin was accidental rather than designed, and one
-more bounded field would have crossed it while the reservation still claimed room. The
-reservation is now 10 MiB and the session read cap 28 MiB; the caps and text bounds above
-are unchanged, so **nothing a client may send has moved**.
+**The byte budgets these bounds feed are derived from a measurement (DEC-341, `P8-s`).** They
+are internal and no client sees them: the reservation for non-sample content is 10 MiB (the
+worst-case realised non-sample content measures 7,938,808 bytes) and the session read cap
+28 MiB.
 
-**Ending a session ends the diagnostic it started (daemon ≥ 2.35.1).** A session that
-orchestrated a characterisation used to leave that sweep running after stop/cancel — still
-driving the header and still holding the engine's write-pause, for up to five minutes. The
-daemon now cancels it, fenced on the run the session itself started, so a run begun from
+**Ending a session ends the diagnostic it started.** The daemon cancels a characterisation
+the session orchestrated, fenced on the run the session itself started, so a run begun from
 `POST /hwmon/{id}/characterize` outside the session is never touched. Two consequences for a
 client: `GET /diagnostics/characterization` reports that run as **`cancelled`** rather than
 `complete`, which is not a hardware failure and must not be worded as one; and the cancel is
 cooperative, so the sweep's current point finishes its settle (≤ 15 s) before the header is
 restored — a progress view should expect the run to remain `running` briefly after the
-session has already returned its summary. There is no capability flag separating this from
-the older behaviour; branch on the daemon version if a client must distinguish them.
+session has already returned its summary.
 
-**`POST /validation/session/stop` and `DELETE /validation/session` can also answer `500 internal_error` (daemon ≥ 2.35.1).** It means the finaliser itself broke and **the session is still installed and still recording** — not that it does not exist. `404 not_found` on these two routes keeps its original, narrower meaning: no session has ever been started. A client must not treat the 500 as "the session is gone": the recorder is still sampling, `GET /validation/session` still returns it, and a fresh `POST /validation/session` will be refused. Retry the stop.
+**`POST /validation/session/stop` and `DELETE /validation/session` can also answer `500 internal_error`.** It means the finaliser itself broke and **the session is still installed and still recording** — not that it does not exist. `404 not_found` on these two routes means only that no session has ever been started. A client must not treat the 500 as "the session is gone": the recorder is still sampling, `GET /validation/session` still returns it, and a fresh `POST /validation/session` will be refused. Retry the stop.
 - `GET /validation/sessions` — the retained index, newest first, wrapped as
   `{"api_version": 1, "sessions": [ … ]}`. Each entry is `{session_id, kind, state,
   started_unix_ms, completed_unix_ms, cooling_device_id, device_name, sample_count,
@@ -2434,18 +2207,15 @@ finalises itself with `sample_limit_reached: true`. This is deliberately cap-and
 than a ring buffer: a ring evicts the *oldest* samples, which are the startup evidence a
 session exists to capture.
 
-**The cap is also bounded in bytes (daemon ≥ 2.33.1).** A sample carries one entry per
+**The cap is also bounded in bytes (`AUD3-i`).** A sample carries one entry per
 cooling-device member, so the *document* size scales with the topology while the sample cap
-bounds only the row count — at three members 7200 samples serialised to 7.8 MiB against a
-4 MiB read cap, and the daemon wrote sessions it could then never read, list, serve or prune
-(`AUD3-i`). The effective cap is now derived at session start from the member count, so the
+bounds only the row count. The effective cap is derived at session start from the member count, so the
 persisted document stays inside the store's own read cap whatever the topology. **A client
 sees no difference for any realistic cooler** — a pump plus up to four radiator fans (a
 360 mm cooler is four members, with one of margin) still
 records the full 7200 samples — and `sample_limit_reached` keeps its meaning exactly: the
 session reached its limit. Only a device claiming many members (the maximum is
-`1 + 2 x 32`) finalises earlier than two hours, and such a session previously produced an
-unreadable file instead. Do not hardcode 7200 as the expected `sample_count` of a completed
+`1 + 2 x 32`) finalises earlier than two hours. Do not hardcode 7200 as the expected `sample_count` of a completed
 session; read `sample_limit_reached`.
 
 The daemon keeps the **five** most recent finished sessions — `completed`, `cancelled` or
@@ -2459,14 +2229,13 @@ for the gap.** A client restart cannot corrupt a session, because the session li
 daemon-side; a client that vanishes and reconnects finds the same session still recording,
 and a naive second start is refused with `409`.
 
-### GET /inventory/hwmon (DEC-200, daemon ≥ 2.6.0)
+### GET /inventory/hwmon (DEC-200)
 
 Structured, read-only inventory of hwmon-visible hardware — the daemon's own
 classified view, distinct from the live `/sensors` + `/fans` polls. One-shot,
 fetched on demand (the Settings page's preferred-sensor pickers; the Overview page), never at 1 Hz.
 Full field set in the daemon's `responses.rs::HwmonInventoryResponse`. **404-only
-gated** — a daemon predating the endpoint 404s and the GUI shows the dependent UI
-as unavailable. The daemon never writes hardware to build this report.
+gated** — on a `404` the GUI shows the dependent UI as unavailable. The daemon never writes hardware to build this report.
 
 - `api_version: int` — always `1`.
 - `temp_sensors: list` — the live temperature sensors (same identity/fields as
@@ -2476,7 +2245,7 @@ as unavailable. The daemon never writes hardware to build this report.
   `confidence` (`high | medium | low | unknown`), a plain-English `rationale`,
   and `control_eligible: bool` (DEC-193 — a wireless-PHY temp is dropped from
   the curve sensor picker). The classification **refines** the coarse `kind` and
-  never contradicts it. `memory_temp` (DEC-491, unreleased daemon) is a memory
+  never contradicts it. `memory_temp` (DEC-491, daemon ≥ 4.3.0) is a memory
   module or a board's memory channel and is always `kind: mb_temp`: high
   confidence for the `spd5118` chip, medium for `jc42` (its driver also binds
   standalone thermometers) and for a DIMM label. An older
@@ -2500,7 +2269,7 @@ as unavailable. The daemon never writes hardware to build this report.
   writes). Either id may be stale — cross-check against the live sensor list.
   Omitted when none are set.
 
-### GET /inventory/readiness (DEC-200, daemon ≥ 2.6.0)
+### GET /inventory/readiness (DEC-200)
 
 A structured, read-only diagnose-and-guide list: the daemon's assessment of the
 CPU/hwmon/PWM inventory as actionable items. Never mutates the system. 404-only
@@ -2513,8 +2282,7 @@ into `GET /inventory/hardware-readiness`, which is what the Hardware page calls
 (`DaemonClient.hardware_readiness`); this endpoint has no client method. It is
 documented because the daemon still serves it — for other clients, and because
 the daemon refreshes its cached rollup on each GET of it — not because the GUI
-calls it. Earlier revisions of this document described it as GUI-consumed, which
-was true before the merge.
+calls it.
 
 - `api_version: int` — always `1`.
 - `overall: str` — the rollup severity (`ok | info | warning | critical`), equal
@@ -2535,8 +2303,8 @@ was true before the merge.
     off it, so renaming it would be a breaking change — and the two states are
     distinguished in the human-readable `summary`/`detail` instead. A client must
     not infer "the module is not loaded" from this code. In the not-loaded state,
-    when an unbound chip's module is `nct6775` or `w83627ehf`, newer daemons (after
-    v2.56.4) add to `detail` that the package's Super-I/O guard declines those two
+    when an unbound chip's module is `nct6775` or `w83627ehf`, the daemon adds to
+    `detail` that the package's Super-I/O guard declines those two
     modules on Gigabyte boards, so a `modprobe` there loads nothing. This is text
     only; no field changes.
     **The two PWM-verification codes count against the per-header records (DEC-456,
@@ -2555,7 +2323,7 @@ was true before the merge.
 Forward-compatible: parse each item with a field filter (unknown daemon keys
 dropped) and default an absent `severity` to `info` (never falsely `ok`).
 
-### GET /inventory/superio (DEC-202, daemon ≥ 2.7.0)
+### GET /inventory/superio (DEC-202)
 
 **Not consumed by this GUI (DEC-257)** — same reason as `/inventory/readiness`
 above: DEC-207 folded this into `GET /inventory/hardware-readiness`. The GUI's
@@ -2576,7 +2344,7 @@ object of `GET /inventory/hardware-readiness` (DEC-207), and from the response o
 `POST /inventory/superio/probe`, which has this shape.
 
 **Gating:** 404-only, like the other `/inventory/*` routes — no capability flag.
-A `404 not_found` means the daemon predates the feature. It shares the retryable
+It shares the retryable
 `503 hardware_unavailable` of `GET /inventory/hardware-readiness` when no scan has ever
 completed.
 
@@ -2635,7 +2403,7 @@ and bind nothing (DEC-468, `DC-da`). The aggregate item, which carries no vendor
 still says it conditionally ("On a Gigabyte board …"). `load_hint` is prose on
 several branches already; a client shows it, it does not execute it.
 
-### GET /inventory/hardware-readiness (DEC-207, daemon ≥ 2.11.0)
+### GET /inventory/hardware-readiness (DEC-207)
 
 The **combined** readiness + Super-I/O snapshot the GUI's merged *Cooling Hardware
 Readiness* page fetches in **one** request, so both halves come from a single shared
@@ -2658,13 +2426,12 @@ Query: `?refresh=true` (in any letter case) or `?refresh=1` forces a fresh (coal
 scan — the page's "Refresh hardware assessment" action; any other value, or none, serves
 the daemon's cached assessment. A malformed `refresh` value never 400s.
 
-**Shared snapshot (DEC-207):** since daemon v2.11.0 this endpoint, `GET
+**Shared snapshot (DEC-207):** this endpoint, `GET
 /inventory/readiness`, `GET /inventory/superio`, and the `/status`+`/poll` rollup are
 all served from **one** cached passive scan, coalesced so simultaneous requests don't
 launch duplicate scans. The two older endpoints keep their exact response shapes (this
-combined endpoint does not replace them). Absent route ⇒ daemon predates the feature;
-the GUI feature-detects on `404` and shows an "unavailable" state, falling back to the
-existing endpoints only where a caller needs them.
+combined endpoint does not replace them). The GUI feature-detects on `404` and shows an
+"unavailable" state, falling back to the other endpoints only where a caller needs them.
 
 **Status:** `200` with the snapshot, or a retryable `503 hardware_unavailable`
 ("hardware assessment is temporarily unavailable — retry") when the shared passive
@@ -2672,7 +2439,7 @@ scan has not completed yet (`inventory.rs`). The GUI surfaces the daemon's messa
 on the Hardware page's status line (it does not auto-retry); the user re-runs the
 scan via the page's Refresh action.
 
-### POST /inventory/superio/probe (DEC-203, opt-in, daemon ≥ 2.7.0)
+### POST /inventory/superio/probe (DEC-203, opt-in)
 
 The **opt-in ACTIVE** Super-I/O probe — a *deliberate, one-shot* action (never
 polled) that reads the Super-I/O config ports (0x2E/0x4E) to identify an
@@ -2680,22 +2447,21 @@ polled) that reads the Super-I/O config ports (0x2E/0x4E) to identify an
 deliberate side-effecting action (it *may* write the chip's enter/exit protocol
 bytes), not a passive read.
 
-**It reads before it writes (daemon ≥ 2.38.0, DEC-332).** The DEVID read happens
+**It reads before it writes (DEC-332).** The DEVID read happens
 with **no unlock at all**, and an unlock is written only when that read returns
 `0xffff` or `0x0000` (nothing answered). A chip already in configuration mode at power-on (`FEAT_NOCONF`:
 it8790/it8792/it87952) is therefore identified without a single unlock byte
 reaching its port. This is not a micro-optimisation: an unconditional unlock was
 measured to latch an ITE eSPI→LPC bridge into configuration mode, hiding the
 Super-I/O behind it — and every fan header on it — until the machine is
-disconnected from mains power. Older daemons unlock first and read second.
+disconnected from mains power.
 
-**On an all-ITE board it never writes the Nuvoton unlock at all (daemon >=
-2.43.5, `X87-k`).** The read-before-write rule above still licenses an unlock
+**On an all-ITE board it never writes the Nuvoton unlock at all (`X87-k`).** The read-before-write rule above still licenses an unlock
 when nothing answers, and the `0x87,0x87` Nuvoton/Winbond sequence is the one
 that latches the bridge. Where the daemon's curated DMI board table says this
 board's Super-I/O complement is ITE-only, no Nuvoton chip can be waiting behind
 that write, so the leg is **withheld**. That is the same curated board list the
-shipped `modprobe` guard names boards from. Since daemon 2.56.1 (DEC-424) the guard itself
+shipped `modprobe` guard names boards from. The guard itself (DEC-424)
 suppresses `nct6775`/`w83627ehf` on EVERY Gigabyte board, and since the daemon release after
 3.5.0 (`BRD-s`) this probe withholds its leg there too: on a DMI vendor containing "GIGABYTE",
 or any board the guard declines. Earlier daemons withhold it on the listed boards only. The ITE legs
@@ -2705,7 +2471,7 @@ When a leg is withheld the response carries a `notes[]` entry naming the base
 and the reason. **Clients must render it**: a withheld leg and a genuinely empty
 base are otherwise indistinguishable, and the difference is the one the user
 needs. This is content, not shape — `notes[]` has always been a free-text array,
-so no client change is required and older daemons simply never emit the entry.
+so no client change is required.
 
 **What it writes.** Selecting a register writes its index to the base port, as
 every Super-I/O read does. Beyond that, at a base where the unlocked DEVID read
@@ -2755,9 +2521,8 @@ and, for an unbound chip, a load `recommendation`). ITE chips are identified
 precisely (DEVID → chip name → driver + DKMS status); the Nuvoton/Winbond family
 is identified at vendor level with the raw DEVID and an `nct6775` recommendation.
 
-**DEVID `0x8883` is reported as a bridge, not as a chip (daemon ≥ 2.38.0,
-DEC-332).** That value is an ITE eSPI→LPC *bridge* answering in place of the chip
-behind it. Earlier daemons named it `it8883`, a device that has never existed.
+**DEVID `0x8883` is reported as a bridge, not as a chip (DEC-332).** That value is an
+ITE eSPI→LPC *bridge* answering in place of the chip behind it; there is no `it8883`.
 
 **Detect it by `chip_name`, which is the literal string `"ITE eSPI-to-LPC bridge
 (not a sensor chip)"`, with `vendor: "ite"`.** `chip_name` is a non-nullable
@@ -2785,17 +2550,17 @@ bound (see *What it writes* and *When it refuses* above). **Detection is still n
 control.**
 
 
-### Session response — AIO Phase 8 Batch 3a additions (daemon >= 2.41.0, DEC-335)
+### Session response — AIO Phase 8 Batch 3a additions (DEC-335)
 
-**Present on ANY session from daemon >= 2.41.0, whatever its `kind`** — not only on a
+**Present on ANY session, whatever its `kind`** — not only on a
 `thermal_observation`. The daemon samples power on every tick of every session and derives the
 fingerprint and the steady-state result for every kind at finalisation, so a client reading an
-ordinary `validation` or `lifecycle` session against a 2.41.0+ daemon will find all of these
+ordinary `validation` or `lifecycle` session will find all of these
 populated. `control.thermal_observation` gates whether you may **request** the thermal kind
 (see the `kind` field above); it does **not** gate these fields, and treating it as though it
 did would drop real data on every non-thermal session.
 
-Every field below is optional and absent from an older daemon; **absent means "this daemon does
+Every field below is optional; **absent means "this daemon does
 not derive it", never a negative result.**
 
 On each entry of `samples[]`:
@@ -2844,23 +2609,16 @@ report `observed`, `not_observed` or `not_tested`, and never `fail`.
 
 ## Write endpoints
 
-As of **2.0.0** the daemon is the sole writer (DEC-159, DEC-165). The GUI has **no bare PWM write
+The daemon is the sole writer (DEC-159, DEC-165). The GUI has **no bare PWM write
 surface** — it expresses control as *intent* (activate a profile, take an expiring override, identify
 a fan) and runs a few diagnostics / maintenance calls (verify, characterisation, control-path
-discovery, the stall probe, GPU reset, rescan). It does not call OpenFan calibrate.
+discovery, the stall probe, GPU reset, rescan, OpenFan calibration). It does not call the deprecated
+`POST /fans/openfan/{ch}/calibrate`.
 
-**Retired at 2.0.0** — these were genuine HTTP routes that the daemon no longer routes (the
-`gui_active` defer window they lived behind is gone):
-- `POST /fans/openfan/{ch}/pwm` and `POST /fans/openfan/pwm` — bare per-channel + set-all PWM
-- `POST /hwmon/{header_id}/pwm` — bare hwmon PWM
-- `POST /hwmon/lease/take` / `/release` / `/renew` and `GET /hwmon/lease/status` — the GUI holds no
-  lease; the daemon manages it internally
-- `POST /gpu/{gpu_id}/fan/pwm` — bare GPU static-speed write (replaced by override / identify)
-- `POST /fans/openfan/{ch}/target_rpm` — closed-loop RPM targeting. No GUI ever called it. The
-  internal serial method behind it (`set_target_rpm` / `Command::SetTargetRpm`) outlived the
-  route and was deleted as dead code in daemon 2.5.1 (merged as 2.5.0, which was never
-  published). An earlier revision of this section said it was never an HTTP route; it was one
-  until 2.0.0.
+**There is no PWM, `target_rpm`, lease or GPU fan-PWM write route.** `POST /fans/openfan/{ch}/pwm`,
+`POST /fans/openfan/pwm`, `POST /hwmon/{header_id}/pwm`, `POST /fans/openfan/{ch}/target_rpm`,
+`POST /gpu/{gpu_id}/fan/pwm` and `/hwmon/lease/*` return `404`; the daemon manages its hwmon
+lease internally, and no route emits `lease_required` or `lease_already_held`.
 
 ### OpenFan calibration (DEC-452)
 `[SAFETY]` Finds where an OpenFan channel's fan **stops** as its duty falls (the **stall duty**),
@@ -3270,69 +3028,67 @@ has not been run on hardware.**
   window (DEC-191) instead of renewing per sample.
 
 ### Hwmon PWM verify
-- `POST /hwmon/{header_id}/verify` — empty body (no `lease_id` as of 2.0.0 — DEC-165). Returns `409 thermal_abort` when any sensor exceeds the 85 °C verify limit, because a verify drives the header **away** from its commanded duty and must not do so while the system is hot (DEC-201, daemon ≥ 2.6.0). **Corrected in DEC-297:** this previously said a verify "pauses the engine (incl. the thermal force)". It does not, and never did — `force_all_with_floor` runs before the engine's verify gate, so a thermal emergency always outranks a verify. Also returns **`409 validation_error`, `retryable: true`** while the thermal ladder is actively forcing a duty (DEC-297): the 85 °C test is a *temperature* check, but the emergency latches at its trip point (105 °C or higher) and releases only at ≤80 °C, so the band 80-85 °C would otherwise pass it while every fan is still being forced. Same shape and reasoning as the calibrate refusal above; the message names the forcing state. The GUI shows this as a soft "let it cool, then retry" notice. **Since DEC-385 it also returns `409 validation_error`, `retryable: true` when every temperature reading is too old to trust** — the refusal `GET /diagnostics/preflight` now publishes as `blocked` for `pwm_verify`; the message ends "Retry once sensor polling recovers". Also returns `409 validation_error` if a hardware verify or calibration is already in progress (single-flight — the verify shares the calibration pause). That refusal is **bounded**: the slot carries a deadman, so it frees itself once the window elapses even if the holder never released it, and a client that retries will eventually succeed (DEC-296). Before that fix the deadman freed only the engine pause and not the slot, so a single leaked holder made this endpoint — and `/gpu/{id}/fan/verify` and `/fans/openfan/{ch}/calibrate` — return `409` for the rest of the daemon's process lifetime.
-- `POST /hwmon/{header_id}/characterize` — **AIO-MB Phase 3 (DEC-313), daemon ≥ 2.29.0, capability-gated on `control.pwm_characterization`.** The deeper PWM/RPM response sweep that sits **alongside** the quick verify above — it does not replace it. Body is JSON and may be empty (`{}`); both fields are optional: `points_pct: [u8]` (omitted or empty → `[30, 40, 50, 60, 70, 80, 90, 100]`, then floored and clamped like any list) and `settle_seconds: u64`. Returns **`202`** with the initial run snapshot and runs the sweep **daemon-side and detached**; the client polls `GET /diagnostics/characterization`. **Every tuning input is clamped server-side and the client must not pre-clamp:** points are clamped into `[max(20, header floor) .. 100]` — where a pump-protected header's floor is the hard 30% — then deduped, sorted **ascending** and capped at 20 — a cap on **walked steps**, not on unique duties. **The cap THINS, it does not truncate:** an over-long list is sampled across its whole range, keeping the lowest and highest requested duties, so a fine-grained request such as 20..100 in steps of 1 is served a spread over 20-100 rather than the bottom 20 values. Daemons before this fix kept the first 20 ascending values and reported that as the sweep, so the same request came back covering only 20-39%. No capability gate and no version floor: the response *shape* is unchanged and no client branches on this — it changes which duties get tested, not what is reported about them; `settle_seconds` is clamped into `2..=15`. **0% is unreachable through this endpoint for any header and any input.** The pump term is the **union** predicate, never the wire `role` (DEC-312), so relabelling a `PUMP` header `chassis_fan` does not strip its floor. **The union is re-read during the run (DEC-418, `TS-aw`, daemon ≥ 2.56.0)** — before every write and on every 500 ms sample of every hold. A header that becomes pump-protected mid-sweep (a profile naming it a pump is activated, or it is assigned the pump role) ends the run as `aborted`, with a `detail` saying why; the point being held is not recorded; and the restore is floored at 30 %. The restore re-reads the union once more itself, so protection that arrives after the last point floors it too, on a run that stays `complete` because every point was measured. **A hold whose time has elapsed counts as measured:** the union is consulted only while a hold is still open, so evidence that becomes visible exactly as a hold ends does not discard that point — the next point's check, or the restore, acts on it, and nothing is written in between. Earlier daemons read the union once, at the POST, and could keep sweeping a now-protected pump below its floor until the run ended. No wire shape changes. **Every sysfs read the sweep makes is bounded (DEC-420, `PTR-v`, daemon ≥ 2.56.0)** — off the async runtime and abandoned after `DIAGNOSTIC_READ_BUDGET` (2 s), the stall probe's rule (DEC-407). A read that does not return ends the run as `aborted`, with a `detail` saying a read of the header did not return; the run neither reads nor writes that header again, so its pre-sweep duty is **not** written back (`restore_outcome: skipped_unresponsive`, below) — unless the header became pump-protected during the run, when the restore is still attempted, floored at 30 %. Earlier daemons waited on such a read indefinitely, with every gate blind behind it. **Every PWM write is bounded too (DEC-455, `PTR-ab`, daemon ≥ 3.1.0)** — off the async runtime, with the controller lock taken there, and abandoned after 2 s. A write that does not return ends the run as `failed`, with a `detail` saying the write did not return, and nothing more is written unless the header has no mode switch — `restore_outcome: skipped_unresponsive` (below). Earlier daemons made the write on a request thread, holding the lock every hwmon write needs — the thermal emergency's included — for as long as the driver hung. No wire shape changes. **`original_pct` in the `202` is `null` since daemon 2.56.0** (DEC-420): the daemon no longer reads the header on the request path. It is set when the run ends, from the sweep's own pre-sweep read — the value its restore aims at — and stays `null` while `running`. A client that needs it reads the terminal run from `GET /diagnostics/characterization`; older daemons filled it in the `202` from a separate read that could disagree with the restore's. Refusals are exactly the verify's: `409 thermal_abort` above the 85 °C limit; `409 validation_error` `retryable: true` while the thermal ladder is forcing, when every temperature reading is too old to trust (DEC-385 — and a sweep in flight aborts on the same condition, at the next point or within a stability hold), or when a verify/calibration/characterisation is already in progress (it claims the **same** single-flight slot); `404 validation_error` for an unknown header; `503 hardware_unavailable` with no hwmon controller. **A client must gate on the capability rather than probing** — an older daemon `404`s this route, the same status it returns for an unknown header id; the two differ only in `error.code`, which is not a detail feature detection should be coupled to.
+- `POST /hwmon/{header_id}/verify` — empty body (no `lease_id` — DEC-165). Returns `409 thermal_abort` when any sensor exceeds the 85 °C verify limit, because a verify drives the header **away** from its commanded duty and must not do so while the system is hot (DEC-201). A verify does not pause the thermal force: `force_all_with_floor` runs before the engine's verify gate, so a thermal emergency always outranks a verify (DEC-297). Also returns **`409 validation_error`, `retryable: true`** while the thermal ladder is actively forcing a duty (DEC-297): the 85 °C test is a *temperature* check, but the emergency latches at its trip point (105 °C or higher) and releases only at ≤80 °C, so the band 80-85 °C would otherwise pass it while every fan is still being forced. Same shape and reasoning as the calibrate refusal above; the message names the forcing state. The GUI shows this as a soft "let it cool, then retry" notice. **It also returns `409 validation_error`, `retryable: true` when every temperature reading is too old to trust (DEC-385)** — the refusal `GET /diagnostics/preflight` publishes as `blocked` for `pwm_verify`; the message ends "Retry once sensor polling recovers". Also returns `409 validation_error` if a hardware verify or calibration is already in progress (single-flight — the verify shares the calibration pause). That refusal is **bounded**: the slot carries a deadman, so it frees itself once the window elapses even if the holder never released it, and a client that retries will eventually succeed (DEC-296).
+- `POST /hwmon/{header_id}/characterize` — **AIO-MB Phase 3 (DEC-313), capability-gated on `control.pwm_characterization`.** The deeper PWM/RPM response sweep that sits **alongside** the quick verify above — it does not replace it. Body is JSON and may be empty (`{}`); both fields are optional: `points_pct: [u8]` (omitted or empty → `[30, 40, 50, 60, 70, 80, 90, 100]`, then floored and clamped like any list) and `settle_seconds: u64`. Returns **`202`** with the initial run snapshot and runs the sweep **daemon-side and detached**; the client polls `GET /diagnostics/characterization`. **Every tuning input is clamped server-side and the client must not pre-clamp:** points are clamped into `[max(20, header floor) .. 100]` — where a pump-protected header's floor is the hard 30% — then deduped, sorted **ascending** and capped at 20 — a cap on **walked steps**, not on unique duties. **The cap THINS, it does not truncate:** an over-long list is sampled across its whole range, keeping the lowest and highest requested duties, so a fine-grained request such as 20..100 in steps of 1 is served a spread over 20-100 rather than the bottom 20 values. `settle_seconds` is clamped into `2..=15`. **0% is unreachable through this endpoint for any header and any input.** The pump term is the **union** predicate, never the wire `role` (DEC-312), so relabelling a `PUMP` header `chassis_fan` does not strip its floor. **The union is re-read during the run (DEC-418, `TS-aw`)** — before every write and on every 500 ms sample of every hold. A header that becomes pump-protected mid-sweep (a profile naming it a pump is activated, or it is assigned the pump role) ends the run as `aborted`, with a `detail` saying why; the point being held is not recorded; and the restore is floored at 30 %. The restore re-reads the union once more itself, so protection that arrives after the last point floors it too, on a run that stays `complete` because every point was measured. **A hold whose time has elapsed counts as measured:** the union is consulted only while a hold is still open, so evidence that becomes visible exactly as a hold ends does not discard that point — the next point's check, or the restore, acts on it, and nothing is written in between. **Every sysfs read the sweep makes is bounded (DEC-420, `PTR-v`)** — off the async runtime and abandoned after `DIAGNOSTIC_READ_BUDGET` (2 s), the stall probe's rule (DEC-407). A read that does not return ends the run as `aborted`, with a `detail` saying a read of the header did not return; the run neither reads nor writes that header again, so its pre-sweep duty is **not** written back (`restore_outcome: skipped_unresponsive`, below) — unless the header became pump-protected during the run, when the restore is still attempted, floored at 30 %. **Every PWM write is bounded too (DEC-455, `PTR-ab`, daemon ≥ 3.1.0)** — off the async runtime, with the controller lock taken there, and abandoned after 2 s. A write that does not return ends the run as `failed`, with a `detail` saying the write did not return, and nothing more is written unless the header has no mode switch — `restore_outcome: skipped_unresponsive` (below). Earlier daemons made the write on a request thread, holding the lock every hwmon write needs — the thermal emergency's included — for as long as the driver hung. No wire shape changes. **`original_pct` in the `202` is `null`** (DEC-420): the daemon does not read the header on the request path. It is set when the run ends, from the sweep's own pre-sweep read — the value its restore aims at — and stays `null` while `running`. A client that needs it reads the terminal run from `GET /diagnostics/characterization`. Refusals are exactly the verify's: `409 thermal_abort` above the 85 °C limit; `409 validation_error` `retryable: true` while the thermal ladder is forcing, when every temperature reading is too old to trust (DEC-385 — and a sweep in flight aborts on the same condition, at the next point or within a stability hold), or when a verify/calibration/characterisation is already in progress (it claims the **same** single-flight slot); `404 validation_error` for an unknown header; `503 hardware_unavailable` with no hwmon controller. **A client must gate on the capability rather than probing** — the route fallback's `404` and an unknown header id's differ only in `error.code`, which is not a detail feature detection should be coupled to.
 - `GET /diagnostics/characterization` — the current or most recent run: `{run_id, header_id, state, requested_points_pct[], settle_seconds, points[], summary, original_pct, restore_failed, restore_outcome, detail}`. `404 validation_error` when no run has ever been started, which is a normal state and not an error. `state` is an opaque token (`running` | `complete` | `cancelled` | `aborted` | `failed` today) and **a client must render an unrecognised value rather than dropping the run** (the 273-i rule). `len(points)` against `len(requested_points_pct)` is the progress indicator; `summary` is `null` while running. Each point carries `{requested_pct, command_accepted, readback_pct, readback_raw, pwm_enable, rpm_before, rpm_after, settle_ms, first_change_ms, readback_verdict, rpm_verdict}` — `readback_verdict` is `match`|`clamped`|`reverted`|`unavailable` and `rpm_verdict` is `changed`|`unchanged`|`unavailable`, both opaque and both to be rendered when unknown. `summary` carries `{command_acceptance, pwm_readback, rpm_response, min/max_tested_pct, min/max_rpm, monotonic, dead_zone_upper_pct, clamp_pct, possible_device_override, interference_detected}`. **The three verdicts are deliberately independent and a client must not collapse them into one pass/fail** — `possible_device_override` (readback correct, RPM motionless) is the signature of a pump overriding PWM during startup or internal thermal protection, and reporting it as a write failure is the wrong conclusion.
 
-  **The run slot is process-global, not per-header** (daemon ≥ 2.29.0). One `GET` serves whichever run the daemon most recently started, so a snapshot may describe a header the client did not ask about — a poll queued behind a client's own blocking `POST` returns the *previous* run, and any second client owning the slot has the same effect. **A client must compare `header_id` against the header it is displaying** and ignore a foreign snapshot rather than rendering another header's points and verdicts under its own label (`AUD2-a`). An empty `header_id` is from a daemon that predates the field and should be accepted.
+  **The run slot is process-global, not per-header**. One `GET` serves whichever run the daemon most recently started, so a snapshot may describe a header the client did not ask about — a poll queued behind a client's own blocking `POST` returns the *previous* run, and any second client owning the slot has the same effect. **A client must compare `header_id` against the header it is displaying** and ignore a foreign snapshot rather than rendering another header's points and verdicts under its own label (`AUD2-a`).
 
-  **Behaviour characterisation (daemon ≥ 2.40.0, DEC-334), capability-gated on `control.pwm_behaviour_characterization`.** Two further optional request fields: `bidirectional: bool` and `stability_seconds: u64`. **Gate on the new flag, never on `pwm_characterization`** — an older daemon *has* the latter and silently ignores the two new fields rather than rejecting them, so an ungated client gets a plain ascending sweep and renders empty hysteresis and stability panels as though the hardware had produced them. `stability_seconds` clamps into `5..=60`; absent or `0` means no dwell. **Which** duties carry a dwell is not a client input — the daemon picks up to 3, so the run's cost is bounded server-side regardless of what is asked for.
+  **Behaviour characterisation (DEC-334), capability-gated on `control.pwm_behaviour_characterization`.** Two further optional request fields: `bidirectional: bool` and `stability_seconds: u64`. **Gate on the new flag, never on `pwm_characterization`** — a daemon without it silently ignores the two new fields rather than rejecting them, so an ungated client gets a plain ascending sweep and renders empty hysteresis and stability panels as though the hardware had produced them. `stability_seconds` clamps into `5..=60`; absent or `0` means no dwell. **Which** duties carry a dwell is not a client input — the daemon picks up to 3, so the run's cost is bounded server-side regardless of what is asked for.
 
-  **Ordering, per mode.** A **unidirectional** sweep is ascending, and DEC-313 decision 5 holds verbatim: an abort part-way leaves the header high, never low. A **bidirectional** sweep walks the duties **down from the top and back up**, so the run *ends* at its highest duty and an early abort leaves the header near maximum. That order was chosen deliberately: the reverse would have ended every completed run at the lowest duty, and the restore has five exits that leave the header where the sweep put it (the fifth, `skipped_unresponsive`, since daemon 2.56.0 — reached by a write that did not return too, since daemon 3.1.0). **The invariant that holds in both modes** — and the one to reason from — is that **no walked duty is ever below `max(20, header floor)`**, so 0% remains unreachable for any header and any input.
+  **Ordering, per mode.** A **unidirectional** sweep is ascending, and DEC-313 decision 5 holds verbatim: an abort part-way leaves the header high, never low. A **bidirectional** sweep walks the duties **down from the top and back up**, so the run *ends* at its highest duty and an early abort leaves the header near maximum. That order was chosen deliberately: the reverse would have ended every completed run at the lowest duty, and the restore has five exits that leave the header where the sweep put it (the fifth is `skipped_unresponsive`; a write that did not return reaches it too since daemon 3.1.0). **The invariant that holds in both modes** — and the one to reason from — is that **no walked duty is ever below `max(20, header floor)`**, so 0% remains unreachable for any header and any input.
 
-  **`requested_points_pct` carries the FULL walked sequence** on a bidirectional run, including the falling leg's repeats. `len(points)` against it therefore remains a correct progress indicator with no client-side arithmetic change — at the cost of that field no longer being deduped or ascending in this mode. A bidirectional walk is `2n - 1` steps for `n` unique duties, and `n` is capped at 10 so the walked count stays inside the same 20-step budget as before.
+  **`requested_points_pct` carries the FULL walked sequence** on a bidirectional run, including the falling leg's repeats. `len(points)` against it therefore remains a correct progress indicator with no client-side arithmetic change — at the cost of that field not being deduped or ascending in this mode. A bidirectional walk is `2n - 1` steps for `n` unique duties, and `n` is capped at 10 so the walked count stays inside the 20-step budget.
 
   **Per-point additions.** `direction` (`ramp` | `falling` | `rising`), `step_index`, `settled_ms`, `stability`, `estimated_physical_rpm`. **`ramp` is the first step of either mode** — the only one whose approach direction is unknown, because it is entered from the captured pre-sweep duty — and a hysteresis comparison must exclude it. `settled_ms` is when RPM entered its settled band; `null` means it never settled within the hold, **not** that it settled instantly. `stability` is `{samples, usable, dropouts, outliers, mean_rpm, median_rpm, min_rpm, max_rpm, stddev_rpm, cv_pct, verdict, sample_interval_ms, dwell_ms}` or `null` — **`null` is not a zeroed record**, and rendering one as "0 samples, 0 dropouts, stable" would be a claim about hardware from a daemon that said nothing. `dropouts` counts an unreadable reading *or* a `0` recorded while the window proved the fan was turning; a steadily stopped fan reports none, so do not re-derive it from `min_rpm == 0`. `verdict` is `stable` | `variable` | `unstable` | `insufficient_data` | `unavailable` and is an opaque token (273-i).
 
   **Summary additions.** `hysteresis_{pct,verdict,worst_duty_pct,worst_delta_rpm,compared_points}`; `min_responsive_pct`, `max_responsive_pct`, `low_plateau_to_pct`, `saturation_from_pct`, `plateaus[]`; `stability_verdict`, `worst_cv_pct`, `total_dropouts`, `total_outliers`; `measurement_resolution_ms`, `typical_response_ms`, `typical_settling_ms`; `outside_learned_range`, `learned_range_note`, `interpretation_states[]`. **Render the timings against `measurement_resolution_ms`, never as milliseconds** — the sweep detects change by polling, so the true resolution is that cadence and nothing finer. **`outside_learned_range` is three-state:** `true` outside, `false` inside, `null` when nothing has been learned for this header yet — and `null` must not read as "passed". `hysteresis_verdict` is `none` | `present` | `insufficient_data` | `not_tested`; `not_tested` means the walk went one way, which is a different statement from `none`. **None of these is a fault verdict:** a plateau is not pump failure, tach variability alone is not cavitation, and an out-of-range response must be worded cautiously and never shown as a hardware failure.
 
-  **DEC-405 (daemon ≥ 2.53.0 — merged as 2.52.0, which was never published) — what the settling and stability figures mean changed, and no shape was removed.** No capability flag: the fields are all additive and every client that renders unknown tokens (273-i) keeps working; what moved is the *meaning* of three existing figures, so read this before comparing a 2.53.0 run with an older one.
-  - **`settled_ms` is judged on tach-register *updates*, not on 500 ms samples.** A register that refreshes every ~2 s (it87) shows four identical samples before it has refreshed once, and the old rule called that settled — before the fan had moved (`PTR-b`: 24 of 32 points on 2026-09-08). A point now settles at the first of four consecutive **updates** within 5 % of their median, and **never before its first update** after the write; a reading that never changes during the hold (a stopped fan's 0) settles at its first sample. So `settled_ms: null` is now common on a slow chip, and means what it always said: *not observed to settle*, never *settled instantly*.
-  - **`stability` describes the settled tail, not the whole hold (`PTR-a`, D6).** New per-point `stability.window_start_ms` says where its window opened — equal to `settled_ms` when the point settled. `samples` and `dropouts` still count the **whole hold** — raw evidence is never trimmed, so a tach that dropped out during the ramp is still counted — while `usable`, the distribution, `outliers` and `verdict` describe the window. A point that did not settle keeps its figures over the whole hold (`window_start_ms: 0`) and reports the new verdict **`not_settled`**, distinct from `insufficient_data` (too few readings). It is an absence of steady-state evidence, **never a fault**; a validation session maps it to `unknown`. Before 2.53.0 the settling ramp was inside every CV (14.1 % reported against a steady 0.81 %).
-  - **`measurement_resolution_ms` is the tach register's cadence, not the sampler's.** The chip's own `update_interval` where published, else the **median** gap between changes the holds observed (per point as `stability.update_interval_ms`), else `null` = UNKNOWN. It used to report the 500 ms sample interval against a ~2 s refresh.
-  - **`monotonic` is judged per leg in a bidirectional run (`PTR-d`, D5).** New `monotonic_falling` / `monotonic_rising`, each over its own leg sorted by duty (`ramp` excluded, as for hysteresis); `monotonic` is `false` if any judged leg is, `true` if at least one was judged and none is `false`, `null` if none could be. A unidirectional run is judged in walk order as before, and both leg fields are `null`. Before, a working fan walked down-then-up always read `false`.
-  - **The default settle is 12 s, no longer verify's 6 s** — four updates of a 2 s register need the room. `settle_seconds` still clamps into `2..=15`, and every run budget and deadman bound uses the 15 s maximum, so none moved. A client-supplied `settle_seconds` is honoured exactly as before.
+  **DEC-405 — what the settling and stability figures mean.**
+  - **`settled_ms` is judged on tach-register *updates*, not on 500 ms samples.** A register that refreshes every ~2 s (it87) shows four identical samples before it has refreshed once (`PTR-b`). A point settles at the first of four consecutive **updates** within 5 % of their median, and **never before its first update** after the write; a reading that never changes during the hold (a stopped fan's 0) settles at its first sample. So `settled_ms: null` is common on a slow chip, and means *not observed to settle*, never *settled instantly*.
+  - **`stability` describes the settled tail, not the whole hold (`PTR-a`, D6).** Per-point `stability.window_start_ms` says where its window opened — equal to `settled_ms` when the point settled. `samples` and `dropouts` still count the **whole hold** — raw evidence is never trimmed, so a tach that dropped out during the ramp is still counted — while `usable`, the distribution, `outliers` and `verdict` describe the window. A point that did not settle keeps its figures over the whole hold (`window_start_ms: 0`) and reports the verdict **`not_settled`**, distinct from `insufficient_data` (too few readings). It is an absence of steady-state evidence, **never a fault**; a validation session maps it to `unknown`.
+  - **`measurement_resolution_ms` is the tach register's cadence, not the sampler's.** The chip's own `update_interval` where published, else the **median** gap between changes the holds observed (per point as `stability.update_interval_ms`), else `null` = UNKNOWN.
+  - **`monotonic` is judged per leg in a bidirectional run (`PTR-d`, D5).** `monotonic_falling` / `monotonic_rising`, each over its own leg sorted by duty (`ramp` excluded, as for hysteresis); `monotonic` is `false` if any judged leg is, `true` if at least one was judged and none is `false`, `null` if none could be. A unidirectional run is judged in walk order, and both leg fields are `null`.
+  - **The default settle is 12 s** — four updates of a 2 s register need the room. `settle_seconds` clamps into `2..=15`, and every run budget and deadman bound uses the 15 s maximum. A client-supplied `settle_seconds` is honoured.
 
-  **DEC-411 (daemon ≥ 2.55.0) — two verdicts moved, and a progress field was added.** No capability flag: the field is additive and both changes are to the *meaning* of existing figures.
-  - **A settle must not be a ramp (`PTR-q`).** The four updates a point settles on must additionally not all move the same way by more than 2.5 % of their median. A τ ≈ 20 s pump falling ~110 rpm across four refreshes sat inside the 5 % band and "settled" while still moving. Slow devices on slow registers therefore report `settled_ms: null` / `not_settled` (and discovery `baseline_settled: false`) more often than 2.54 did — that is the honest answer, not a regression.
-  - **`rpm_verdict` is judged against the point's own noise (`PTR-m`).** A point whose stability window settled is `changed` when it moved by more than **3 × its `stability.stddev_rpm`**, never less than 50 rpm. A point that did not settle, or had too few readings, keeps the old rule (more than `max(50, rpm_before / 10)`), because its spread includes the step it is grading. So a smooth high-RPM device's genuine steps now read `changed`.
+  **DEC-411 — two verdict rules and a progress field.**
+  - **A settle must not be a ramp (`PTR-q`).** The four updates a point settles on must additionally not all move the same way by more than 2.5 % of their median. A slowly falling pump is therefore not judged settled while still moving, and slow devices on slow registers often report `settled_ms: null` / `not_settled` (and discovery `baseline_settled: false`) — that is the honest answer.
+  - **`rpm_verdict` is judged against the point's own noise (`PTR-m`).** A point whose stability window settled is `changed` when it moved by more than **3 × its `stability.stddev_rpm`**, never less than 50 rpm. A point that did not settle, or had too few readings, is `changed` when it moved by more than `max(50, rpm_before / 10)`, because its spread includes the step it is grading.
   - **`current_step` (`P8-bg`)** — `{phase, index, duty_pct, started_unix_ms, max_ms}` or `null`. A point is published only when its hold ends (up to settle + dwell, 26 s at the defaults), so this is the only signal a run is alive in between. `phase` is `settle` or `dwell` (opaque, 273-i); `index` is the `step_index` the held point will carry; `started_unix_ms` is on the same clock as `completed_unix_ms`; `max_ms` is the phase's upper bound. `null` before the first write and once terminal. Also on `ControlPathRun` below.
 
   **DEC-454 (daemon ≥ 3.1.0) — `first_change_ms` uses the verdict's threshold (`PTR-y`).** No shape change. A point's `first_change_ms` is the time of the first reading that moved away from `rpm_before` by more than the threshold `rpm_verdict` uses for that point (above): a hold sub-sample, or failing that the after-read, stamped with the point's `settle_ms`. **So a point whose `rpm_verdict` is `changed` carries a `first_change_ms`** — unless no hold sub-sample could be read, when the after-read's stamp would only be the hold's length (settle + dwell) and the field stays `null`. Before, the time was detected during the hold by the old proportional rule alone, so a smooth high-RPM device's steps could read `changed` with `first_change_ms: null`, and a validation session's `response_latency` then read `unavailable`. `null` still means *never moved* (or no readable tach), never *responded instantly*.
 
-  **Run additions.** `bidirectional`, `stability_seconds`, `completed_unix_ms`, `current_step` (2.55.0, DEC-411 above), and `provenance` — a `{field: token}` legend for this result. **The sidecar wins over any static client-side classification table** for the fields it names: one source of truth per field, and the daemon's is the one that produced the value. Fields absent from it are unclassified and must be rendered as such, never assumed OBSERVED.
+  **Run additions.** `bidirectional`, `stability_seconds`, `completed_unix_ms`, `current_step` (DEC-411 above), and `provenance` — a `{field: token}` legend for this result. **The sidecar wins over any static client-side classification table** for the fields it names: one source of truth per field, and the daemon's is the one that produced the value. Fields absent from it are unclassified and must be rendered as such, never assumed OBSERVED.
 
   **RPM provenance (§7).** `estimated_physical_rpm` is the wire's only `{value, provenance}` envelope, carrying `{value, provenance, correction_factor, correction_source}`, and is **present only where trusted compiled-in device metadata supplies a factor**. No shipped daemon entry sets one, so it is absent on every machine today — and absent is correct: a copy of the reported figure stamped `DERIVED` would be exactly the silent promotion the provenance model forbids. **`rpm_after` is always the raw reported value and is never overwritten by it.**
 
-  **Restore reporting (daemon ≥ 2.30.0).** `restore_failed: bool` answers exactly one question — **was the header left somewhere other than where the sweep found it?** It is `true` for a failed restore write, for a deliberate skip, and for an unreadable pre-sweep duty. `restore_outcome` says which, as a stable token: `pending` (still running) | `restored` | `write_failed` | `skipped_shutting_down` | `skipped_thermal_force` | `no_original_duty` | `skipped_unresponsive` (daemon ≥ 2.56.0, DEC-420; widened by DEC-455, daemon ≥ 3.1.0). **`skipped_unresponsive`:** a read of the header did not return within 2 s, or (DEC-455) a write to it did not, so the run wrote nothing more to it — the restore goes through a write path whose own reads are not bounded and hold the controller lock, so writing to a driver that has stopped answering could stall every hwmon fan. After a read, the header is left at the last swept duty (never below `max(20, its floor)`), with `restore_failed: true`. A run whose read hung before its first write reports `restored` instead, like any run that never moved the header. The one exception to the read case is a header that became pump-protected during the run: its restore is still attempted, floored at 30 %, and reports like any other restore. **After a write that did not return** (DEC-455) the write still holds the controller lock and may land whenever the driver answers, and any further write would only queue behind it. **On a header with a mode switch (`pwmN_enable`) nothing more is written, with no pump exception:** the header ends at the stuck write's duty once it lands (never below `max(20, its floor)` for a characterisation or discovery; on the stall probe possibly a sub-20 % step), and the profile engine drives it or hands it back to the firmware on its next tick once the lock is free (DEC-382). **On a header with no mode switch** (an ARCTIC hub channel, say), which the engine never hands back, the write is queued deliberately: characterisation and discovery queue their normal restore (floored at a pump floor the run already knew of — evidence the run never read is not looked up), and the stall probe queues one 100 % write, since a queued kick cannot hold long enough to restart a stalled fan; each lands after the stuck write. `restore_failed: true` in every case except a queued restore that lands within the 2 s bound (`restored`). A write counts once it has been attempted, so a run whose very first write did not return reports `skipped_unresponsive`, not `restored`. **The restore write itself not returning** is reported the same way: it may still land. Once the lock is free, the profile engine drives the header or hands it back to the firmware on its next tick (DEC-382). The client owns the wording and **must render an unrecognised token rather than dropping it** (273-i); a daemon that omits `restore_outcome` predates it, and there `restore_failed: true` can only mean `write_failed`.
+  **Restore reporting.** `restore_failed: bool` answers exactly one question — **was the header left somewhere other than where the sweep found it?** It is `true` for a failed restore write, for a deliberate skip, and for an unreadable pre-sweep duty. `restore_outcome` says which, as a stable token: `pending` (still running) | `restored` | `write_failed` | `skipped_shutting_down` | `skipped_thermal_force` | `no_original_duty` | `skipped_unresponsive` (DEC-420; widened by DEC-455, daemon ≥ 3.1.0). **`skipped_unresponsive`:** a read of the header did not return within 2 s, or (DEC-455) a write to it did not, so the run wrote nothing more to it — the restore goes through a write path whose own reads are not bounded and hold the controller lock, so writing to a driver that has stopped answering could stall every hwmon fan. After a read, the header is left at the last swept duty (never below `max(20, its floor)`), with `restore_failed: true`. A run whose read hung before its first write reports `restored` instead, like any run that never moved the header. The one exception to the read case is a header that became pump-protected during the run: its restore is still attempted, floored at 30 %, and reports like any other restore. **After a write that did not return** (DEC-455) the write still holds the controller lock and may land whenever the driver answers, and any further write would only queue behind it. **On a header with a mode switch (`pwmN_enable`) nothing more is written, with no pump exception:** the header ends at the stuck write's duty once it lands (never below `max(20, its floor)` for a characterisation or discovery; on the stall probe possibly a sub-20 % step), and the profile engine drives it or hands it back to the firmware on its next tick once the lock is free (DEC-382). **On a header with no mode switch** (an ARCTIC hub channel, say), which the engine never hands back, the write is queued deliberately: characterisation and discovery queue their normal restore (floored at a pump floor the run already knew of — evidence the run never read is not looked up), and the stall probe queues one 100 % write, since a queued kick cannot hold long enough to restart a stalled fan; each lands after the stuck write. `restore_failed: true` in every case except a queued restore that lands within the 2 s bound (`restored`). A write counts once it has been attempted, so a run whose very first write did not return reports `skipped_unresponsive`, not `restored`. **The restore write itself not returning** is reported the same way: it may still land. Once the lock is free, the profile engine drives the header or hands it back to the firmware on its next tick (DEC-382). The client owns the wording and **must render an unrecognised token rather than dropping it** (273-i).
 
-  The two fields cannot disagree: the daemon derives the boolean from the token. **The reason is load-bearing, not decoration** — on `skipped_thermal_force` the header is being held high by the thermal ladder on purpose, and the advice `write_failed` warrants ("re-activate your profile to take control back") is the one action a client must *not* prompt for until the ladder releases. A sweep that aborted before writing anything reports `restored`: it left the header exactly where it found it, and claiming otherwise would be a false alarm. **`no_original_duty` on a header that became pump-protected mid-run (DEC-418, daemon ≥ 2.56.0):** the header is still left where the run left it, but raised to the 30 % pump floor if that duty was below it — never lowered to it. The token is unchanged, because the header still was not put back where it was found.
+  The two fields cannot disagree: the daemon derives the boolean from the token. **The reason is load-bearing, not decoration** — on `skipped_thermal_force` the header is being held high by the thermal ladder on purpose, and the advice `write_failed` warrants ("re-activate your profile to take control back") is the one action a client must *not* prompt for until the ladder releases. A sweep that aborted before writing anything reports `restored`: it left the header exactly where it found it, and claiming otherwise would be a false alarm. **`no_original_duty` on a header that became pump-protected mid-run (DEC-418):** the header is still left where the run left it, but raised to the 30 % pump floor if that duty was below it — never lowered to it. The token is unchanged, because the header still was not put back where it was found.
+- `GET /diagnostics/preflight?header=<id>&diagnostic=<kind>` — **AIO Phase 8 Batch 1 (DEC-333), capability-gated on `control.diagnostic_preflight`.** The daemon's own safety verdict for one header and one diagnostic, before anything is driven. `diagnostic` is one of `pwm_verify` | `pwm_characterization` | `control_path_discovery` | `pwm_stall_probe` (DEC-407) and defaults to `control_path_discovery`; an unrecognised value is `400 validation_error`. **Read-only: it writes no hardware, takes no lease and claims no slot, so calling it reserves nothing** — a `ready` verdict is a statement about *now*, and the diagnostic's own POST still runs its own guards. Body is `{header_id, diagnostic, verdict, checks[], blocking[]}`. `verdict` is `ready` | `warn` | `blocked`; each check is `{check_id, state, detail}` with `state` in `pass` | `warn` | `fail` | `unknown` | `not_applicable`. **The client must render the daemon's `verdict` rather than rolling the rows up itself** — a second copy of that rule is one that can disagree, and the copy the user is looking at would be the wrong one. `blocking[]` names the `check_id`s that produced `blocked`, so naming the blockers needs no re-derivation either. Check ids are `target_discoverable`, `header_role`, `pwm_writable`, `pwm_readback`, `control_ownership`, `safe_minimum`, `temperature_source`, `thermal_state`, `reclaim_state`, `original_state`, `supporting_cooling`, plus — **for `pwm_stall_probe` only, so no other diagnostic's report changes shape** — `stall_probe_eligible` (DEC-407), `fail` when the header is not eligible (the `detail` names the reason token, the same `INELIGIBLE_*` rule the POST refuses on) or no fresh CPU temperature exists; for that diagnostic `safe_minimum`'s detail says it descends to 0 % rather than claiming a clamp; both ids and states are **opaque tokens** and an unrecognised one must be rendered, never dropped (273-i). **`unknown` and `not_applicable` never block** — lack of evidence must not become a PASS, and its mirror is that it must not become a FAILURE either. **A stale `temperature_source` is `fail` for every diagnostic** (DEC-385, `TS-q`), "stale" meaning older than the ladder's own trust window (DEC-395); the check's `detail` names the limit applied, in ms. With the poll wedged on a hot reading the ladder cannot fire (a stale hot reading reports `normal`), so **every diagnostic's POST refuses on this condition, from the same predicate, and a sweep in flight aborts on it** (DEC-336, DEC-385). `supporting_cooling` is **reported, never acted on** — the engine's write pause already holds sibling members at their last duty, and no diagnostic drives one.
+- `POST /hwmon/{header_id}/discover-control-path` — **AIO Phase 8 Batch 1 (DEC-333), capability-gated on `control.control_path_discovery`.** Establishes which tach channel(s) a PWM output *actually* drives, by measurement rather than by sysfs numbering. Body is JSON and may be empty (`{}`); all three fields optional: `delta_pct: u8`, `cycles: u8`, `window_seconds: u64`. Returns **`202`** with the initial run snapshot and runs **daemon-side and detached**; the client polls `GET /diagnostics/control-path`. **Every tuning input is clamped server-side and the client must not pre-clamp, and in particular must never compute a duty:** `delta_pct` clamps into `10..=40`, `cycles` into `2..=3` (the floor is 2 because repeatability is a confidence input, so a one-cycle run must not be able to claim it tested for it), `window_seconds` into `2..=15`. The daemon chooses the perturbation *direction* — always **away from the nearer rail**, so there is headroom and a pump is never walked toward a stall — and clamps every commanded duty into `[max(20, header floor) .. 100]`. **0 % is unreachable through this endpoint for any header and any input**, and a pump-protected header never crosses its 30 % floor; the pump term is the **union** predicate, never the wire `role` (DEC-312). **That includes protection gained mid-run (DEC-418, `TS-aw`):** the union is re-read before every write and on every 500 ms sample of every window, and a header that becomes pump-protected ends the run as `aborted` with a `detail` saying why, its restore floored at 30 %. Protection that arrives after the last window — or exactly as a window ends; a window whose time has elapsed counts as measured — leaves the run `complete` (every window was measured), raises its return to the baseline to the pump floor, and still floors the restore. **A PWM write that does not return within 2 s (DEC-455, daemon ≥ 3.1.0)** ends the run as `failed`, exactly as on a characterisation: no return to the baseline, `restore_outcome: skipped_unresponsive`, and nothing more written — except, on a header with no mode switch, the restore queued behind the stuck write. It claims the **same** single-flight slot as verify, calibrate and characterise, so at most one of the four ever drives hardware. Refusals are the characterisation's, plus `400 feature_unavailable` for a read-only header, plus the stale-temperature refusal: `409 validation_error` with `retryable: true` when every temperature reading the daemon holds is older than the thermal ladder's own CPU trust window — five poll intervals, 5 s at the default 1 s poll (**DEC-336**, DEC-395). That is the refusal `GET /diagnostics/preflight` publishes as `verdict: "blocked"`, `blocking: ["temperature_source"]`; the two are derived from one predicate and cannot disagree, and the same check aborts a run already in flight. **It — and the two thermal gates beside it, the 85 °C voluntary abort and the thermal-ladder force check — are evaluated before *every* PWM write the run issues, i.e. once per observation window (DEC-339, `P8-u`)**, and the run's final return-to-baseline write is skipped outright while the ladder is forcing. The hwmon verify, characterisation, OpenFan calibrate and the stall probe refuse on the same predicate (DEC-385) (§ `GET /diagnostics/preflight` above); only the GPU fan verify does not. The code pair is the same one the thermal-force refusal uses, so a client that already treats `validation_error` + `retryable` as a soft safety refusal (protection, shown verbatim) needs no change.
+- `GET /diagnostics/control-path` — the current or most recent run **plus every persisted relationship**: `{api_version, run, records[]}`. `404 not_found` — the error envelope, with no `run` — when the daemon has never run one *and* holds no records. `run` is `null` when records exist but nothing has run since the daemon started; otherwise it carries `{run_id, header_id, state, delta_pct, requested_cycles, window_seconds, baseline_pct, perturbed_pct, direction, channels[], cycles[], summary, original_pct, restore_failed, restore_outcome, detail, completed_unix_ms, current_step}` (`current_step`, see below). `state` is opaque (`running` | `complete` | `cancelled` | `aborted` | `failed` today) and must be rendered when unrecognised. `summary` is `null` while running and carries `{relationship, confidence, candidates[], measurement_resolution_ms, sample_interval_ms, sample_count, confidence_notes[]}`. **`relationship` is `confirmed` | `probable` | `ambiguous` | `no_tach_response` | `multiple_responses`, and `no_tach_response` is NOT a failure** — a header may legitimately drive no tach-reporting device, or drive one running under its own internal control, and reporting it as a fault is the wrong conclusion for the same reason `possible_device_override` is. `multiple_responses` is expected for a splitter and must be representable: **do not assume one PWM maps to exactly one tach.** `confidence` is `high` | `medium` | `low` | `unknown`; `unknown` means nothing was measurable, which is distinct from a low-confidence no-response. **`measurement_resolution_ms` is `null` when the cadence could not be established, and a client must render that as UNKNOWN rather than substituting the sample interval** — reporting sub-second timing against a driver that refreshes every 2 s is exactly the false precision this field exists to prevent. `records[]` are daemon-persisted and survive a restart; each is `{header_id, relationship, confidence, tach_ids[], tach_labels[], direction, baseline_rpm, perturbed_rpm, change_pct, run_id, validated_unix_ms}`. **The daemon owns their invalidation**: a record is keyed by the header's stable id (which embeds chip, device, `pwmN` and label) and is dropped at boot when that id no longer appears in discovery, so a client needs no freshness rule of its own.
 
-  Before 2.30.0 `restore_failed` was `false` on all three non-write exits, i.e. it said "restored" about a header parked at the last swept duty (`AUD2-c`).
-- `GET /diagnostics/preflight?header=<id>&diagnostic=<kind>` — **AIO Phase 8 Batch 1 (DEC-333), daemon ≥ 2.39.0, capability-gated on `control.diagnostic_preflight`.** The daemon's own safety verdict for one header and one diagnostic, before anything is driven. `diagnostic` is one of `pwm_verify` | `pwm_characterization` | `control_path_discovery` | `pwm_stall_probe` (DEC-407, daemon ≥ 2.54.0) and defaults to `control_path_discovery`; an unrecognised value is `400 validation_error`. **Read-only: it writes no hardware, takes no lease and claims no slot, so calling it reserves nothing** — a `ready` verdict is a statement about *now*, and the diagnostic's own POST still runs its own guards. Body is `{header_id, diagnostic, verdict, checks[], blocking[]}`. `verdict` is `ready` | `warn` | `blocked`; each check is `{check_id, state, detail}` with `state` in `pass` | `warn` | `fail` | `unknown` | `not_applicable`. **The client must render the daemon's `verdict` rather than rolling the rows up itself** — a second copy of that rule is one that can disagree, and the copy the user is looking at would be the wrong one. `blocking[]` names the `check_id`s that produced `blocked`, so naming the blockers needs no re-derivation either. Check ids are `target_discoverable`, `header_role`, `pwm_writable`, `pwm_readback`, `control_ownership`, `safe_minimum`, `temperature_source`, `thermal_state`, `reclaim_state`, `original_state`, `supporting_cooling`, plus — **for `pwm_stall_probe` only, so no other diagnostic's report changes shape** — `stall_probe_eligible` (DEC-407), `fail` when the header is not eligible (the `detail` names the reason token, the same `INELIGIBLE_*` rule the POST refuses on) or no fresh CPU temperature exists; for that diagnostic `safe_minimum`'s detail says it descends to 0 % rather than claiming a clamp; both ids and states are **opaque tokens** and an unrecognised one must be rendered, never dropped (273-i). **`unknown` and `not_applicable` never block** — lack of evidence must not become a PASS, and its mirror is that it must not become a FAILURE either. **A stale `temperature_source` is `fail` for every diagnostic since DEC-385** (`TS-q`), with "stale" meaning older than the ladder's own trust window since DEC-395; the check's `detail` names the limit applied, in ms. Until then it was `fail` for `control_path_discovery` only and `warn` for `pwm_verify` and `pwm_characterization`, because those two handlers did not refuse on it — and a preflight must not promise a refusal the daemon will not perform. The thermal-safety audit showed the warning was not enough: with the poll wedged on a hot reading the ladder cannot fire (a stale hot reading reports `normal`), so a verify or a sweep started then drives a fan on numbers nothing is measuring. Both halves moved together, so the verdict still describes the daemon: **every diagnostic's POST refuses on this condition, from the same predicate, and a sweep in flight aborts on it** (discovery since DEC-336, daemon ≥ 2.42.0; verify and characterisation since DEC-385). A daemon older than DEC-385 still reports `warn` for those two, and there it remains advisory. `supporting_cooling` is **reported, never acted on** — the engine's write pause already holds sibling members at their last duty, and no diagnostic drives one.
-- `POST /hwmon/{header_id}/discover-control-path` — **AIO Phase 8 Batch 1 (DEC-333), daemon ≥ 2.39.0, capability-gated on `control.control_path_discovery`.** Establishes which tach channel(s) a PWM output *actually* drives, by measurement rather than by sysfs numbering. Body is JSON and may be empty (`{}`); all three fields optional: `delta_pct: u8`, `cycles: u8`, `window_seconds: u64`. Returns **`202`** with the initial run snapshot and runs **daemon-side and detached**; the client polls `GET /diagnostics/control-path`. **Every tuning input is clamped server-side and the client must not pre-clamp, and in particular must never compute a duty:** `delta_pct` clamps into `10..=40`, `cycles` into `2..=3` (the floor is 2 because repeatability is a confidence input, so a one-cycle run must not be able to claim it tested for it), `window_seconds` into `2..=15`. The daemon chooses the perturbation *direction* — always **away from the nearer rail**, so there is headroom and a pump is never walked toward a stall — and clamps every commanded duty into `[max(20, header floor) .. 100]`. **0 % is unreachable through this endpoint for any header and any input**, and a pump-protected header never crosses its 30 % floor; the pump term is the **union** predicate, never the wire `role` (DEC-312). **Since DEC-418 (`TS-aw`, daemon ≥ 2.56.0) that includes protection gained mid-run:** the union is re-read before every write and on every 500 ms sample of every window, and a header that becomes pump-protected ends the run as `aborted` with a `detail` saying why, its restore floored at 30 %. Protection that arrives after the last window — or exactly as a window ends; a window whose time has elapsed counts as measured — leaves the run `complete` (every window was measured), raises its return to the baseline to the pump floor, and still floors the restore. Earlier daemons read the union once, at the POST. **A PWM write that does not return within 2 s (DEC-455, daemon ≥ 3.1.0)** ends the run as `failed`, exactly as on a characterisation: no return to the baseline, `restore_outcome: skipped_unresponsive`, and nothing more written — except, on a header with no mode switch, the restore queued behind the stuck write. It claims the **same** single-flight slot as verify, calibrate and characterise, so at most one of the four ever drives hardware. Refusals are the characterisation's, plus `400 feature_unavailable` for a read-only header, plus **one this endpoint alone performs**: `409 validation_error` with `retryable: true` when every temperature reading the daemon holds is older than the thermal ladder's own CPU trust window — five poll intervals, 5 s at the default 1 s poll (**DEC-336**, daemon ≥ 2.42.0; the window is exact since DEC-395, and earlier daemons floored it at a flat 10 s). That is the refusal `GET /diagnostics/preflight` has published as `verdict: "blocked"`, `blocking: ["temperature_source"]` since DEC-333 — from DEC-333 until DEC-336 the daemon published it and did **not** perform it, so a client that ignored the verdict got a `202` and a perturbed header on a machine whose real temperature was unknown. The two are now derived from one predicate and cannot disagree; the same check aborts a run already in flight. **Its cadence tightened in daemon 2.43.1 (DEC-339, register row `P8-u`): it — and the two thermal gates beside it, the 85 °C voluntary abort and the thermal-ladder force check — are evaluated before *every* PWM write the run issues, i.e. once per observation window, where until 2.43.0 all three ran once per *cycle* and a cycle issues two writes.** This changes no wire shape, status code or token; a client sees only that an `aborted` run with a thermal `detail` can now arrive up to one window (≤ 15 s) sooner, and that the run's final return-to-baseline write is skipped outright while the ladder is forcing. Nothing in the client needs to change for it, and there is no capability flag — the two behaviours are indistinguishable from the client's side except in timing. **It was discovery-only until DEC-385 (daemon 2.50.0)**: since then the hwmon verify, characterisation, OpenFan calibrate and the stall probe refuse on the same predicate (§ `GET /diagnostics/preflight` above); only the GPU fan verify does not. The code pair is the same one the thermal-force refusal uses, so a client that already treats `validation_error` + `retryable` as a soft safety refusal (protection, shown verbatim) needs no change.
-- `GET /diagnostics/control-path` — the current or most recent run **plus every persisted relationship**: `{api_version, run, records[]}`. `404 not_found` — the error envelope, with no `run` — when the daemon has never run one *and* holds no records. `run` is `null` when records exist but nothing has run since the daemon started; otherwise it carries `{run_id, header_id, state, delta_pct, requested_cycles, window_seconds, baseline_pct, perturbed_pct, direction, channels[], cycles[], summary, original_pct, restore_failed, restore_outcome, detail, completed_unix_ms, current_step}` (`current_step` since 2.55.0, see below). `state` is opaque (`running` | `complete` | `cancelled` | `aborted` | `failed` today) and must be rendered when unrecognised. `summary` is `null` while running and carries `{relationship, confidence, candidates[], measurement_resolution_ms, sample_interval_ms, sample_count, confidence_notes[]}`. **`relationship` is `confirmed` | `probable` | `ambiguous` | `no_tach_response` | `multiple_responses`, and `no_tach_response` is NOT a failure** — a header may legitimately drive no tach-reporting device, or drive one running under its own internal control, and reporting it as a fault is the wrong conclusion for the same reason `possible_device_override` is. `multiple_responses` is expected for a splitter and must be representable: **do not assume one PWM maps to exactly one tach.** `confidence` is `high` | `medium` | `low` | `unknown`; `unknown` means nothing was measurable, which is distinct from a low-confidence no-response. **`measurement_resolution_ms` is `null` when the cadence could not be established, and a client must render that as UNKNOWN rather than substituting the sample interval** — reporting sub-second timing against a driver that refreshes every 2 s is exactly the false precision this field exists to prevent. `records[]` are daemon-persisted and survive a restart; each is `{header_id, relationship, confidence, tach_ids[], tach_labels[], direction, baseline_rpm, perturbed_rpm, change_pct, run_id, validated_unix_ms}`. **The daemon owns their invalidation**: a record is keyed by the header's stable id (which embeds chip, device, `pwmN` and label) and is dropped at boot when that id no longer appears in discovery, so a client needs no freshness rule of its own.
+  **DEC-405 (`PTR-c`, D7) — later baselines are measured on a settled tach.** Before a baseline window whose write moved the duty (every later cycle, and cycle 1 only when the header was found below the discovery floor) the run **waits, bounded at 15 s, for every channel that can move to settle** — on register updates, as above. The wait is its own observation window: the deadman renewal and the three thermal gates run again before the baseline window after it, so the one-window renewal cadence (DEC-296/339) is unchanged. Each cycle gains `baseline_settled` (`null` when no wait ran, else whether every channel settled) and `settle_wait_ms`; each observation gains `noise_floor_from_cycle_1`, true when that channel had not settled and its `noise_floor_rpm` was therefore taken from cycle 1 rather than from a recovery ramp — and `confidence_notes` says so. The wait's last reading gets the reclaim / lost-pump-tach check every window's does, and **a cancel is honoured at every window boundary**, the wait included. **`measurement_resolution_ms` is the median update interval of the header's own tach where it has one**, else the fastest channel's. The default `window_seconds` follows the characterisation default to **12 s**, so a default run is roughly 50 s plus its waits.
 
-  **DEC-405 (daemon ≥ 2.53.0, `PTR-c`, D7) — later baselines are measured on a settled tach.** Before a baseline window whose write moved the duty (every later cycle, and cycle 1 only when the header was found below the discovery floor) the run now **waits, bounded at 15 s, for every channel that can move to settle** — on register updates, as above. The wait is its own observation window: the deadman renewal and the three thermal gates run again before the baseline window after it, so the one-window renewal cadence (DEC-296/339) is unchanged. Each cycle gains `baseline_settled` (`null` when no wait ran, else whether every channel settled) and `settle_wait_ms`; each observation gains `noise_floor_from_cycle_1`, true when that channel had not settled and its `noise_floor_rpm` was therefore taken from cycle 1 rather than from a recovery ramp — and `confidence_notes` says so. The wait's last reading gets the reclaim / lost-pump-tach check every window's does, and **a cancel is now honoured at every window boundary**, the wait included — where before 2.53.0 it was checked only at the top of each cycle, so up to two windows passed before it landed. Before, a pump's recovery ramp became its "noise" and a +796 rpm response was graded `ambiguous` against an 804 rpm floor. **`measurement_resolution_ms` is now the median update interval of the header's own tach where it has one**, else the fastest channel's (it used to be the smallest gap on any channel). The default `window_seconds` follows the characterisation default to **12 s**, so a default run is roughly 50 s plus its waits.
-
-  **`current_step` (DEC-411, `P8-bg`, daemon ≥ 2.55.0)** — the same `{phase, index, duty_pct, started_unix_ms, max_ms}` object as the characterisation run's, or `null`. `phase` is `settle_wait` | `baseline` | `perturbed` (opaque, 273-i) and `index` is the 1-based cycle as `cycles[].cycle` numbers it. A cycle is published only after both of its windows, so at the default two cycles a client used to see **one** intermediate update in a whole run. Since DEC-411 the settle-wait's settle test also carries the trend term above, so a baseline still climbing is not released early.
-- `DELETE /diagnostics/control-path` — asks a running discovery to stop; `202` with the snapshot. Cooperative, and the same cancellation semantics as the characterisation sweep: the window currently being held finishes, then the header is restored. (True of daemon ≥ 2.53.0, DEC-405, which checks the cancel at every window boundary; older daemons checked it only at the top of each cycle, so up to two windows could pass.) `409 validation_error` when nothing is running. **Cancellation is a courtesy, not the safety mechanism** — the restore is the daemon's job on every exit path on which nothing else owns the header, with the same two deliberate skips (a thermal force, and daemon shutdown), both of which leave the header *high*.
-- `DELETE /diagnostics/characterization` — asks a running sweep to stop; `202` with the snapshot. Cooperative: the point currently settling finishes, then the header is restored. `409 validation_error` when no run is in progress. **Cancellation is a courtesy, not the safety mechanism** — the daemon restores the pre-sweep duty on every exit path on which nothing else owns the header, including the client vanishing, so a GUI that dies mid-sweep strands nothing. The exceptions are the deliberate skips reported by `restore_outcome` above: a thermal force and daemon shutdown, which both leave the header *high*, and (daemon ≥ 2.56.0) `skipped_unresponsive`, which leaves it at the last swept duty — never below `max(20, its floor)` — because its driver stopped answering a read or (daemon ≥ 3.1.0, DEC-455) a write — after a write, on a header with no mode switch, the restore is queued behind the stuck write instead.
-- `POST /hwmon/{header_id}/stall-probe` — **DEC-407 (DEC-404 Stage 3), daemon ≥ 2.54.0, capability-gated on `control.stall_probe`.** `[SAFETY]` — the **only** diagnostic that commands below 20 %, down to 0 %, on purpose, to find where a fan stops (the **stall duty**) and where it starts again (the **restart duty**). Characterisation's 20 % clamp is unchanged. Body: exactly `{"acknowledge_below_floor": true}`. **There are no tunables**: every duty, step, dwell and budget is derived by the daemon from the header's own measurements, a body naming any other field is rejected by the typed extractor (axum's plain-text `422`, not the error envelope), and a body without the acknowledgement is `400 validation_error`. Returns **`202`** with the run snapshot and runs **detached** on the **same** single-flight slot as every diagnostic (`409` if one is running); the client polls `GET /diagnostics/stall-probe`. Refusals, all before anything is written: `503 hardware_unavailable` while shutting down or with no hwmon controller; the three thermal guards, exactly as characterisation; `404` for an unknown header; **`400` when the header is not eligible**, with `error.details.reason` a stable token — `pump_protected` (the pump **union**, never the wire `role`, DEC-312/384: a header whose display role reads `chassis_fan` over a `PUMP` label, or that the active profile names a pump, is refused), `cpu_fan`, `role_unknown` (assign `chassis_fan` or `radiator_fan`), `no_fan` (daemon ≥ 3.4.0) — or `400 feature_unavailable` for `read_only` / `no_tach`; `400 validation_error` `retryable: true` with `reason: no_cpu_temperature` when no fresh CPU temperature exists (the probe's rise gate needs one). **Eligibility is the display role**: a `CPU_FAN` header the user assigned `radiator_fan` is eligible. The daemon re-checks eligibility before **every** write **and on every 500 ms sample**, and aborts if it is lost — a pump assigned mid-hold is honoured within one sample, not when the hold ends; a pump role that appears at any point also raises the restore to the pump floor.
+  **`current_step` (DEC-411, `P8-bg`)** — the same `{phase, index, duty_pct, started_unix_ms, max_ms}` object as the characterisation run's, or `null`. `phase` is `settle_wait` | `baseline` | `perturbed` (opaque, 273-i) and `index` is the 1-based cycle as `cycles[].cycle` numbers it. A cycle is published only after both of its windows, so this is the run's only signal between them. The settle-wait's settle test also carries the trend term above, so a baseline still climbing is not released early.
+- `DELETE /diagnostics/control-path` — asks a running discovery to stop; `202` with the snapshot. Cooperative, and the same cancellation semantics as the characterisation sweep: the window currently being held finishes, then the header is restored. (DEC-405: the cancel is checked at every window boundary.) `409 validation_error` when nothing is running. **Cancellation is a courtesy, not the safety mechanism** — the restore is the daemon's job on every exit path on which nothing else owns the header, with the same two deliberate skips (a thermal force, and daemon shutdown), both of which leave the header *high*.
+- `DELETE /diagnostics/characterization` — asks a running sweep to stop; `202` with the snapshot. Cooperative: the point currently settling finishes, then the header is restored. `409 validation_error` when no run is in progress. **Cancellation is a courtesy, not the safety mechanism** — the daemon restores the pre-sweep duty on every exit path on which nothing else owns the header, including the client vanishing, so a GUI that dies mid-sweep strands nothing. The exceptions are the deliberate skips reported by `restore_outcome` above: a thermal force and daemon shutdown, which both leave the header *high*, and `skipped_unresponsive`, which leaves it at the last swept duty — never below `max(20, its floor)` — because its driver stopped answering a read or (daemon ≥ 3.1.0, DEC-455) a write — after a write, on a header with no mode switch, the restore is queued behind the stuck write instead.
+- `POST /hwmon/{header_id}/stall-probe` — **DEC-407 (DEC-404 Stage 3), capability-gated on `control.stall_probe`.** `[SAFETY]` — the **only** diagnostic that commands below 20 %, down to 0 %, on purpose, to find where a fan stops (the **stall duty**) and where it starts again (the **restart duty**). Characterisation keeps its 20 % clamp. Body: exactly `{"acknowledge_below_floor": true}`. **There are no tunables**: every duty, step, dwell and budget is derived by the daemon from the header's own measurements, a body naming any other field is rejected by the typed extractor (axum's plain-text `422`, not the error envelope), and a body without the acknowledgement is `400 validation_error`. Returns **`202`** with the run snapshot and runs **detached** on the **same** single-flight slot as every diagnostic (`409` if one is running); the client polls `GET /diagnostics/stall-probe`. Refusals, all before anything is written: `503 hardware_unavailable` while shutting down or with no hwmon controller; the three thermal guards, exactly as characterisation; `404` for an unknown header; **`400` when the header is not eligible**, with `error.details.reason` a stable token — `pump_protected` (the pump **union**, never the wire `role`, DEC-312/384: a header whose display role reads `chassis_fan` over a `PUMP` label, or that the active profile names a pump, is refused), `cpu_fan`, `role_unknown` (assign `chassis_fan` or `radiator_fan`), `no_fan` (daemon ≥ 3.4.0) — or `400 feature_unavailable` for `read_only` / `no_tach`; `400 validation_error` `retryable: true` with `reason: no_cpu_temperature` when no fresh CPU temperature exists (the probe's rise gate needs one). **Eligibility is the display role**: a `CPU_FAN` header the user assigned `radiator_fan` is eligible. The daemon re-checks eligibility before **every** write **and on every 500 ms sample**, and aborts if it is lost — a pump assigned mid-hold is honoured within one sample, not when the hold ends; a pump role that appears at any point also raises the restore to the pump floor.
 
   **The walk.** 20 % until the tach settles on register updates (≤ 12 s): this measures the tach refresh — the driver's `update_interval` preferred — and proves a fan. If the tach reads 0 there, nothing below 20 % is written: a fan that was spinning before the probe stalls at 20 % or above (`stalled_at_or_above_20`, then the kick), and one that read 0 — or could not be read — before is `no_fan_detected` (the kick too, when the earlier reading was unreadable). Then 18 → 0 % in 2-point steps until the fan reads 0 rpm across two refreshes (a **stall**; stopping only at 0 % is a stall too), then stall+2 → 20 % inclusive until it reads > 0 across two refreshes (a **restart**). Each step is held `max(6 s, 3 × refresh)` and ends early once confirmed. The time below 20 % is budgeted per header from its refresh (the worst-case walk, hard cap 180 s); a refresh too slow to fit (above ~2.85 s) or unmeasurable is refused during the baseline. **Every abort and every cancel ends with a 100 % recovery kick**, held (≤ 15 s) until the fan is seen spinning, then the normal restore — **except while shutting down**, when the exit path owns the header and a write after its hand-back would re-take it. Under a thermal force, or after the run was superseded, the kick is still attempted: it can lower no floor, and where the ladder or the successor holds the lease it simply fails. **Any unreadable probe sample ends the run** as `tach_unreadable` — a stall or restart nobody measured is never reported — and so does a read that does not return within 2 s, after which the header is not read again and the kick is held unobserved.
 - `GET /diagnostics/stall-probe` — the current or most recent run, **in memory only** (a restart forgets it). **While `state` is `running`, `outcome`, `abort_reason` and `detail` stay `null`** — including during the recovery kick, which is held after the run's ending is known. `original_pct` is `null` in the POST's `202` snapshot (the task reads it off the request path) and published once read: `{run_id, header_id, state, outcome, abort_reason, detail, stall_duty_pct, restart_duty_pct, hysteresis_pct, lowest_commanded_pct, time_below_floor_ms, baseline_rpm, baseline_settled, refresh_ms, refresh_source, dwell_ms, confirm_ms, budget_ms, start_cpu_temp_c, max_cpu_temp_c, rise_limit_c, restart_failed_at_full, points[], original_pct, restore_failed, restore_outcome, completed_unix_ms, provenance}`. `404 not_found` when no probe has run. `state` uses characterisation's vocabulary (`running` | `complete` | `cancelled` | `aborted` | `failed`). `outcome` is `null` while running, then `stall_and_restart_found` | `no_stall_down_to_0` | `did_not_restart_below_20` (the kick followed) | `stalled_at_or_above_20` (`stall_duty_pct` null — only "20 % or higher" is known; the kick followed) | `no_fan_detected` | `aborted` | `cancelled`. `abort_reason` (set only for `aborted`) is `thermal_limit` | `thermal_force` | `stale_temperature` | `thermal_rise` (the hottest fresh CPU reading rose more than `rise_limit_c`, 5 °C, over `start_cpu_temp_c` — a spiky CPU sensor can do this at idle; re-run while idle) | `no_cpu_temperature` | `eligibility_lost` | `budget_exceeded` | `reclaimed` | `write_failed` (`state: failed` — a write that returned an error, or, daemon ≥ 3.1.0 (DEC-455), one that did not return within 2 s; `detail` says which. After a write that did not return the probe runs no recovery kick and no restore — both would queue behind it on the controller lock — and `restore_outcome` is `skipped_unresponsive`; on a header with no mode switch, which nothing else would move again, one 100 % write is queued behind the stuck write instead) | `refresh_unknown` | `refresh_too_slow` | `tach_unreadable` (an unreadable sample, or a read that never returned) | `shutting_down` | `superseded`. Each point is `{phase, step_index, commanded_pct, command_accepted, readback_pct, pwm_enable, rpm_before, rpm_after, held_ms, confirmed_at_ms, samples, zero_samples, observation}` with `phase` in `baseline` | `descent` | `ascent` | `kick` and `observation` in `spinning` | `stalled` | `restarted` | `stopped` | `no_fan` | `unreadable` | `interrupted` | `unconfirmed` (the hold ended unconfirmed with a last reading that contradicts the plain verdict). `restart_failed_at_full: true` means the fan still read 0 rpm at the end of the whole kick — it may be physically stuck — and the header was restored regardless; a kick that could not read the tach claims nothing. `restore_failed` / `restore_outcome` mean exactly what they mean on a characterisation run. **All tokens are opaque; render an unrecognised one** (273-i). `time_below_floor_ms` runs from the first sub-20 % write to the probe's last write, not to the restore. `refresh_source` is `driver_update_interval` | `observed`. `provenance` is the `§9` sidecar (COMMANDED / OBSERVED / DERIVED).
 - `DELETE /diagnostics/stall-probe` — asks a running probe to stop; `202` with the snapshot, `409 validation_error` when none is running. **Honoured on the next sample (≤ 500 ms)**, unlike a characterisation settle, and followed by the recovery kick and the restore. A `DELETE` that arrives during the kick is accepted and does not shorten it — the kick is the recovery.
-- **GUI use (DEC-408, GUI ≥ 2.82.0).** The PWM Test Report is the first caller. It asks
+- **GUI use (DEC-408).** The PWM Test Report is the caller. It asks
   `GET /diagnostics/preflight?diagnostic=pwm_stall_probe` first and records a `blocked` verdict
   as *not tested* with the daemon's rows; it polls the `GET` at 1 Hz and keeps the terminal run
   verbatim; it cancels with the `DELETE` (and, when the application quits mid-probe, sends the
   `DELETE` synchronously on the way out). The report models `StallProbeRun`/`ProbePoint`, and
-  both are now in the wire oracle with daemon pin arms (`PTR-u`).
+  both are in the wire oracle with daemon pin arms (`PTR-u`).
 
 Probes whether a `pwmN` write actually moves the fan, to detect BIOS/EC
 interference. The daemon writes a test PWM, sleeps
-`VERIFY_WAIT_SECONDS = 6 s` (raised from 3 s in DEC-101 — slow-spinning
+`VERIFY_WAIT_SECONDS = 6 s` (DEC-101 — slow-spinning
 fans need settle time), reads back `pwmN` / `pwmN_enable` / `fanN_input`,
 then restores the prior PWM. The daemon runs the probe under its **own
 internal verify lease** — the GUI sends no `lease_id` and holds no lease.
@@ -3343,18 +3099,15 @@ to cover the worst-case ~7.5 s round-trip. See the "Per-call timeouts
 Response (daemon `HwmonVerifyResponse` ↔ GUI `HwmonVerifyResult`):
 - `header_id: str`
 - `result: str` — `"effective"`, `"pwm_enable_reverted"`,
-  `"pwm_value_clamped"`, `"no_rpm_effect"`, `"rpm_unavailable"`, or — **daemon
-  ≥ 2.48.0, DEC-373** — `"pwm_readback_unavailable"`, or — **daemon ≥ 2.56.0,
-  DEC-418** — `"pump_protected_mid_run"`. An unrecognised token
-  **must be rendered rather than dropped** (273-i); there is no capability flag
-  for the sixth or the seventh, and none is needed, because an older client's
-  unknown-token arm already renders it neutrally and abstains from any sweep
-  verdict.
+  `"pwm_value_clamped"`, `"no_rpm_effect"`, `"rpm_unavailable"`,
+  `"pwm_readback_unavailable"` (DEC-373) or `"pump_protected_mid_run"` (DEC-418).
+  An unrecognised token **must be rendered rather than dropped** (273-i), neutrally,
+  abstaining from any sweep verdict.
 
   **`pump_protected_mid_run` (`TS-aw`) means the test stopped because the header
   became pump-protected while it ran** — a profile naming it a pump was
   activated, or it was assigned the pump role. The daemon plans the test duty
-  from the pump-protection union when the verify starts; since DEC-418 it
+  from the pump-protection union when the verify starts; it
   re-reads that union before the test write, every 500 ms through the 6 s
   settle, and once more before the restore. When it flips, the settle ends
   there, nothing is classified (the window did not complete), and the restore
@@ -3387,11 +3140,9 @@ Response (daemon `HwmonVerifyResponse` ↔ GUI `HwmonVerifyResult`):
 
   It is **not** a failure verdict and must not be painted as one: the causes are
   a transient sysfs I/O error or the chip being removed / its driver unbound
-  mid-test, none of which is a finding about the board's fan control. Before
-  2.48.0 this case was absorbed by `rpm_unavailable`, whose message asserts
-  "PWM values held" — a claim nothing had established.
+  mid-test, none of which is a finding about the board's fan control.
 
-  **The reach is deliberately narrow.** The new token is consulted only where
+  **The reach is deliberately narrow.** The token is consulted only where
   `rpm_unavailable` would have been returned. A header whose tach moved in the
   expected direction after the write still reports `effective`, and one whose
   tach did not still reports `no_rpm_effect`, even where the readback failed:
@@ -3403,22 +3154,17 @@ Response (daemon `HwmonVerifyResponse` ↔ GUI `HwmonVerifyResult`):
 - `restore_failed: bool` — omitted when false (`skip_serializing_if`);
   when true, do not trust the verify to have put the header back. Two
   causes: the restore write failed (the header is left at the test
-  value), or — daemon ≥ 2.23.5, DEC-290 — the daemon began shutting down
+  value), or the daemon began shutting down (DEC-290)
   mid-verify, in which case the restore is **deliberately skipped** and
   the header is left to the daemon's own hardware restore, i.e. firmware
   control. The second case is the safer outcome, not a failure: a fixed
   duty that no writer will ever revise is worse than handing the header
   back to the BIOS.
 
-**Abandoning the request does not abandon the restore (daemon ≥ 2.23.5, DEC-290).**
+**Abandoning the request does not abandon the restore (DEC-290).**
 The whole test-write → settle → restore sequence runs as one uncancellable unit, so
 a client that disconnects — or whose own timeout fires before `wait_seconds`
-elapses — still gets the header put back. Before DEC-290 the restore sat after an
-`await` and was simply skipped on cancellation, leaving the header pinned at
-`test_pwm_percent` (20% for any header previously above 50%) with nothing to
-recover it when no active profile owned that header. Clients need no change; what
-changed is that the previous behaviour was unsafe to rely on and is now safe.
-Note the corollary: the engine write-pause is held for the remainder of the settle
+elapses — still gets the header put back. Note the corollary: the engine write-pause is held for the remainder of the settle
 even after a disconnect, rather than releasing early. The thermal emergency is
 unaffected — `force_all_with_floor` runs before the pause gate, by design.
 
@@ -3426,14 +3172,12 @@ Errors: `404 validation_error` (unknown header — the wire `code` is
 `validation_error`, not `not_found`, which this handler never sends),
 `503 hardware_unavailable` (no hwmon headers or controller absent; also if the
 daemon's own internal verify lease lapses mid-write — DEC-170; and "the daemon is
-shutting down" when the request arrives during shutdown, daemon ≥ 2.32.0, or — since
-daemon 2.56.0, DEC-420 — when the test write is refused because the shutdown hand-back
-has already begun). The pre-2.0
-`403 lease_required` no longer applies — the daemon owns the verify lease, and an
-internal-lease lapse surfaces as retryable `503 hardware_unavailable`, never a
-client lease error.
+shutting down" when the request arrives during shutdown, or when the test write is
+refused because the shutdown hand-back has already begun, DEC-420). The daemon owns
+the verify lease: an internal-lease lapse surfaces as retryable
+`503 hardware_unavailable`, never a client lease error.
 
-### Profile storage (CRUD — DEC-160, daemon ≥ 1.19.0)
+### Profile storage (CRUD — DEC-160)
 The daemon is the profile **store of record** (`/var/lib/ventulus/profiles/`). The GUI uploads and
 validates full profile documents; it keeps a local draft cache but does not treat it as authoritative.
 
@@ -3515,26 +3259,24 @@ same id ever diverge, activation applies the **local** copy — not necessarily 
     daemon logs a warning and still answers `200`: the profile is active now, but a
     restart brings back the previous one.
   - **On the next tick the engine gives back every hwmon header the new profile does not
-    name** (DEC-382, daemon ≥ 2.50.0) — to the mode or duty it had before the daemon took
+    name** (DEC-382) — to the mode or duty it had before the daemon took
     it, as at shutdown — **and puts every AMD GPU the daemon drove that the new profile does
-    not name back on its firmware fan curve** (DEC-448, daemon ≥ 3.0.0; the reset
-    `POST /gpu/{id}/fan/reset` makes; the card's `last_commanded_pwm` is then absent, since nothing
-    commands it. Since DEC-468 (`GPU-e`) the reset endpoint and a verify that restores a card to
-    firmware auto leave it absent too; earlier daemons reported `0` there).
+    not name back on its firmware fan curve** (DEC-448, daemon ≥ 3.0.0), the same reset
+    `POST /gpu/{id}/fan/reset` makes. The card's `last_commanded_pwm` is then absent, since nothing
+    commands it; the reset endpoint and a verify that restores a card to firmware auto leave it
+    absent too (DEC-468, `GPU-e`).
   - GUI must only update "active" state after daemon confirms success
-- `POST /profile/deactivate` — body ignored (DEC-097, daemon v1.6.0+)
+- `POST /profile/deactivate` — body ignored (DEC-097)
   - Clears the in-memory active profile, persists the cleared state (best-effort,
     as for activation — a failed write is logged and the answer is still `200`),
     and releases the daemon's internal `profile-engine` lease so a later
-    re-activate cleanly re-takes it. (There is no GUI lease to preserve as
-    of 2.0.0 — DEC-165.)
+    re-activate cleanly re-takes it. (There is no GUI lease — DEC-165.)
   - **On the next tick the engine gives back every hwmon header it took**
-    (DEC-382, daemon ≥ 2.50.0) **and puts every AMD GPU it drove back on its
-    firmware fan curve** (DEC-448, daemon ≥ 3.0.0; older daemons left a GPU on
-    the profile's last curve until they stopped). With no profile active it
+    (DEC-382) **and puts every AMD GPU it drove back on its
+    firmware fan curve** (DEC-448, daemon ≥ 3.0.0). With no profile active it
     evaluates no curve; the thermal emergency still reaches every writable
     header.
-  - **Also clears all active control-overrides (DEC-218, daemon ≥ 2.12.0)** —
+  - **Also clears all active control-overrides (DEC-218)** —
     deactivation relinquishes curve-driven control, so standing manual
     overrides are dropped symmetrically with activation (DEC-189). A client
     renewing a pre-deactivate override receives `404 override_expired`
@@ -3559,7 +3301,7 @@ same id ever diverge, activation applies the **local** copy — not necessarily 
     the same way. (Until the 2026-10 fix this block said the id was logged and
     discarded, which was true then — register rows `CTRL-d` / `CTRL-b`.)
 
-### Manual override (DEC-163, daemon ≥ 1.21.0)
+### Manual override (DEC-163)
 
 Daemon-owned, expiring, fencing-guarded per-control pin. Replaces the GUI's transient Manual card.
 The override **reverts to autonomous curve control** if the GUI stops renewing (deadman on the
@@ -3591,27 +3333,27 @@ daemon's clock); a stale token cannot re-pin (fencing).
 The thermal force always overrides an active override. No absolute max-duration cap — a live
 renewing GUI holds indefinitely.
 
-**Activating a profile clears all active control-overrides (DEC-189, daemon ≥ 2.2.2 — merged as 2.2.1, which was never published).** A
+**Activating a profile clears all active control-overrides (DEC-189).** A
 `POST /profile/activate` — including a same-id re-apply — reverts every pinned control to its curve,
 so an override taken against the previous profile cannot bleed onto a same-id control in the new one.
 No client action is required: the GUI's own Manual card reverts when its next renew is refused
 `404 override_expired` (within one renew, ~5 s), and an External chip for another client's override
 clears on the first `/poll` that no longer lists it. (The GUI itself releases its overrides before
 it rebuilds the cards for a profile switch.) Fan-identify holds (below) are per physical fan and are **not** cleared
-by an activation — with one exception (DEC-394, daemons after 2.51.0): an identify **stop** on a header
+by an activation — with one exception (DEC-394): an identify **stop** on a header
 the newly-activated profile names a pump (a member whose label names one) is released, because its
 `0` was chosen before the profile existed to protect it. It is the activation twin of the release a
 `pump` assignment performs (`POST /config/header-role`, below). A `pump_perturb` hold is kept — it
 already sits at or above the floor. The fan's `/poll` `fan_identify` entry disappears; a client that
 later sends `restore` gets the idempotent `200`.
 
-**Deactivating a profile also clears all active control-overrides (DEC-218, daemon ≥ 2.12.0),**
+**Deactivating a profile also clears all active control-overrides (DEC-218),**
 symmetric with activation: with no profile active there is no curve to revert to, so the standing
 live intent is dropped rather than left to re-apply onto a same-id control in the next activated
 profile. As with activation, no client action is required — the next renew is rejected
 `404 override_expired` and the card reverts. Identify stops survive deactivation too.
 
-### Fan identify (DEC-166, daemon ≥ 1.21.0)
+### Fan identify (DEC-166)
 
 Per-fan stop/restore for the Fan Wizard, with a deadman auto-restore. Replaces the wizard's global
 freeze + raw writes.
@@ -3623,19 +3365,17 @@ freeze + raw writes.
   unknown on `stop`; `400` on a bad action. Only the named fan is affected — others keep
   curve-controlling.
 
-**The client asks for `stop`; the daemon decides what that means (DEC-311, daemon ≥ 2.28.0).**
+**The client asks for `stop`; the daemon decides what that means (DEC-311).**
 `mode` reports which it did:
 
 | `mode` | When | Behaviour |
 | --- | --- | --- |
-| `"stop"` | every non-pump role | forces the fan to 0, **floor-exempt** — unchanged since DEC-166 |
+| `"stop"` | every non-pump role | forces the fan to 0, **floor-exempt** |
 | `"pump_perturb"` | the header is pump-protected — the union below, **not** the wire `role` alone | shifts the duty ~25 points clear of `baseline_pwm_percent`, **upward wherever there is headroom**, clamped into `[30, 100]`. Never 0, never below the pump floor. |
 
-This supersedes DEC-166's "floor-exempt — even a pump". Keeping the decision server-side is what
-makes an older GUI safe against a newer daemon: it can only ever send `action: "stop"`, so it
-cannot request a pump stop even by accident. A pre-2.28.0 daemon omits `mode` and stops
-everything — gate any "the pump will only change speed" wording on `control.header_roles`, or the
-copy is a lie against that daemon.
+Keeping the decision server-side means a client can only ever send `action: "stop"`, so it
+cannot request a pump stop even by accident. Gate any "the pump will only change speed" wording
+on `control.header_roles`.
 
 `stop` on a world-writable socket (0666, DEC-049) means any local user can hold a fan at its
 identify duty by re-issuing `stop` inside the deadman window. This is an **accepted, bounded risk**
@@ -3645,15 +3385,13 @@ thermal `force_all_with_floor` drives every OpenFan channel + writable hwmon hea
 directly at 100 % (and, below it, every fan the profile controls — DEC-382), spinning a stalled fan back
 up regardless of standing identify holds.
 DEC-311 narrows this further for the case that mattered most: a header the daemon knows to be a
-pump can no longer be held at 0 by anyone. "Knows to be a pump" is a **union** — the header's own
+pump cannot be held at 0 by anyone. "Knows to be a pump" is a **union** — the header's own
 label/chip evidence OR the user's assignment OR (DEC-384) a member of the **active profile** bound to
 the header whose `member_label` or id label contains `pump` or `aio` — so `POST /config/header-role
 {"role": "chassis_fan"}` on an `AIO_PUMP` header does **not** hand back permission to stop it. On an
 OpenFan channel (`ROLE-f`, daemon ≥ 3.5.0) the user's assignment is the **only** term: the label and
 profile terms are hwmon-only, so a profile member named "Pump" on a channel protects nothing. The
-profile term is the evidence the engine's 30 % floor already acts on; before DEC-384 identify
-ignored it, so on a chip with no label files a member the profile called "Pump" was held at 30 % by
-every tick and driven to 0 by identify. It deliberately excludes the floor's other arms: a
+profile term is the evidence the engine's 30 % floor already acts on. It deliberately excludes the floor's other arms: a
 CPU-labelled fan and a liquid cooler's radiator channels are floored and still stopped (DEC-311).
 Because it lives in the active profile it comes and goes with it. A header with none of this evidence
 is an ordinary fan and is still stopped; on a board that publishes no fan labels that is every header
@@ -3667,9 +3405,8 @@ rather than an optional refinement.
     while the **active profile** owns an `amd_gpu:` member, since the daemon is actively driving it).
   - On success the card records **no** commanded duty: its `last_commanded_pwm` on `GET /fans` and
     `/poll` is absent, as after the engine's own hand-back (DEC-448). A verify that restores a card to
-    firmware auto does the same. Daemons before DEC-468 (`GPU-e`) reported `0`, which the engine's
-    5 % GPU coalescing then held against a profile command of 0–4 %, and which a client could not
-    tell from a profile genuinely commanding the card at 0 %.
+    firmware auto does the same. Daemons before DEC-468 (`GPU-e`, daemon 3.3.0) reported `0`, which
+    a client could not tell from a profile genuinely commanding the card at 0 %.
   - **`200`** body: `{"api_version": 1, "gpu_id": "<bdf>", "reset": true}` — the same shape from
     the PMFW arm (RDNA3+: `fan_curve` `r`+`c`, then `fan_zero_rpm_enable` `1`+`c`) and the legacy
     arm (pre-RDNA3: `pwm1_enable=2`).
@@ -3686,12 +3423,11 @@ rather than an optional refinement.
     `POST /profile/activate` (any profile, including re-activating the same one). **Deactivating
     does not return it** to the engine. A daemon restart does: the hand-back is held in memory only,
     so the restarted engine drives every card its startup profile names.
-    From daemon 2.56.4 (DEC-435) the card also comes off the list every
-    daemon stop resets, so a curve another tool (LACT, CoreCtrl) puts on it afterwards survives the
-    next stop or restart; daemon 2.56.3 and older reset every AMD card at every stop. A failed reset
+    The card also comes off the list every daemon stop resets (DEC-435), so a curve another tool
+    (LACT, CoreCtrl) puts on it afterwards survives the next stop or restart. A failed reset
     changes neither.
 
-The bare `POST /gpu/{gpu_id}/fan/pwm` static-speed write is **retired at 2.0.0** — GPU fans are driven
+There is no `POST /gpu/{gpu_id}/fan/pwm` static-speed write — GPU fans are driven
 by the daemon engine, with live manual control via the override API (DEC-163) and identification via
 the identify API (DEC-166). No lease is required for GPU writes; the daemon applies a 5% minimum-change
 threshold (DEC-070) to avoid SMU firmware churn.
@@ -3702,7 +3438,7 @@ when false the fan spins continuously at the commanded speed. The default for om
 profiles is false.
 
 ### GPU fan verify
-- `POST /gpu/{gpu_id}/fan/verify` — empty body, **no lease** (DEC-120, daemon v1.11.0+). **AMD GPUs only** — an `nvidia_gpu:` / `intel_gpu:` BDF returns `404 validation_error` (those fans are read-only). Also returns `409 thermal_abort` while hot — because the verify drives the fan **away** from its commanded speed, **not** because it pauses the thermal force, which it has never done (DEC-201; claim corrected in DEC-297). It shares `verify_thermal_guard` with the hwmon verify, so it likewise returns **`409 validation_error`, `retryable: true`** while the thermal ladder is actively forcing a duty (DEC-297), and `409 validation_error` if a verify or calibration is already in progress (single-flight). **It does not refuse on stale temperatures** — DEC-385's staleness refusal covers the hwmon verify, characterisation and calibrate, not this endpoint, deliberately: the GPU is outside the thermal ladder (DEC-130) and this test biases the fan upward, so a wedged poll here puts no cooling at risk.
+- `POST /gpu/{gpu_id}/fan/verify` — empty body, **no lease** (DEC-120). **AMD GPUs only** — an `nvidia_gpu:` / `intel_gpu:` BDF returns `404 validation_error` (those fans are read-only). Also returns `409 thermal_abort` while hot — because the verify drives the fan **away** from its commanded speed, **not** because it pauses the thermal force, which it does not do (DEC-201, DEC-297). It shares `verify_thermal_guard` with the hwmon verify, so it likewise returns **`409 validation_error`, `retryable: true`** while the thermal ladder is actively forcing a duty (DEC-297), and `409 validation_error` if a verify or calibration is already in progress (single-flight). **It does not refuse on stale temperatures** — DEC-385's staleness refusal covers the hwmon verify, characterisation and calibrate, not this endpoint, deliberately: the GPU is outside the thermal ladder (DEC-130) and this test biases the fan upward, so a wedged poll here puts no cooling at risk.
 
 Probes whether a GPU fan-control write actually takes effect, catching the
 silent failures static diagnostics miss (`ppfeaturemask` bit 14 unset, SMU
@@ -3714,7 +3450,7 @@ hwmon verify), reads back the applied PMFW `fan_curve` (or legacy `pwm1`) plus
 (re-applies the last commanded speed if the GPU was being driven, else resets to
 auto + re-enables zero-RPM). The GUI sends a **12 s** per-call timeout
 (`verify_gpu_fan`, `client.py`); the daemon coordinates the probe with its own
-engine, so the GUI no longer pauses any control loop.
+engine, so the GUI pauses no control loop.
 
 Response (daemon `GpuVerifyResponse` ↔ GUI `GpuVerifyResult`) — **no
 `api_version`**, symmetric with `HwmonVerifyResponse`:
@@ -3765,19 +3501,17 @@ restart, say — and shows the daemon's message, keeping the button.
     (DEC-312). `effective_min_pwm_pct` is the floor the daemon enforces by itself: the pump floor
     when protected, else `0` (the profile's `minimum_pct` governs).
 
-### OpenFan rescan (DEC-265, daemon ≥ 2.18.0)
+### OpenFan rescan (DEC-265)
 - `POST /fans/openfan/rescan` — adopt an OpenFanController without a restart
   - Response `200`: `{"api_version": int, "adopted": bool,
     "already_connected": bool, "port": str, "message": str}`. `port` is present
     only when a controller was newly adopted. Rescanning while one is already
     connected is normally a **no-op success** (`adopted:false,
     already_connected:true`) — it probes nothing and leaves the existing
-    controller in place. **On daemon ≥ 2.23.5 the cooldown below outranks it**
-    (DEC-291): a rescan within the cooldown window over an unchanged port set
-    answers `409` even when a controller is connected, so do not treat
-    `already_connected` as guaranteed for a repeat call. (`api_version` was
-    missing from the 2.18.0 pre-release shape, breaking General Rule 6 above;
-    added in DEC-266 before it shipped.)
+    controller in place. **The cooldown below outranks it** (DEC-291): a rescan
+    within the cooldown window over an unchanged port set answers `409` even when
+    a controller is connected, so do not treat `already_connected` as guaranteed
+    for a repeat call.
   - `503 hardware_unavailable` — no candidate port both opened *and* identified
     as an OpenFanController. This is the normal answer on a machine with no
     OpenFan hardware.
@@ -3791,16 +3525,13 @@ restart, say — and shows the daemon's message, keeping the button.
       repeat-probe cooldown (10-e), which applies only while the candidate
       **port set is unchanged**. This one sets **`retryable: true`**, because it
       clears in seconds and a client keying its backoff off that field must not
-      read the wait as permanent. **Wording changed in daemon 2.47.4 (`OFN-u`)
-      — match on `"moments ago"`, not on the whole sentence:** it previously
-      read *"an OpenFan rescan over the same ports was attempted moments ago"*,
-      which attributed to the client an action the daemon itself often took (see
-      the set-change caveat below). Since DEC-291 it is evaluated **before** the already-connected
-      no-op, and the ports are enumerated *without opening them*, so a refused
-      rescan no longer resets Arduino-class boards — which is the entire point
+      read the wait as permanent. **Match on `"moments ago"`, not on the whole
+      sentence** (`OFN-u`): the probe may be one the daemon itself started (see
+      the set-change caveat below). It is evaluated **before** the already-connected
+      no-op (DEC-291), and the ports are enumerated *without opening them*, so a
+      refused rescan does not reset Arduino-class boards — which is the entire point
       of rationing it.
-  - `404 not_found` on any daemon before 2.18.0. **Gate on
-    `capabilities.control.openfan_rescan`.**
+  - **Gate on `capabilities.control.openfan_rescan`.**
   - **Why this exists.** A device that enumerates a moment too late, or that
     fails the DEC-250 identity handshake once, must not leave the daemon with no
     OpenFan backend for the whole process lifetime — the profile engine's
@@ -3809,7 +3540,7 @@ restart, say — and shows the daemon's message, keeping the button.
     boot connect only logs, so `Restart=on-failure` never fires and nothing
     recovers it. Adoption uses the same identity-verified path as boot, so a
     port that opens but is not an OpenFanController is still refused.
-  - **Boot is no longer the only adoption point (DEC-361, daemon ≥ 2.47.0), and
+  - **Boot is not the only adoption point (DEC-361), and
     a client must not describe it as one.** Boot makes exactly **one** attempt;
     if it adopts nothing, the daemon then runs a detached search for **60s**
     (**180s** when `[serial] port` is configured) that drives *this endpoint's
@@ -3856,23 +3587,21 @@ Error codes and HTTP statuses:
   - control-path discovery and the stall probe on a header whose discovered `is_writable` is `false` — and the stall probe on one with no tach as well (`error.details.reason` says which). **Not** a profile that binds such a header: the daemon accepts it and never writes the header (§ `GET /hwmon/headers` → `is_writable`).
 
   Distinct from `hardware_unavailable` (transient / retryable) and `validation_error` (malformed request). Permanent for this device — clients must not retry.
-- 403 `lease_required` (source: `"validation"`, retryable: false) — **retired** with the bare hwmon PWM-write and the GUI-held lease (DEC-165); **fully removed at DEC-170**, when the verify path's internal-lease lapse was re-mapped to retryable `503 hardware_unavailable`. No route emits this code any more. Listed for historical context.
 - 404 `not_found` (source: `"validation"`, retryable: false) — an **unknown route** (the fallback; message `endpoint not found: <path>`), **and** a missing resource on these routes: no validation session started or recording (`GET`/`DELETE /validation/session`, `POST /validation/session/stop`, `/event`, `/measurement`), an unknown session id (`GET /validation/sessions/{id}`), an unknown cooling device (`POST /validation/session`, `DELETE /config/cooling-device/{id}`), and no run yet (`GET /diagnostics/control-path`, `GET /diagnostics/stall-probe`,
-`GET /diagnostics/openfan-calibration`, and `GET`/`DELETE /fans/openfan/maintenance` on daemon ≥ 4.0.0). Those send the handler's own message; before daemon 2.56.2 each was prefixed "endpoint not found:" as well (DEC-426, `DC-n`). Every other unknown *resource* on a known route (profile, control, fan, hwmon header, GPU id) returns 404 with code `validation_error`. **The code therefore cannot distinguish a missing route from a missing resource**: gate a feature on its capability flag, never on a probe.
+`GET /diagnostics/openfan-calibration`, and `GET`/`DELETE /fans/openfan/maintenance` on daemon ≥ 4.0.0). Those send the handler's own message (DEC-426, `DC-n`). Every other unknown *resource* on a known route (profile, control, fan, hwmon header, GPU id) returns 404 with code `validation_error`. **The code therefore cannot distinguish a missing route from a missing resource**: gate a feature on its capability flag, never on a probe.
 - 404 `override_expired` (source: `"validation"`, retryable: false) — **renew** of a manual override (DEC-163) that already lapsed on the daemon's deadman, or was never taken; re-take rather than renew. A **release** of such an override is not an error: it answers `200 {"released": false}`.
-- 409 `lease_already_held` (source: `"validation"`, retryable: false) — **retired** with the GUI-held lease (DEC-165); **fully removed at DEC-170** (the verify mapper no longer emits it). No route emits this code any more. Listed for historical context.
 - 409 `already_exists` (source: `"validation"`, retryable: false) — `POST /profiles` with an `id` that already exists (DEC-160). Rename or `PUT` the existing profile instead.
 - 409 `profile_in_use` (source: `"validation"`, retryable: false) — `DELETE /profiles/{id}` on the currently active profile (DEC-160); deactivate or switch profiles first.
-- 409 `thermal_abort` (source: `"hardware"`, retryable: true) — a fan diagnostic was aborted or refused due to high temperature: an OpenFan calibration refuses to start (or, on the deprecated sync route, reports an abort), and a verify refuses to start while any sensor is over the 85 °C limit (DEC-201, daemon ≥ 2.6.0)
-- 409 `validation_error` (source: `"validation"`, retryable: false **except these cases, which are `true`: the rescan cooldown; the DEC-297 thermal-forcing refusal, shared by both verify endpoints, OpenFan calibration (both routes), characterisation, control-path discovery and the stall probe; the stale-temperature refusal (DEC-336 for discovery; DEC-385 for the hwmon verify, characterisation and calibrate; the stall probe from its first release); an OpenFan calibration refused because an earlier calibration's task is still alive (DEC-452); and every `409 validation_error` the deprecated `POST .../calibrate` returns for a run that ended early or was cancelled (DEC-452) — see those endpoints**) — a fan diagnostic (`POST /fans/openfan/{ch}/calibration` or the deprecated `/calibrate`, `POST /hwmon/{id}/verify`, `POST /gpu/{id}/fan/verify`, `POST /hwmon/{id}/characterize`, `POST /hwmon/{id}/discover-control-path` or `POST /hwmon/{id}/stall-probe`) when another diagnostic is already in progress (they share a single-flight pause, DEC-191, daemon ≥ 2.2.2). The same code, not retryable, answers a `DELETE /diagnostics/characterization`, `/control-path`, `/stall-probe` or `/openfan-calibration` with nothing running, and a `POST /gpu/{id}/fan/reset` that could not take the GPU write lock within 750 ms because a GPU verify holds it. Retry once the in-flight operation completes. (HTTP 409 with the `validation_error` code — matches the long-standing "calibration already in progress" response shape.) `POST /fans/openfan/rescan` uses the same shape for its own single-flight (DEC-265, daemon ≥ 2.18.0), on a **separate** flag — a rescan and a calibration do not block each other. On daemon ≥ 2.22.0 that endpoint returns this same 409 shape for a **second** reason: a 10-second cooldown between probes (10-e, DEC-279), because each probe asserts DTR on every candidate tty and that resets Arduino-class boards.
+- 409 `thermal_abort` (source: `"hardware"`, retryable: true) — a fan diagnostic was aborted or refused due to high temperature: an OpenFan calibration refuses to start (or, on the deprecated sync route, reports an abort), and a verify refuses to start while any sensor is over the 85 °C limit (DEC-201)
+- 409 `validation_error` (source: `"validation"`, retryable: false **except these cases, which are `true`: the rescan cooldown; the DEC-297 thermal-forcing refusal, shared by both verify endpoints, OpenFan calibration (both routes), characterisation, control-path discovery and the stall probe; the stale-temperature refusal (DEC-336 for discovery; DEC-385 for the hwmon verify, characterisation and calibrate; the stall probe from its first release); an OpenFan calibration refused because an earlier calibration's task is still alive (DEC-452); and every `409 validation_error` the deprecated `POST .../calibrate` returns for a run that ended early or was cancelled (DEC-452) — see those endpoints**) — a fan diagnostic (`POST /fans/openfan/{ch}/calibration` or the deprecated `/calibrate`, `POST /hwmon/{id}/verify`, `POST /gpu/{id}/fan/verify`, `POST /hwmon/{id}/characterize`, `POST /hwmon/{id}/discover-control-path` or `POST /hwmon/{id}/stall-probe`) when another diagnostic is already in progress (they share a single-flight pause, DEC-191). The same code, not retryable, answers a `DELETE /diagnostics/characterization`, `/control-path`, `/stall-probe` or `/openfan-calibration` with nothing running, and a `POST /gpu/{id}/fan/reset` that could not take the GPU write lock within 750 ms because a GPU verify holds it. Retry once the in-flight operation completes. `POST /fans/openfan/rescan` uses the same shape for its own single-flight (DEC-265), on a **separate** flag — a rescan and a calibration do not block each other. That endpoint also returns this same 409 shape for a **second** reason: a 10-second cooldown between probes (10-e, DEC-279), because each probe asserts DTR on every candidate tty and that resets Arduino-class boards.
 
-Two things distinguish the cooldown 409 from the single-flight 409, and a client that retries automatically should read the second one. The `message` differs — the cooldown says "over the same ports was attempted moments ago" and names the seconds to wait. (On daemon ≥ 2.47.4 the full sentence is *"a probe over the same ports was attempted moments ago"*; before that it named the caller's action, *"an OpenFan rescan over the same ports…"* — `OFN-u`. Match on the substring above, which both spellings contain, never on the whole sentence.) More usefully, the cooldown carries **`retryable: true`** while the single-flight 409 carries `retryable: false`; that field is the documented signal for exactly this decision, and a condition that clears in ten seconds must not present as permanent. No `429` was added: the documented code set is a contract and no client would branch differently on the status alone.
+Two things distinguish the cooldown 409 from the single-flight 409, and a client that retries automatically should read the second one. The `message` differs — the cooldown says "over the same ports was attempted moments ago" and names the seconds to wait (`OFN-u`; match on that substring, never on the whole sentence). More usefully, the cooldown carries **`retryable: true`** while the single-flight 409 carries `retryable: false`; that field is the documented signal for exactly this decision, and a condition that clears in ten seconds must not present as permanent. There is no `429`: the documented code set is a contract and no client would branch differently on the status alone.
 
-**The cooldown applies only while the candidate port set is unchanged**, and attaching a controller enumerates a new tty — rate-limiting on elapsed time alone was a defect corrected before release, because "plug it in and click rescan" is the endpoint's primary purpose. What is spaced is a probe over hardware that has not changed, which cannot succeed and does reset boards.
+**The cooldown applies only while the candidate port set is unchanged**, and attaching a controller enumerates a new tty, because "plug it in and click rescan" is the endpoint's primary purpose. What is spaced is a probe over hardware that has not changed, which cannot succeed and does reset boards.
 
-**But the set-change exemption is not reserved for the client, and the daemon can consume it (`OFN-u`, corrected 2026-09-12 — this paragraph previously claimed such a retry is "*not* refused", which is false).** The daemon's own post-boot adoption loop probes on this same guard, and `RescanGuard`'s drop re-stamps the cooldown with the **new** candidate set. So if the loop reaches a newly attached controller first, a user clicking *Rescan Hardware* within the 10-second cooldown meets `elapsed < COOLDOWN && same_port_set(new)` and **is** refused, on the one endpoint whose purpose is recovery without a restart. The collision is confined to the post-boot adoption window (60 s auto-detect, 180 s when a serial port is configured) and needs the two probes inside 10 s of each other, so it is uncommon rather than impossible; outside that window no daemon-side probe runs and the exemption is the client's alone. Residual impact is small — the refusal is `retryable: true` and names the wait, and inside the window the loop keeps probing on its own — but a client must not present this 409 as "you already did that". Treat it as "a probe just happened" and retry when the message says to.
+**But the set-change exemption is not reserved for the client, and the daemon can consume it (`OFN-u`).** The daemon's own post-boot adoption loop probes on this same guard, and `RescanGuard`'s drop re-stamps the cooldown with the **new** candidate set. So if the loop reaches a newly attached controller first, a user clicking *Rescan Hardware* within the 10-second cooldown meets `elapsed < COOLDOWN && same_port_set(new)` and **is** refused, on the one endpoint whose purpose is recovery without a restart. The collision is confined to the post-boot adoption window (60 s auto-detect, 180 s when a serial port is configured) and needs the two probes inside 10 s of each other, so it is uncommon rather than impossible; outside that window no daemon-side probe runs and the exemption is the client's alone. Residual impact is small — the refusal is `retryable: true` and names the wait, and inside the window the loop keeps probing on its own — but a client must not present this 409 as "you already did that". Treat it as "a probe just happened" and retry when the message says to.
 
-**Since DEC-291 (daemon ≥ 2.23.5) the cooldown is checked FIRST**, ahead of the already-connected no-op, so a successful rescan followed by another within the window answers `409`, not `200 already_connected`. It still never re-probes or re-adopts — idempotent in effect, not in status code. The reason for the change is that the port list the cooldown compares used to be built by *opening* every candidate, so the boards were reset before the cooldown could refuse anything; enumeration no longer opens, and the check now runs before any other branch can step in front of it.
+**The cooldown is checked FIRST (DEC-291)**, ahead of the already-connected no-op, so a successful rescan followed by another within the window answers `409`, not `200 already_connected`. It never re-probes or re-adopts — idempotent in effect, not in status code. Enumeration does not open a port, so the check runs before anything could reset a board.
 - 409 `validation_error` with `details.reason: "openfan_maintenance"` (retryable: true, daemon ≥
   4.0.0, DEC-481) — a route that would drive the OpenFan controller or claim the diagnostic pause,
   called while a firmware update holds the controller; retry once it has finished. Busy, not
@@ -3882,7 +3611,7 @@ Two things distinguish the cooldown 409 from the single-flight 409, and a client
   start refusals use the same shape with their own `details.reason`, and its cancel past the
   cancellable stages answers `details.reason: "not_cancellable"`, retryable: false
   (§ OpenFan firmware update).
-- 409 `session_full` (source: `"validation"`, retryable: false, daemon ≥ 2.56.2) — `POST /validation/session/event` or `/measurement` while the recording session already holds its cap of that kind (4096 events, 512 measurements). Nothing was appended; `details.limit` is the cap. A new session is the only way to record more (DEC-426, `DC-m`).
+- 409 `session_full` (source: `"validation"`, retryable: false) — `POST /validation/session/event` or `/measurement` while the recording session already holds its cap of that kind (4096 events, 512 measurements). Nothing was appended; `details.limit` is the cap. A new session is the only way to record more (DEC-426, `DC-m`).
 - 409 `stale_fencing_token` (source: `"validation"`, retryable: false) — override renew/release (DEC-163) bearing a superseded `override_token`; a newer override has been issued for that control, so the stale holder cannot re-pin (fencing)
 - 500 `internal_error` (source: `"internal"`, retryable: true) — among other causes, a profile read on `GET /profiles`, `GET /profiles/{id}`, `POST /profile/activate` or `POST /config/profile-search-dirs` that did not finish within 2 s (daemon ≥ 4.1.0, FFA-b)
 - 503 `hardware_unavailable` (source: `"hardware"`, retryable: true). With `details.reason:
@@ -3937,8 +3666,7 @@ According to the provided daemon notes:
   normal sequence produces that — a non-zero write, a failed reply and a reconnect all clear
   the timer — so it is defence in depth against tracking drift, and no client needs to size
   anything from it. An identify stop is bounded by its own deadman (DEC-166); a pump is never
-  stopped (the 30% floor, DEC-162, and DEC-311 for identify). The GUI's Fan Wizard capped its
-  spin-down at this value from DEC-329 until DEC-426 removed the cap.
+  stopped (the 30% floor, DEC-162, and DEC-311 for identify).
 - **A firmware update suspends OpenFan writes** (DEC-481, daemon ≥ 4.0.0): from `parking` until
   the hand-back, and after a run whose board needs recovery until the link reports `connected`.
   The engine, the thermal force and every give-back skip them meanwhile rather than fail, and the
@@ -3950,9 +3678,7 @@ According to the provided daemon notes:
 - the daemon engine coalesces duplicate writes internally — it skips the serial
   command when a channel's value matches the last commanded value (DEC-073 /
   DEC-108). A command whose reply fails leaves that value unknown — the frame may
-  have reached the device — so the next command is always sent (DEC-383). The
-  bare OpenFan write endpoints that returned a `coalesced` field were retired at
-  2.0.0 (DEC-165).
+  have reached the device — so the next command is always sent (DEC-383).
 
 ### Hwmon
 - PWM 0–100 passed through — no per-header floors in the daemon
@@ -3961,12 +3687,12 @@ According to the provided daemon notes:
   (DEC-162); the thermal force (`safety.rs`) is the absolute backstop.
   See DEC-022.
 - the daemon engine auto-sets `pwmN_enable` to manual mode on the first write per lease
-- identical writes coalesced at daemon level (DEC-073) — **engine writes only since daemon
-  2.55.0** (DEC-412): a diagnostic's write under the verify lease is always sent. Since daemon
-  2.53.0 an engine write that would coalesce reads `pwmN` back first and rewrites a duty that
+- identical writes coalesced at daemon level (DEC-073) — **engine writes only**
+  (DEC-412): a diagnostic's write under the verify lease is always sent. An engine write that
+  would coalesce reads `pwmN` back first and rewrites a duty that
   moved more than 2 points from what the header took after the daemon's last write, stopping
   after 3 corrections that do not hold (`duty_corrections` / `duty_not_holding` on `/fans` and
-  `/poll`, capability `control.duty_reconciliation`, DEC-406). **Since daemon 2.56.0 a failed
+  `/poll`, capability `control.duty_reconciliation`, DEC-406). **A failed
   write is never coalesced over** (DEC-420): it may still have landed, so the next command
   re-takes the header and is sent — and, being a plain write, restarts the correction count
   toward `duty_not_holding`. Diagnostics are never reconciled; the thermal force never
@@ -3983,7 +3709,7 @@ According to the provided daemon notes:
 - 0–100% accepted, no lease required
 - 5% minimum change threshold to avoid SMU firmware churn (DEC-070)
 - Daemon disables `fan_zero_rpm_enable` before writing the PMFW curve — unless the member's `fan_zero_rpm` is `true`, when it leaves zero-RPM on (§ Zero-RPM handling above) — and re-enables it on reset
-- The daemon engine is the sole GPU writer (the 30 s GUI-defer was retired at 2.0.0 — DEC-165)
+- The daemon engine is the sole GPU writer (DEC-165)
 - Daemon restores the fan curve to automatic on shutdown
 
 ### Intel GPU (read-only, DEC-121)
@@ -4030,11 +3756,10 @@ The GUI must reflect these constraints honestly.
   limit), which is fetched again after the GUI changes the coolant limit. `/hwmon/headers` is also re-read within one poll of the active profile
   changing on `/poll` (`has_active_profile` / `active_profile_id`) and after the GUI's own
   daemon-confirmed activation, which covers a re-apply of the same profile (`TS-ae`, DEC-416) —
-  since DEC-384 `stop_permitted` and `effective_min_pwm_pct` follow the active profile.
+  `stop_permitted` and `effective_min_pwm_pct` follow the active profile (DEC-384).
 
 The `PollingService` owns the full read path (`/poll`, history). The GUI is poll-only and detects
-transitions by poll-diff. (SSE was never consumed — DEC-164 deferred it past 2.0.0, and the `/events`
-endpoint was removed entirely in daemon v2.5.1, DEC-198.)
+transitions by poll-diff. There is no event stream; clients poll (DEC-164, DEC-198).
 
 ## Canonical hwmon chip names (DEC-442)
 **Contract change in both repos** (daemon ≥ 3.0.0, capability `control.canonical_chip_names`;
@@ -4081,13 +3806,10 @@ as published and logged once by the daemon.
   series colours, hidden sensors, sensor class overrides, hardware notes), the suffixed entry
   winning a collision. This happens on load whichever daemon is connected, so **the GUI
   requires daemon ≥ 3.0.0** (its package depends on it from the release that ships DEC-442;
-  the release process moves the PKGBUILD floor and the README pairing together). Against an older daemon on an it87
-  v2.0 driver, which still publishes suffixed ids, the GUI's canonical ids name nothing that
-  daemon publishes: fan names do not apply and such members go uncontrolled until the daemon is
-  updated. They are not deleted. `Profile.sanitize_hwmon_members` (the DEC-102 runtime sweep)
+  the release process moves the PKGBUILD floor and the README pairing together).
+  `Profile.sanitize_hwmon_members` (the DEC-102 runtime sweep)
   compares canonical ids on both sides, so a header published under either spelling counts as
-  present. The caution text is gated on the capability and describes an older daemon
-  truthfully.
+  present. The caution text is gated on the capability.
 
 ## Model normalisation
 Define internal view-model friendly data classes for:
@@ -4107,8 +3829,7 @@ extends `SensorReading`. A second class claiming to mirror the first is how eigh
 cooling-device fields, including an enforced duty floor, went missing while a docstring
 asserted a field-for-field match.
 
-**The surface is pinned on both sides, against ONE declaration (`P8-cb`, GUI v2.67.1 /
-daemon v2.43.8).** `tests/fixtures/wire_fields.json` declares, per daemon `Serialize`
+**The surface is pinned on both sides, against ONE declaration (`P8-cb`).** `tests/fixtures/wire_fields.json` declares, per daemon `Serialize`
 struct, the keys it emits and the model that must carry them.
 `daemon/src/api/responses.rs::tests::wire_field_surface_is_pinned` **reads that file** and
 asserts the daemon's serialised key set against it; `tests/test_wire_field_coverage.py`
@@ -4117,7 +3838,7 @@ It is a shared oracle in the `parity_vectors.json` shape: one byte-identical cop
 repo, compared by a byte-identity test when both are checked out as siblings and by
 `parity.yml` in single-repo CI.
 
-**The read check is exhaustive, and until GUI v2.75.5 it was opt-in (`AU-d`).** Every
+**The read check is exhaustive (`AU-d`).** Every
 declared field must be classified, and adding one fails the GUI suite until it is:
 `must_be_read` (a production read site must exist), `inert` (nothing reads it — with the
 reason), `not_assertable` (the name is too common for a name-based check to prove
@@ -4146,12 +3867,7 @@ OpenFAN maintenance surfaces. `ControlCapability` is also the cross-repo pin on 
 flag names: every flag in `DAEMON_FEATURE_CAPABILITY_FLAGS` must be one of its fields. It is still partial by design: a struct not listed
 there is unchecked rather than failing.
 
-**Until v2.67.1 this was a workflow, not an interlock.** The daemon declared its own
-`want` lists and the fixture declared the same lists again, each checked only against its
-own side, with nothing comparing the two — so a rename fixed in one and forgotten in the
-other left that list stale with both suites green. The same applies to
-`daemon_config_keys.json` (§ Config management), which was in the identical shape despite
-this repo's ADR log asserting since DEC-243 that "neither copy can drift alone".
+The same one-declaration rule applies to `daemon_config_keys.json` (§ Config management).
 
 **A default that the GUI would act on points the safe way (DEC-329).** `is_writable`
 defaults `false`, not `true`: the daemon always sends it, so the default is only ever
@@ -4186,8 +3902,6 @@ Examples:
 - show the poll-driven thermal-protection banner from `thermal_state` (DEC-165)
 - reflect daemon-held overrides from `/status.overrides[]` on Controls cards — a read-only
   "External" chip for foreign overrides (no token → display-only + explicit take-over) (DEC-169).
-  The legacy standalone read-only `overrides[]` / `fan_identify[]` table was retired with the
-  tabbed Diagnostics page in the redesign; override state now surfaces on the Controls cards
 
 ### /fans and /sensors are display inputs
 These feed the dashboard, charts, and freshness indicators. The daemon (not the GUI) consumes them for control.
@@ -4206,24 +3920,21 @@ The daemon's profile engine (`profile_engine.rs`) evaluates fan curves and is th
   - The GUI activates **by path** (`profile_path` = its own `~/.config/ventulus/profiles/{id}.json`), which the daemon resolves because the GUI registers that directory as a profile search dir on connect. If the GUI-local and daemon-store copies of an id diverge, activation runs the **local** copy — not necessarily the `/var/lib/ventulus/profiles/` one.
 - The daemon persists the active-profile *pointer* to `/var/lib/ventulus/daemon_state.json`
 
-Profile *storage of record* moved to the daemon at 2.0.0 (DEC-160); the GUI keeps a local draft cache and uploads / validates through the CRUD API.
+Profile *storage of record* is the daemon (DEC-160); the GUI keeps a local draft cache and uploads / validates through the CRUD API.
 
 The profile **curve schema is v7** (GUI `PROFILE_SCHEMA_VERSION` / daemon `default_version`). Both evaluators must recognise the same curve `type` values — `graph`, `stepped`, `linear`, `flat`, `trigger`, `mix`, `sync` — and the **composite** types carry extra fields the daemon parses and evaluates: `mix` (`mix_function`, `mix_curve_ids`) combines other curves at their own sensors; `sync` (`sync_control_id`, `sync_offset_pct`) mirrors another control's tuned output via stable topological control ordering (DEC-150/151, retiring the single-sensor rule DEC-014 via DEC-152). A `flat` curve reads no sensor: from daemon 4.2.0 the engine commands its `flat_output_pct` whether `sensor_id` is empty, names a missing sensor or names a live one, as a control's curve and as a Mix input. Earlier daemons skipped a flat control whose sensor was empty or missing (`sensor_unavailable`, fans held) and dropped such a Mix input; the GUI offers no sensor for a flat curve. `graph`, `stepped` and `linear` curves may carry `hysteresis_c` (°C, optional, DEC-489): the width of that curve's falling-temperature deadband, 0–10, absent = the daemon's 2 °C default, 0 = off. It is additive (no schema bump) and inert on the other types; the daemon never holds a curve's output below what the curve currently asks for, whatever the width. The byte-identical `parity_vectors.json` fixture pins GUI ⇄ daemon evaluation agreement (DEC-126). Schema changes are additive: a v7 profile using a new curve type still loads on an older daemon/GUI, which degrades safely (daemon → 50%, GUI → flat) rather than crashing.
 
 ## Config management
 
-- **`GET /config` — the read side (daemon ≥ 2.16.0, DEC-243).** Returns the
+- **`GET /config` — the read side (DEC-243).** Returns the
   daemon's effective configuration: `admin_config_path`, `runtime_config_path`, a
   top-level `restart_pending` rollup, and `keys[]`. Each key carries:
   - `key` — dotted path (`startup.delay_secs`)
   - `value` — the **on-disk effective** value: `daemon.toml` with the
     `runtime.toml` overlay applied, i.e. what a restart would produce
   - `running_value` — what this daemon process actually started with. **Always
-    present.** It was briefly omitted-when-equal, but that is unrepresentable for
-    a nullable key: `serial.port` is `Option<String>`, so a genuine null
-    serialises as `"running_value": null` and a client applying an
-    absent-means-same rule reports the *file's* port as the one in use. Always
-    sending it makes `null` mean exactly one thing — not set.
+    present**, so for a nullable key such as `serial.port` a `null` means exactly
+    one thing — not set.
   - `source` — `runtime` | `admin` | `default`. `runtime` means a `POST /config/*`
     write is shadowing the admin file — the one case where an operator's
     `daemon.toml` edit appears to do nothing.
@@ -4231,7 +3942,7 @@ The profile **curve schema is v7** (GUI `PROFILE_SCHEMA_VERSION` / daemon `defau
     this, not from a hardcoded key list** (DEC-329): the GUI disables the row's control
     when the daemon reports `mutable: false`, so a key that becomes immutable stops
     offering a write that can only return 400. Only ever *disables* — a key the daemon does
-    not report at all means "this daemon predates it", not "locked", and greying a control
+    not report at all is not "locked", and greying a control
     on the strength of a truncated response is the same drift pointed the other way.
   - `requires_restart`, `restart_pending` — `restart_pending` is **the daemon's
     verdict** (`value != running_value`). Clients must not re-derive it from what
@@ -4241,10 +3952,8 @@ The profile **curve schema is v7** (GUI `PROFILE_SCHEMA_VERSION` / daemon `defau
     drop-in). A client must not present such a key as enabled on the strength of
     the flag.
 
-  Before this endpoint the writable knobs were **write-only**: the GUI kept a
-  local mirror and pushed it on save, so a fresh GUI against a daemon set to 10 s
-  displayed 0 s. Older daemons answer `404`; the GUI stands the card down for the
-  session rather than showing invented values (the DEC-200 precedent).
+  On a `404` the GUI stands the card down for the session rather than showing
+  invented values (the DEC-200 precedent).
 
   Three keys apply **live**, so they report `requires_restart: false` and a `running_value`
   read from the running daemon rather than from its startup config:
@@ -4256,7 +3965,7 @@ The profile **curve schema is v7** (GUI `PROFILE_SCHEMA_VERSION` / daemon `defau
   design** — a bad socket path permanently locks out every client, and moving the
   state dir orphans `runtime.toml` and the profile store.
 
-- **Extended writes (daemon ≥ 2.16.0, DEC-243).** All persist to `runtime.toml`,
+- **Extended writes (DEC-243).** All persist to `runtime.toml`,
   all are start-only, all return `503 persistence_failed` on a write error, and
   each response carries `{"updated", "key", "value", "note"}`:
   - `POST /config/poll-interval` — `{"poll_interval_ms": 250..2000}`. Both bounds
@@ -4276,8 +3985,7 @@ The profile **curve schema is v7** (GUI `PROFILE_SCHEMA_VERSION` / daemon `defau
   - `POST /config/serial-port` — `{"port": string | null}`. **Validated against
     the serial transport's own allowlist** (`/dev/tty{S,USB,ACM,AMA}*`,
     `/dev/serial/*`; no `..`, no NUL) and capped at 256 characters — the daemon
-    opens this path as root and the endpoint is unprivileged-reachable. A second,
-    looser copy of this check previously accepted `/dev/shm/...`. `null` clears
+    opens this path as root and the endpoint is unprivileged-reachable. `null` clears
     the override and returns to auto-detection. Note the daemon **falls back to
     auto-detection when a configured port cannot be opened, or opens but fails
     the `ReadAllRpm` identity handshake** (DEC-250) — so neither a bad path nor a
@@ -4293,19 +4001,19 @@ The profile **curve schema is v7** (GUI `PROFILE_SCHEMA_VERSION` / daemon `defau
 
   Out-of-range, wrong-typed and missing keys are all `400 validation_error`.
 
-- `POST /config/profile-search-dirs` — **edit** the daemon's profile search path (persisted to `runtime.toml` per ADR-002). Body: `{"add": [...]}` and/or `{"remove": [...]}`, each an array of absolute directory paths with no `..`; at least one of the two keys is required, and a request with neither is `400 validation_error`. A present-but-wrong-shaped value (a non-array, or an array holding a non-string) is also `400` — daemon ≥ 2.23.0 rejects it rather than silently dropping the offending entry as older daemons did. The reply is unchanged: `{"api_version", "updated", "search_dirs"}`, where `search_dirs` is the resulting list. **Render that list, never a locally-predicted one** — an edit can be legitimately idempotent (removing an entry that was never registered, re-adding one already present).
-  - **`remove` is daemon ≥ 2.23.0 (DEC-285)** and is advertised as `control.profile_search_dir_remove`. **Gate on the flag; do not probe.** An older daemon does not `404` a `remove` — it parses only `add` and silently ignores the rest — so an ungated call reports success having pruned nothing.
+- `POST /config/profile-search-dirs` — **edit** the daemon's profile search path (persisted to `runtime.toml` per ADR-002). Body: `{"add": [...]}` and/or `{"remove": [...]}`, each an array of absolute directory paths with no `..`; at least one of the two keys is required, and a request with neither is `400 validation_error`. A present-but-wrong-shaped value (a non-array, or an array holding a non-string) is also `400`, never a silently dropped entry. The reply is `{"api_version", "updated", "search_dirs"}`, where `search_dirs` is the resulting list. **Render that list, never a locally-predicted one** — an edit can be legitimately idempotent (removing an entry that was never registered, re-adding one already present).
+  - **`remove` (DEC-285)** is advertised as `control.profile_search_dir_remove`. **Gate on the flag; do not probe** (see the flag above).
   - **Removals are applied before additions**, so `{"add": [new], "remove": [old]}` is a single atomic "move". That is the request a client sends when the user repoints their profiles directory, and it is what stops the list growing by one dead entry every time they do. A path named in *both* lists ends up **present**: `add` is the positive intent, and keeping it is the outcome that cannot lose a directory the caller still wants.
   - Three edits are refused outright, all `400 validation_error`:
     - removing `/etc/ventulus/profiles` — it holds the admin-installed profiles, and the daemon always keeps it in the path;
     - any edit whose result would be an **empty** search path — `activate_profile` resolves against this list, so emptying it is an unrecoverable soft-lock reachable from an unprivileged call;
     - any edit whose result does not leave the daemon's **profile store of record** as the **first** entry. The store of record (DEC-160) is *defined* as the first search dir, and it is the write target for profile create and delete, so displacing it would silently redirect every profile write for the rest of the daemon's process life. Note this is a rule about **position**, not membership: `{"add": [store], "remove": [store]}` removes it from index 0 and re-appends it at the end, which leaves it present and displaced — and is refused. A client that wants to show why Remove is unavailable can apply the same rule locally (the GUI does).
-  - **Peer-uid confined (daemon ≥ 2.9.0, DEC-205):** a non-root client may only `add` directories that exist and canonicalize to a path within its **own home directory** (resolved from the socket peer's `SO_PEERCRED` uid); root / CLI callers are exempt. An out-of-home dir, a nonexistent/unreadable dir, or a caller whose uid/home cannot be resolved is `400 validation_error`. Older daemons (< 2.9.0) accept any absolute dir. `remove` is confined the same way but by a predicate that does **not** require the directory to still exist: it accepts the path's raw form, falling back to its canonical form when that resolves. Both legs are needed. Raw, because a stale entry worth pruning is very often one that is already gone, so requiring existence would refuse exactly the entries this operation exists to clean up. Canonical, because daemons ≤ 4.0.0 validated the *canonical* form but persisted the *raw* string — so without it a directory added through a symlink (or under a `systemd-homed` layout where `pw_dir` and `$HOME` spell the home differently) is storable and permanently unremovable.
+  - **Peer-uid confined (DEC-205):** a non-root client may only `add` directories that exist and canonicalize to a path within its **own home directory** (resolved from the socket peer's `SO_PEERCRED` uid); root / CLI callers are exempt. An out-of-home dir, a nonexistent/unreadable dir, or a caller whose uid/home cannot be resolved is `400 validation_error`. `remove` is confined the same way but by a predicate that does **not** require the directory to still exist: it accepts the path's raw form, falling back to its canonical form when that resolves. Both legs are needed. Raw, because a stale entry worth pruning is very often one that is already gone, so requiring existence would refuse exactly the entries this operation exists to clean up. Canonical, because daemons ≤ 4.0.0 validated the *canonical* form but persisted the *raw* string — so without it a directory added through a symlink (or under a `systemd-homed` layout where `pw_dir` and `$HOME` spell the home differently) is storable and permanently unremovable.
   - **Stored by real path, deduplicated, bounded (daemon ≥ 4.1.0, FFA-c).** An added directory is resolved once and stored as that real path (symlinks resolved) when it exists, else in lexical normal form; that same value is what confinement checks, and a refusal names the path as the caller sent it, never its real path. Every spelling of one directory (`/./`, `//`, a trailing `/`) is the same entry, so re-adding a variant changes nothing; a removal also matches an entry stored by its real path, when that real path is one the caller may remove. At most **32** entries, and at most **4** inside one non-root caller's home (an edit that would grow either past its limit is `400`; a longer list from an older daemon can still shrink), and **4096** bytes per path (`400`). Root (or any caller) removing an entry by the spelling it is stored under touches no filesystem, so a directory that stopped answering can always be removed. A search directory whose real path is not its registered path is skipped when profiles are read, so an entry an older daemon stored through a symlink stops resolving until it is added again — the GUI re-adds its own folder on every connect. Earlier daemons stored the raw string, so variants each added an entry and the list could grow until `runtime.toml` exceeded its read cap.
   - A retryable `500 internal_error` when a directory named in the request did not answer within 2 s (daemon ≥ 4.1.0, FFA-b). Paths a client names are resolved one at a time per uid, so after that a caller's further edits are refused the same way, at once, until its hung resolution returns; other users are unaffected. A home that cannot confine anything — `/`, or `/nonexistent` — is treated as unresolvable and fails closed, in both predicates.
   - A persistence failure is `503 persistence_failed`; the daemon persists first and leaves in-memory state untouched on failure.
   - The GUI surfaces the daemon's message verbatim: the Settings ▸ profiles-directory picker prefixes it with `Failed to update daemon:`, and the Daemon Configuration card's search-dir editor reports it in its result line.
-- `POST /config/exit-floor` — `{"exit_floor_pct": 0..100}` (DEC-388, daemon ≥ 2.50.0; capability
+- `POST /config/exit-floor` — `{"exit_floor_pct": 0..100}` (DEC-388; capability
   `control.exit_floor`; **default 50**, from `[shutdown] exit_floor_pct` in `daemon.toml` when no
   `runtime.toml` value overrides it). The lowest speed a clean stop leaves a fan the daemon cannot hand
   back to firmware at: each OpenFan channel it drove, and each hwmon header with no
@@ -4325,22 +4033,21 @@ The profile **curve schema is v7** (GUI `PROFILE_SCHEMA_VERSION` / daemon `defau
   40–70, a fraction, a string or a missing key is `400 validation_error`. The reply is the shared
   setter shape. A hand-edited `runtime.toml` outside the range is clamped into it at load, and
   `GET /config` reports the clamped value — the one in force.
-- `POST /config/startup-delay` — `{"delay_secs": 0..30}`; persisted to `runtime.toml`, takes effect on next restart. Daemon ≥ 2.23.0 answers with the **shared DEC-243 setter shape** (`{"updated", "key", "value", "note"}`) as well as the original `delay_secs`, so one client-side parser covers every `POST /config/*`; older daemons send `delay_secs` and `note` only, which parses fine because the caller supplies the key and reads only `note`.
-  - **The GUI no longer pushes this on Settings → Save or Settings → Import (DEC-285).** It is an ordinary row on the Daemon Configuration card, written only by its own control and only when the value actually changed. The old best-effort push bypassed the no-op-write guard, so pressing Save once wrote the key into `runtime.toml`, flipped its `source` to `runtime`, and permanently shadowed the operator's `daemon.toml` with a value nobody had chosen. `AppSettings.daemon_startup_delay_secs` was deleted with it (settings schema v4), so an imported/shared config can no longer carry one machine's daemon setting onto another's.
-- `POST /config/preferred-cpu-sensor` / `POST /config/preferred-mb-sensor` — persist the user's preferred CPU / motherboard temperature sensor by stable id (body `{"sensor_id": string | null}`; `null` clears the preference). The id is validated against the live sensor set — an unknown id (or a missing key) is `400 validation_error`; a persistence failure is `503 persistence_failed`. Advisory only (thermal safety still keys off `kind`) — reflected in `/inventory/hwmon` `default_cpu` (`source: "user"`) + `preferences` and the readiness `selected_cpu_sensor_missing` item. Daemon ≥ 2.6.0 (DEC-200); older daemons answer `404` and the GUI hides the feature for the session. The GUI offers these from the Overview page's sensor-table context menu and the Settings page.
-- `POST /config/header-role` (DEC-311, daemon ≥ 2.28.0; **GUI caller since v2.51.0 — `DaemonClient.set_header_role()`, from the Configure-AIO dialog's pump step, DEC-312; the Fan Wizard's Liquid Cooling step (DEC-319); and, since DEC-444, the header-role picker on the Hardware page's header cards and the PWM Test Report's scope page, which assigns any of the four tokens — five with `"no_fan"` where `control.header_role_no_fan` is advertised — or clears with `null`, never an explicit `"unknown"`**) — assign or clear one PWM header's role. **The `role` key is REQUIRED**: a *missing* key is `400 validation_error`, which is distinct from `"role": null`, so a client that omits null fields cannot clear an assignment. Tokens are exact-case and must not be normalised client-side — an unrecognised token has to surface the daemon's `400` rather than be coerced into something weaker. The `200` body carries `effective_role` (the role the daemon actually resolved) alongside `role` (what was stored); they differ after a clear, and `effective_role` is the one to display. Assigning a `pump` role also releases any live identify hold on that header daemon-side, so an identify "stop" in progress ends when the call returns. Body `{"header_id": string, "role": "unknown"|"cpu_fan"|"pump"|"radiator_fan"|"chassis_fan"|"no_fan" | null}` (`"no_fan"` daemon ≥ 3.4.0, `control.header_role_no_fan`); `null` clears and the header falls back to its detected role. An unrecognised role token is `400 validation_error` — **never silently defaulted**, because a typo that became `"unknown"` would drop a pump's protection while the response said "updated". **OpenFan channels (`ROLE-f`, `control.openfan_header_roles`):** `header_id` may be an OpenFan channel id. Any channel below `NUM_CHANNELS` (10) is accepted whether or not a controller is adopted — do not validate against `devices.openfan.channels`, which reads `0` with none (the assignment can only add protection); the id is padded (`openfan:ch3` is stored and echoed as `openfan:ch03`); an OpenFan-prefixed id that does not parse to such a channel is `400`. Same token set; `pump` changes behaviour, and `cpu_fan` earns the CPU floor where `control.cpu_fan_role_floor` is advertised. Assigning to a header the daemon has not discovered is also `400`; *clearing* is always permitted, even for a vanished id, so a stale assignment can never become unreachable. Persistence failure is `503 persistence_failed`. Persist-first: on a write failure nothing the daemon acts on changes.
-  **Not advisory, unlike the preferred-sensor writes above.** A `"pump"` assignment is a safety input: it earns that header the 30 % hard floor and the DEC-167 stop-snap exemption, protects it from being stopped by identify, and keeps `/hwmon/{id}/verify` above the floor — since DEC-418 (daemon ≥ 2.56.0) also for a verify, characterisation or control-path discovery **already running** when the assignment lands, which stops and restores no lower than the floor. It is a **union term** — it can add a floor, never remove one, so assigning `"chassis_fan"` to a header whose label already says `PUMP` does not strip that header's floor. It takes effect **immediately** rather than at next start (a safety floor that waited for a reboot would be a trap), and persists in `runtime.toml` under `[hardware.header_roles]`.
+- `POST /config/startup-delay` — `{"delay_secs": 0..30}`; persisted to `runtime.toml`, takes effect on next restart. The daemon answers with the **shared DEC-243 setter shape** (`{"updated", "key", "value", "note"}`) as well as `delay_secs`, so one client-side parser covers every `POST /config/*`.
+  - **The GUI does not push this on Settings → Save or Settings → Import (DEC-285).** It is an ordinary row on the Daemon Configuration card, written only by its own control and only when the value actually changed, so an imported or shared settings file cannot carry one machine's daemon setting onto another's.
+- `POST /config/preferred-cpu-sensor` / `POST /config/preferred-mb-sensor` — persist the user's preferred CPU / motherboard temperature sensor by stable id (body `{"sensor_id": string | null}`; `null` clears the preference). The id is validated against the live sensor set — an unknown id (or a missing key) is `400 validation_error`; a persistence failure is `503 persistence_failed`. Advisory only (thermal safety still keys off `kind`) — reflected in `/inventory/hwmon` `default_cpu` (`source: "user"`) + `preferences` and the readiness `selected_cpu_sensor_missing` item. DEC-200; on a `404` the GUI hides the feature for the session. The GUI offers these from the Overview page's sensor-table context menu and the Settings page.
+- `POST /config/header-role` (DEC-311; **GUI callers — `DaemonClient.set_header_role()`, from the Configure-AIO dialog's pump step, DEC-312; the Fan Wizard's Liquid Cooling step (DEC-319); and the header-role picker (DEC-444) on the Hardware page's header cards and the PWM Test Report's scope page, which assigns any of the four tokens — five with `"no_fan"` where `control.header_role_no_fan` is advertised — or clears with `null`, never an explicit `"unknown"`**) — assign or clear one PWM header's role. **The `role` key is REQUIRED**: a *missing* key is `400 validation_error`, which is distinct from `"role": null`, so a client that omits null fields cannot clear an assignment. Tokens are exact-case and must not be normalised client-side — an unrecognised token has to surface the daemon's `400` rather than be coerced into something weaker. The `200` body carries `effective_role` (the role the daemon actually resolved) alongside `role` (what was stored); they differ after a clear, and `effective_role` is the one to display. Assigning a `pump` role also releases any live identify hold on that header daemon-side, so an identify "stop" in progress ends when the call returns. Body `{"header_id": string, "role": "unknown"|"cpu_fan"|"pump"|"radiator_fan"|"chassis_fan"|"no_fan" | null}` (`"no_fan"` daemon ≥ 3.4.0, `control.header_role_no_fan`); `null` clears and the header falls back to its detected role. An unrecognised role token is `400 validation_error` — **never silently defaulted**, because a typo that became `"unknown"` would drop a pump's protection while the response said "updated". **OpenFan channels (`ROLE-f`, `control.openfan_header_roles`):** `header_id` may be an OpenFan channel id. Any channel below `NUM_CHANNELS` (10) is accepted whether or not a controller is adopted — do not validate against `devices.openfan.channels`, which reads `0` with none (the assignment can only add protection); the id is padded (`openfan:ch3` is stored and echoed as `openfan:ch03`); an OpenFan-prefixed id that does not parse to such a channel is `400`. Same token set; `pump` changes behaviour, and `cpu_fan` earns the CPU floor where `control.cpu_fan_role_floor` is advertised. Assigning to a header the daemon has not discovered is also `400`; *clearing* is always permitted, even for a vanished id, so a stale assignment can never become unreachable. Persistence failure is `503 persistence_failed`. Persist-first: on a write failure nothing the daemon acts on changes.
+  **Not advisory, unlike the preferred-sensor writes above.** A `"pump"` assignment is a safety input: it earns that header the 30 % hard floor and the DEC-167 stop-snap exemption, protects it from being stopped by identify, and keeps `/hwmon/{id}/verify` above the floor — also (DEC-418) for a verify, characterisation or control-path discovery **already running** when the assignment lands, which stops and restores no lower than the floor. It is a **union term** — it can add a floor, never remove one, so assigning `"chassis_fan"` to a header whose label already says `PUMP` does not strip that header's floor. It takes effect **immediately** rather than at next start (a safety floor that waited for a reboot would be a trap), and persists in `runtime.toml` under `[hardware.header_roles]`.
 
   This is the endpoint that makes header roles usable at all on a large class of boards: where the Super-I/O publishes no `pwmN_label`/`fanN_label` files, every header reads `role: "unknown"` and the user's assignment is the only evidence a header drives a pump.
   Response: `200 {"api_version", "updated": true, "header_id", "role", "effective_role"}` — `effective_role` is what the header resolves to *after* the change, so a clear reports the detected role rather than `null`.
-- `POST /config/cooling-device` (DEC-316, daemon ≥ 2.31.0; capability `control.cooling_devices`) — create or replace one cooling device, keyed by `id`. **`id` is 1–64 bytes of ASCII letters, digits, `-`, `_` and `.`, and not `.` or `..`**; anything else is `400 validation_error`. Response: `200 {"api_version", "updated": true, "id"}`. Body `{"id": string, "name"?: string, "kind"?: token, "pump_member"?: string, "radiator_members"?: string[], "auxiliary_members"?: string[], "preferred_sensor"?: string, "fallback_sensor"?: string, "coolant_sensor"?: string, "device_policy_id"?: string}`. **Safety numbers are not settable here**: a payload carrying `minimum_safe_pwm`, `minimum_safe_pwm_pct`, `supports_stop`, `startup_override_seconds`, `expected_rpm_min`, `expected_rpm_max`, `internal_control_possible`, `device_policy`, `effective_min_pwm_pct` or `stop_permitted` is **`400 validation_error`, rejected by name rather than ignored** — a caller that believed it had tightened a pump floor when it had not is the more dangerous outcome. A policy is chosen with `device_policy_id`, and an id this daemon does not ship is also `400`. An unrecognised `kind` is `400`, never silently defaulted. A member id the daemon has not discovered is `400` — **checked per source, across both hwmon PWM headers and OpenFan channels** (daemon ≥ 2.33.1). Until then it was checked against hwmon headers alone, so an OpenFan radiator fan — which the GUI's own radiator picker offers alongside writable hwmon headers — was rejected as an "unknown hwmon header id" on any machine that had *any* hwmon header, i.e. every motherboard-AIO machine (`AUD3-h`). The rejection message is now `unknown member id: {id}`. A GPU fan id is still rejected once hwmon is discovered: a GPU fan is never an AIO radiator fan, and the GUI excludes every vendor's from the picker. **The discovery escape is per source, not global**: a source that has discovered nothing does not judge its members, so an hwmon member is still accepted when no hwmon controller is present (no driver loaded yet), and an OpenFan member when no controller is attached. That is a deliberate difference from `/config/header-role`, which rejects a set outright in that state: a role assignment is useless without its header, whereas a cooling device is metadata and a member that cannot currently be resolved is surfaced as a *missing member* by the client rather than being harmful. Each free-text field — `name`, `kind`, `preferred_sensor`, `fallback_sensor`,
-`coolant_sensor`, `device_policy_id` — is bounded at **256 bytes** (daemon ≥ 2.33.1),
+- `POST /config/cooling-device` (DEC-316; capability `control.cooling_devices`) — create or replace one cooling device, keyed by `id`. **`id` is 1–64 bytes of ASCII letters, digits, `-`, `_` and `.`, and not `.` or `..`**; anything else is `400 validation_error`. Response: `200 {"api_version", "updated": true, "id"}`. Body `{"id": string, "name"?: string, "kind"?: token, "pump_member"?: string, "radiator_members"?: string[], "auxiliary_members"?: string[], "preferred_sensor"?: string, "fallback_sensor"?: string, "coolant_sensor"?: string, "device_policy_id"?: string}`. **Safety numbers are not settable here**: a payload carrying `minimum_safe_pwm`, `minimum_safe_pwm_pct`, `supports_stop`, `startup_override_seconds`, `expected_rpm_min`, `expected_rpm_max`, `internal_control_possible`, `device_policy`, `effective_min_pwm_pct` or `stop_permitted` is **`400 validation_error`, rejected by name rather than ignored** — a caller that believed it had tightened a pump floor when it had not is the more dangerous outcome. A policy is chosen with `device_policy_id`, and an id this daemon does not ship is also `400`. An unrecognised `kind` is `400`, never silently defaulted. A member id the daemon has not discovered is `400` — **checked per source, across both hwmon PWM headers and OpenFan channels** (`AUD3-h`). The rejection message is `unknown member id: {id}`. A GPU fan id is still rejected once hwmon is discovered: a GPU fan is never an AIO radiator fan, and the GUI excludes every vendor's from the picker. **The discovery escape is per source, not global**: a source that has discovered nothing does not judge its members, so an hwmon member is still accepted when no hwmon controller is present (no driver loaded yet), and an OpenFan member when no controller is attached. That is a deliberate difference from `/config/header-role`, which rejects a set outright in that state: a role assignment is useless without its header, whereas a cooling device is metadata and a member that cannot currently be resolved is surfaced as a *missing member* by the client rather than being harmful. Each free-text field — `name`, `kind`, `preferred_sensor`, `fallback_sensor`,
+`coolant_sensor`, `device_policy_id` — is bounded at **256 bytes**,
 `400 validation_error` beyond that. `preferred_sensor` in particular is copied into every
-validation sample, so an unbounded one scaled a session document without limit.
-**Each member id is bounded at the same 256 bytes (daemon ≥ 2.43.7, `P8-bs`)** — every
+validation sample, so an unbounded one would scale a session document without limit.
+**Each member id is bounded at the same 256 bytes (`P8-bs`)** — every
 entry of `pump_member`, `radiator_members[]` and `auxiliary_members[]`, `400
-validation_error` beyond it. Until then the member lists were bounded by entry **count**
-only (32 per list) and each entry by nothing, while the ids are copied verbatim into a
+validation_error` beyond it, and each list at 32 entries, because the ids are copied verbatim into a
 validation session's `members[].member_id` and `.label`, `radiator_members`,
 `sweep_members` and every `findings[]`, `evidence[]` and `startup_fingerprints[]` entry
 — the same scaling path `preferred_sensor` was bounded for. No real id comes close: the
@@ -4352,12 +4059,9 @@ accept back. No shipping driver does; it is stated because the bound is a byte c
 the id is not otherwise bounded. A header
 claimed twice within one device is `400`. Exceeding the 16-device cap is `409 already_exists`.
 **The cap counts the devices `GET /inventory/cooling-devices` actually publishes, not the
-rows on disk (daemon ≥ 2.43.8, `P8-cc`).** Devices are sanitised on read, so a persisted
-entry the daemon rejects is absent from that listing and its id is never disclosed —
-which meant `DELETE /config/cooling-device/{id}` could not be aimed at it, while it went
-on consuming a slot. A client holding fifteen devices was told "cooling device limit
-reached (16)" with nothing it could delete to proceed. Counting the visible list makes
-the `409` mean what a client can act on; a hand-edited `runtime.toml` may therefore hold
+rows on disk (`P8-cc`).** Devices are sanitised on read, so a persisted
+entry the daemon rejects is absent from that listing and its id is never disclosed;
+counting the visible list makes the `409` mean what a client can act on; a hand-edited `runtime.toml` may therefore hold
 more than sixteen rows, of which at most sixteen are ever published. **One consequence
 worth knowing before you hand-edit that file:** the daemon keeps the first sixteen
 *valid* rows in file order, so if you later repair the bad line by hand, the surplus
@@ -4366,7 +4070,7 @@ device, not the one you fixed. It is logged and nothing on the wire reports it. 
 cooling device is metadata the engine never reads (naming a `pump_member` confers no
 floor), so what is lost is UI topology, never pump protection.
 Persistence failure is `503 persistence_failed`. Persist-first, then committed in memory, so a failed write changes nothing. Takes effect immediately. **Confers no pump protection** — see the note on `GET /inventory/cooling-devices`.
-- `DELETE /config/cooling-device/{id}` (DEC-316, daemon ≥ 2.31.0) — remove one cooling device. Response: `200 {"api_version", "updated": true, "id"}`. `404 not_found` when no device has that id, so a second delete is not a silent success. `503 persistence_failed` on a write failure.
+- `DELETE /config/cooling-device/{id}` (DEC-316) — remove one cooling device. Response: `200 {"api_version", "updated": true, "id"}`. `404 not_found` when no device has that id, so a second delete is not a silent success. `503 persistence_failed` on a write failure.
 
 ## GUI startup behaviour
 
