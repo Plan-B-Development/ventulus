@@ -1,6 +1,6 @@
 # Settings
 
-The Settings page collects the application's own preferences — startup, behaviour, file locations, preferred sensors, and backup. It is a single scrolling surface of **cards** laid out in two columns; boolean options are shown as iOS-style **toggle switches**. The switches, choices and the default export folder are batched: change as many as you like, then click **Save Changes** in the page header to persist them all at once, to `~/.config/ventulus/app_settings.json`. Save writes only what you changed on the page, so a popup you turned off with *don't show again* stays off; if the settings file cannot be written, the status line says so and your changes stay pending for another Save. Everything else acts the moment you use it, with no Save step: **Daemon Configuration** and **Preferred Sensors**, because their values live on the daemon; a name edited in **Fan Names**; the **Profiles** and **Themes** folders; and every reset, clear and restore button on the maintenance cards (see [Resets & Maintenance](#resets--maintenance)). The switches on the **Prompts & Dismissals** card are switches like any other and wait for **Save Changes**.
+The Settings page collects the application's own preferences: startup, behaviour, file locations, preferred sensors, and backup. It is a single scrolling surface of **cards** laid out in two columns; boolean options are shown as iOS-style **toggle switches**. The switches, choices and the default export folder are batched: change as many as you like, then click **Save Changes** in the page header to persist them all at once, to `~/.config/ventulus/app_settings.json`. Save writes only what you changed on the page, so a popup you turned off with *don't show again* stays off; if the settings file cannot be written, the status line says so and your changes stay pending for another Save. Everything else acts the moment you use it, with no Save step: **Daemon Configuration** and **Preferred Sensors**, because their values live on the daemon; a name edited in **Fan Names**; the **Profiles** and **Themes** folders; and every reset, clear and restore button on the maintenance cards (see [Resets & maintenance](#resets--maintenance)). The switches on the **Prompts & Dismissals** card are switches like any other and wait for **Save Changes**.
 
 Visual appearance (themes, fonts, colours) has its own **[Theme page](#theme-page)**, and export, import and the automatic settings backup live in the **Sync & Backup** card below.
 
@@ -8,7 +8,7 @@ Visual appearance (themes, fonts, colours) has its own **[Theme page](#theme-pag
 > synthetic hardware ids match real ones, so fan names, fan zones, chart colours
 > and hidden series, sensor-class overrides, Controls card sizes and the PWM Test
 > Report's setup notes are never saved, and **profiles you create, edit or delete
-> in demo are never written to your profile folder** — they are gone when demo
+> in demo are never written to your profile folder**. They are gone when demo
 > ends. Ordinary preferences are different: **Save Changes**, the theme, window
 > size and position, chart mode and panel dividers do save, so you are never
 > trapped in demo by a setting you cannot change. **Import Config** is not
@@ -24,7 +24,7 @@ Visual appearance (themes, fonts, colours) has its own **[Theme page](#theme-pag
 |---------|---------|-------------|
 | **Default startup page** | Dashboard | Which page the application opens to on launch, used when "Restore last selected page" is off |
 | **Restore last selected page** | On | Instead of using the default, return to whichever page you were on when you last closed the app |
-| **Start in demo mode** | Off | At startup the GUI probes the daemon; if it cannot be reached (and this is on) the GUI starts in demo mode with synthetic data. A slow-to-respond daemon is treated as present. Applies at launch only — a mid-session disconnect uses the normal reconnect path |
+| **Start in demo mode** | Off | At startup the GUI probes the daemon; if it cannot be reached (and this is on) the GUI starts in demo mode with synthetic data. A slow-to-respond daemon is treated as present. Applies at launch only: a mid-session disconnect uses the normal reconnect path |
 | **Show GPU zero-RPM warning** | On | When you add a GPU fan to a fan role, show an informational popup explaining that the GPU's zero-RPM idle mode will be temporarily disabled while the curve is controlling it |
 | **Chart time range** | 15m | The initial time window shown on the Dashboard telemetry chart (choices: 30s, 2m, 5m, 10m, 15m, 20m, 30m, 1h, 2h) |
 
@@ -46,13 +46,13 @@ These let you override where the application stores its data. Each row has a **B
 | **Themes** | `~/.config/ventulus/themes/` | Where custom theme files are stored. Not changeable in demo mode |
 | **Default export** | Home directory | The default save location when exporting settings or support bundles. Saved with **Save Changes** |
 
-A Profiles or Themes change — **Browse…** or **Reset** — applies at once and is saved immediately; there is nothing to Save. The GUI offers to move the existing files to the new folder: **Yes** moves them, **No** changes the folder and leaves them where they are, **Cancel** changes nothing. If a file of the same name is already in the new folder you are asked before it is replaced; **No** keeps the copy already there and leaves the old one in the old folder. If the settings file cannot be written, the folder is not changed and nothing is moved.
+A Profiles or Themes change (**Browse…** or **Reset**) applies at once and is saved immediately; there is nothing to Save. The GUI offers to move the existing files to the new folder: **Yes** moves them, **No** changes the folder and leaves them where they are, **Cancel** changes nothing. If a file of the same name is already in the new folder you are asked before it is replaced; **No** keeps the copy already there and leaves the old one in the old folder. If the settings file cannot be written, the folder is not changed and nothing is moved.
 
-When you change the Profiles directory, the GUI registers the new path with the daemon so it can find profiles for headless activation — and retires the old one in the same step so the daemon's search path does not collect a dead entry every time you move the directory. The daemon's full search path is shown and editable under **Daemon Configuration** below.
+When you change the Profiles directory, the GUI registers the new path with the daemon so it can find profiles for headless activation, and retires the old one in the same step so the daemon's search path does not collect a dead entry every time you move the directory. The daemon's full search path is shown and editable under **Daemon Configuration** below.
 
 ## Daemon Configuration
 
-Settings that belong to the daemon rather than to this application. Every value shown here is read from the daemon, never guessed locally, and each row says where its value came from (`set in daemon.toml`, or `set here` when a change made from this card is shadowing the admin file) and whether a daemon restart is still owed. Changes save as you make them — there is no separate Save step for this card, and moving through the card without editing anything writes nothing.
+Settings that belong to the daemon rather than to this application. Every value shown here is read from the daemon, never guessed locally, and each row says where its value came from (`set in daemon.toml`, or `set here` when a change made from this card is shadowing the admin file) and whether a daemon restart is still owed. Changes save as you make them: there is no separate Save step for this card, and moving through the card without editing anything writes nothing.
 
 The defaults below are the daemon's own, used when neither `daemon.toml` nor this card sets a value.
 
@@ -60,11 +60,11 @@ The defaults below are the daemon's own, used when neither `daemon.toml` nor thi
 |---------|---------|-------|-------------|
 | **Startup delay** | 0 s | 0-30s | Tells the daemon to wait this many seconds after boot before detecting hardware. Useful if your fan controller initialises slowly. Takes effect on the next daemon restart |
 | **Poll interval** | 1000 ms | 250-2000 ms | How often the daemon reads your hardware |
-| **Serial port** | blank (auto-detect) | a `/dev/tty…` path | The OpenFan device path. Leave blank to auto-detect. If the daemon reports no controller, the row says so and adds *"set a path here to pin one the daemon is not finding"* — the field stays editable, because naming the port explicitly is how you rescue a controller that is plugged in but not being adopted |
-| **Serial timeout** | 500 ms | 50-1000 ms | Read timeout for the OpenFan device. Also annotated when no controller is detected |
-| **Super-I/O port probe** | Off | on/off | Opt-in active chip detection. The switch is only half the requirement — it also needs a root systemd drop-in, and the row says so |
+| **Serial port** | blank (auto-detect) | a `/dev/tty…` path | The OpenFAN device path. Leave blank to auto-detect. If the daemon reports no controller, the row says so and adds *"set a path here to pin one the daemon is not finding"*. The field stays editable, because naming the port explicitly is how you rescue a controller that is plugged in but not being adopted |
+| **Serial timeout** | 500 ms | 50-1000 ms | Read timeout for the OpenFAN device. Also annotated when no controller is detected |
+| **Super-I/O port probe** | Off | on/off | Opt-in active chip detection. The switch is only half the requirement: it also needs a root systemd drop-in, and the row says so |
 | **NVIDIA telemetry** | Off | on/off | Opt-in read-only NVML. Same drop-in caveat |
-| **Exit minimum** | 50 % | 0-100 % | When the daemon stops, it leaves each OpenFan fan — and any motherboard header with no automatic mode to go back to — at its last speed or this, whichever is higher (and also when a profile switch or **Stop profile control** leaves such a fan unnamed), so a fan the daemon was running slowly does not stay slow with nothing controlling it. A fan whose speed the daemon had lost track of goes to 100 %; 0 turns this off. **Applies immediately**, like the profile search directories, and the row shows the value in force. If you edit the daemon's config files by hand, the row says what the files contain until you run `sudo systemctl reload ventulusd` |
+| **Exit minimum** | 50 % | 0-100 % | When the daemon stops, it leaves each OpenFAN fan, and any motherboard header with no automatic mode to go back to, at its last speed or this, whichever is higher (and also when a profile switch or **Stop profile control** leaves such a fan unnamed), so a fan the daemon was running slowly does not stay slow with nothing controlling it. A fan whose speed the daemon had lost track of goes to 100 %; 0 turns this off. **Applies immediately**, like the profile search directories, and the row shows the value in force. If you edit the daemon's config files by hand, the row says what the files contain until you run `sudo systemctl reload ventulusd` |
 | **Coolant limit** | 60 °C | 40-70 °C | If a coolant sensor (an AIO or custom-loop coolant temperature the daemon recognises) reaches this, the daemon runs every fan and pump at full speed until the coolant is 5 °C cooler. There is no off switch; a machine with no coolant sensor is unaffected. **Applies immediately**, and the row shows the value in force, with the same hand-edit note as the exit minimum |
 
 **The two opt-in switches need a drop-in file as well.** The daemon package ships them as
@@ -78,53 +78,53 @@ comments say what it allows.
 
 ### Profile search directories
 
-The list of directories the daemon looks in for profile files. Like the exit minimum and the coolant limit, and unlike everything else on this card, changes here apply **immediately** — no restart.
+The list of directories the daemon looks in for profile files. Like the exit minimum and the coolant limit, and unlike everything else on this card, changes here apply **immediately**, with no restart.
 
 - **Add…** registers another directory with the daemon.
 - **Remove** stops the daemon looking in the selected one.
 
-Four entries cannot be removed, and the button is disabled with a tooltip saying which rule applies rather than failing after the fact: `/etc/ventulus/profiles` (it holds system-installed profiles); the last remaining directory (the daemon would then be unable to find any profile at all); the first entry in the list, which is the daemon's own profile store and the place it writes new profiles; and this application's own profiles directory, which is re-registered on every connect, so removing it here would appear to work and then quietly come back — change that one under **Path Management**, which retires the old registration in the same step.
+Four entries cannot be removed, and the button is disabled with a tooltip saying which rule applies rather than failing after the fact: `/etc/ventulus/profiles` (it holds system-installed profiles); the last remaining directory (the daemon would then be unable to find any profile at all); the first entry in the list, which is the daemon's own profile store and the place it writes new profiles; and this application's own profiles directory, which is re-registered on every connect, so removing it here would appear to work and then quietly come back. Change that one under **Path Management**, which retires the old registration in the same step.
 
 The card also shows the daemon's admin config path, its runtime config path, its socket and its state directory. Those four are deliberately read-only: a bad socket path would lock every client out of the daemon permanently.
 
 
 ## Preferred Sensors
 
-If your system exposes several CPU or motherboard temperature sensors, you can pin which one the daemon treats as the reference for each. Pick a **Preferred CPU sensor** and **Preferred motherboard sensor** from the drop-downs — the daemon's own recommendation is marked with a ★, and **Automatic (recommended)** hands the choice back to the daemon's auto-pick. Selections apply immediately and are saved by the daemon (shared across every client), so there is no separate Save step for this card.
+If your system exposes several CPU or motherboard temperature sensors, you can pin which one the daemon treats as the reference for each. Pick a **Preferred CPU sensor** and **Preferred motherboard sensor** from the drop-downs. The daemon's own recommendation is marked with a ★, and **Automatic (recommended)** hands the choice back to the daemon's auto-pick. Selections apply immediately and are saved by the daemon (shared across every client), so there is no separate Save step for this card.
 
 This is **advisory only**: thermal safety always uses the hottest CPU sensor regardless of your choice. The drop-downs populate from the daemon the first time you open Settings; on a daemon that predates this feature the card reports that it is unavailable. You can also set a preferred sensor straight from a sensor row on the **Overview** page (right-click → *Set as preferred…*).
 
 
-## Resets & Maintenance
+## Resets & maintenance
 
-Several cards collect the things that accumulate quietly as you use the application. Each control shows a count and is disabled when there is nothing to do — the count is how you find out the state exists at all.
+Several cards collect the things that accumulate quietly as you use the application. Each control shows a count and is disabled when there is nothing to do. The count is how you find out the state exists at all.
 
 | Card | What it clears |
 |---|---|
 | **Fan Names** | Every fan name in one place, including names for hardware that is no longer plugged in. Those rows are kept on purpose: otherwise a stale name could never be removed. You can still rename a fan from the Dashboard or the Overview fan table |
-| **Sensors & Chart Series** | Hidden sensors, coolant classification overrides, custom chart colours, hidden chart series — and **Settings for missing hardware** (below) |
-| **Prompts & Dismissals** | A **Show AIO pump info** switch for the popup shown when a pump header joins a role, and buttons that re-arm dismissed driver advisories, the daemon profile-import offer, and the one-time fan-name and chart-series seeding. Also governs the **System State** page's health surfaces: whether the *Acknowledge* and *Dismiss* buttons appear at all, a single **Restore** that brings back everything you have dismissed there — conditions, board notes, interference, the GPU rows on Safety & GPU Limits and GPU advisories — a **Restore** for the **Hardware** page's header-label note (it asks again wherever you answered *Labels are correct*), and a control to forget the recorded fan-control test result so those notes read as unverified again. Against a daemon that keeps a result per header, that control is greyed out: test the header again to replace its result. There is no *Clear acknowledged*: acknowledging is for the current session only, so closing the app already clears it |
+| **Sensors & Chart Series** | Hidden sensors, coolant classification overrides, custom chart colours, hidden chart series, and **Settings for missing hardware** (below) |
+| **Prompts & Dismissals** | A **Show AIO pump info** switch for the popup shown when a pump header joins a role, and buttons that re-arm dismissed driver advisories, the daemon profile-import offer, and the one-time fan-name and chart-series seeding. Also governs the **System State** page's health surfaces: whether the *Acknowledge* and *Dismiss* buttons appear at all, a single **Restore** that brings back everything you have dismissed there (conditions, board notes, interference, the GPU rows on Safety & GPU Limits and GPU advisories), a **Restore** for the **Hardware** page's header-label note (it asks again wherever you answered *Labels are correct*), and a control to forget the recorded fan-control test result so those notes read as unverified again. Against a daemon that keeps a result per header, that control is greyed out: test the header again to replace its result. There is no *Clear acknowledged*: acknowledging is for the current session only, so closing the app already clears it |
 | **Card Layout** | Every Controls-page card size at once (double-clicking a card's grip still resets that one card), and **Reset layout**, which puts every panel divider back to an even split |
 
 ### Remembered layout
 
 Panel sizes set by dragging the dividers between sections are remembered per page, along with the chart's time range and mode, the Logs level filters and search text, and your theme.
 
-A restored panel is never allowed to come back collapsed to nothing, however narrow you left it. That matters most on the Dashboard, where the sensor rail is opened and closed by its divider alone — a saved zero-width rail would have left no way to get it back. **Reset layout** is the escape hatch for a saved arrangement you have simply gone off.
+A restored panel is never allowed to come back collapsed to nothing, however narrow you left it. That matters most on the Dashboard, where the sensor rail is opened and closed by its divider alone: a saved zero-width rail would have left no way to get it back. **Reset layout** is the escape hatch for a saved arrangement you have simply gone off.
 
 ### Settings for missing hardware
 
-Chart colours and hidden-series entries are stored per fan and per sensor. Swap a GPU, unplug a fan, or change a kernel that renames a sensor, and those entries stay behind — the chart quietly ignores them, but they are still in your settings file. **Remove (N)** counts them and clears them.
+Chart colours and hidden-series entries are stored per fan and per sensor. Swap a GPU, unplug a fan, or change a kernel that renames a sensor, and those entries stay behind. The chart quietly ignores them, but they are still in your settings file. **Remove (N)** counts them and clears them.
 
 Nothing is removed unless you ask, and the reason is that the application genuinely cannot tell the difference between hardware that is gone and hardware that is merely switched off. A fan that is stopped, or a sensor the daemon has temporarily set aside because it cannot be read (a WiFi temperature with the radio off is the usual one), looks exactly like hardware that has been removed. Deleting those automatically would lose your colours the next time you booted with a device idle. The button is also disabled while disconnected, when the application knows of no hardware at all.
 
-**Fan names are deliberately not included.** Use the Fan Names card for those — it is the surface built for it, and a fan's name also feeds the minimum-speed rule that protects CPU coolers and pumps, so it is not something to clear in bulk by accident.
+**Fan names are deliberately not included.** Use the Fan Names card for those. It is the surface built for it, and a fan's name also feeds the minimum-speed rule that protects CPU coolers and pumps, so it is not something to clear in bulk by accident.
 
 ## Sync & Backup
 
-This card (formerly the Import/Export tab) exports and imports your configuration, plus a one-click push of your local profiles into the daemon. A **backup of your settings file is created automatically before any import** — see [the automatic backup](#the-automatic-backup) for what it covers and how to restore it.
+This card exports and imports your configuration, plus a one-click push of your local profiles into the daemon. A **backup of your settings file is created automatically before any import**. See [the automatic backup](#the-automatic-backup) for what it covers and how to restore it.
 
-### What Gets Exported
+### What gets exported
 
 **Export Config** writes a single **portable** JSON file with your shareable configuration:
 
@@ -135,13 +135,13 @@ This card (formerly the Import/Export tab) exports and imports your configuratio
 
 Machine-specific state is deliberately **excluded** so the file is safe to share or move between machines: window geometry, last page, data-directory overrides, the default export directory, per-series chart colours, Controls card sizes, panel sizes, the Logs page's filters and search text, hidden sensor rows, sensor-class overrides, dismissed kernel warnings, everything you have dismissed on the System State page, the Hardware page's *Labels are correct* answers, the recorded fan-control test result, the PWM Test Report's setup notes, and the one-time profile-import and fan-name flags. For troubleshooting, the footer's **Export Support Bundle** keeps most of that machine-specific state, leaving out only layout, the export folder and your own notes (see [System Health § Export Support Bundle](diagnostics.md#export-support-bundle)).
 
-### Import Behaviour
+### Import behaviour
 
 **Import Config** restores from a previously exported file:
 
-1. The file is validated; a malformed or unsupported file is rejected with a clear message and nothing changes. A file with no settings, profiles or themes in it — a settings backup is one — is refused with **Nothing imported**, and no backup is made
+1. The file is validated; a malformed or unsupported file is rejected with a clear message and nothing changes. A file with no settings, profiles or themes in it (a settings backup is one) is refused with **Nothing imported**, and no backup is made
 2. A timestamped **backup** of your current settings file is created automatically
-3. Imported preferences are **merged** onto your current settings — your local machine-specific state (window size, data-directory overrides) is preserved, and directory overrides are applied immediately. Fan names and hidden chart series take effect at once. If the settings file cannot be written, the result says *imported for this session but not saved*. An import never changes your daemon's own configuration: daemon settings live on the daemon and are edited in the **Daemon Configuration** card, so a config shared with you cannot reconfigure your daemon
+3. Imported preferences are **merged** onto your current settings: your local machine-specific state (window size, data-directory overrides) is preserved, and directory overrides are applied immediately. Fan names and hidden chart series take effect at once. If the settings file cannot be written, the result says *imported for this session but not saved*. An import never changes your daemon's own configuration: daemon settings live on the daemon and are edited in the **Daemon Configuration** card, so a config shared with you cannot reconfigure your daemon
 4. Profiles from the export are written to your local profile folder (you are asked before overwriting existing ones); invalid profiles are skipped and counted
 5. Custom themes are copied to your themes directory, **replacing a theme file of the same name without asking**; a theme containing an invalid colour is skipped
 
@@ -151,11 +151,11 @@ Some preferences (theme, chart range) take effect on the next launch.
 
 ### The automatic backup
 
-The backup is `~/.config/ventulus/backups/settings_backup_<date>_<time>.json`, a copy of your **settings file only** (`app_settings.json`). **Profiles and themes are not backed up** — an import that overwrites them cannot be undone from this file, so export first if you want to keep them.
+The backup is `~/.config/ventulus/backups/settings_backup_<date>_<time>.json`, a copy of your **settings file only** (`app_settings.json`). **Profiles and themes are not backed up**. An import that overwrites them cannot be undone from this file, so export first if you want to keep them.
 
 To restore it, close the application, copy the backup over `~/.config/ventulus/app_settings.json`, and start the application again. **Import Config** cannot restore it: it reads exported files only, and refuses a backup with *Nothing imported*.
 
-### Importing Your Profiles into the Daemon
+### Importing your profiles into the daemon
 
 The daemon keeps its own profile store, and the
 **Sync Local Profiles to Daemon** button copies your local fan profiles
@@ -163,7 +163,7 @@ The daemon keeps its own profile store, and the
 directly. The first time the GUI connects to a capable daemon and finds local
 profiles it offers this automatically; you can also run it any time from this card.
 
-- Your local copies are **left untouched** — the import only ever reads them.
+- Your local copies are **left untouched**: the import only ever reads them.
 - Profiles already in the daemon are **skipped**; choose **import as copies** to
   bring them in under a renamed copy (e.g. *Quiet (imported)*) instead.
 - A profile that fails validation is **quarantined** with a reason and listed in
@@ -173,7 +173,7 @@ profiles it offers this automatically; you can also run it any time from this ca
 
 ## Theme page
 
-The **Theme** page is a separate entry in the sidebar (not part of Settings). It controls the visual appearance of the entire application — typography, colour tokens, and contrast — and is the only place that writes theme changes.
+The **Theme** page is a separate entry in the sidebar (not part of Settings). It controls the visual appearance of the entire application (typography, colour tokens, and contrast) and is the only place that writes theme changes.
 
 ![Theme page](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/07_theme.png)
 
@@ -184,7 +184,7 @@ A dropdown in the page header lists the built-in **Default Dark (built-in)** pal
 | Button | Action |
 |--------|--------|
 | **Load** | Load the selected theme into the editor |
-| **Save** | Save the current editor state — colours, font and base size — as a theme file. Saving **Default Dark** keeps your edited copy as a theme called *Default Dark*, listed beside *Default Dark (built-in)*; apply whichever you want, and that choice is kept across restarts |
+| **Save** | Save the current editor state (colours, font and base size) as a theme file. Saving **Default Dark** keeps your edited copy as a theme called *Default Dark*, listed beside *Default Dark (built-in)*; apply whichever you want, and that choice is kept across restarts |
 | **Import…** | Import a theme from an external `.json` file |
 | **Export…** | Export the current theme to a `.json` file |
 
@@ -194,15 +194,15 @@ A dropdown in the page header lists the built-in **Default Dark (built-in)** pal
 |---------|-------------|
 | **Font** | Choose any system font, or "(System Default)" |
 | **Base Size** | Base font size from 7pt to 16pt (default 10pt) |
-| **Card Size** | Density of the Fan Role and Curve cards on the Controls page: **Compact**, **Comfortable** (default), or **Large**. Cards already scale with the font size — this preference multiplies that scaling. (This control moved here from Settings.) |
+| **Card Size** | Density of the Fan Role and Curve cards on the Controls page: **Compact**, **Comfortable** (default), or **Large**. Cards already scale with the font size, and this preference multiplies that scaling. |
 
 ### Colour editor and preview
 
-The colour-token editor lists every theme token — backgrounds, text, accents, status indicators, borders, and the chart-series palette — grouped by purpose. Each token has a clickable colour swatch **and an editable hex field beside it**: click the swatch to pick a colour, or type a hex value directly.
+The colour-token editor lists every theme token (backgrounds, text, accents, status indicators, borders, and the chart-series palette), grouped by purpose. Each token has a clickable colour swatch **and an editable hex field beside it**: click the swatch to pick a colour, or type a hex value directly.
 
 Alongside the editor a live **UI Blueprint Preview** renders representative widgets in the current colours, and a **contrast diagnostics** line flags any text/background pairing that fails **WCAG AA** (reading "No contrast issues detected (WCAG AA pass)." when everything passes).
 
-Click **Apply Theme Globally** to apply your edits live — the entire interface updates immediately.
+Click **Apply Theme Globally** to apply your edits live: the entire interface updates immediately.
 
 ---
 

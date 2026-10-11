@@ -65,12 +65,12 @@ checked at 7.3-rc4) covers only Family 17h parts: Ryzen 5 1600X and Ryzen 7
 publishes Tdie (`temp2`) only for those; Zen 2 and later publish Tctl plus the
 per-CCD `Tccd` readings (up to 16 labels from 7.3). The kernel doc gives no
 general `Tctl = Tdie + offset` formula. The GUI never presents Tctl as the
-"actual" CPU temperature — its tooltip calls it a control value — but **nothing
+"actual" CPU temperature (its tooltip calls it a control value), but **nothing
 in the GUI prefers Tdie when it picks a sensor**. The preferred-CPU
 recommendation (the ★ in Settings → preferred CPU sensor) is the daemon's
 `default_cpu`, which ranks Tctl first, then a package reading, then Tdie
-(`hwmon/classify.rs::cpu_class_rank`) — so on the five offset parts above it
-recommends the offset Tctl. The AIO setup's CPU fallback takes the first CPU
+(`hwmon/classify.rs::cpu_class_rank`). On the five offset parts above, the daemon
+therefore recommends the offset Tctl. The AIO setup's CPU fallback takes the first CPU
 sensor, in the daemon's list order, whose label names a package, Tctl or Tdie
 (`profile_service._pick_cpu_sensor_id`).
 
@@ -167,8 +167,8 @@ temperature, so neither can hide a hot CPU from the ladder.
 The temp_type codes are mapped from source ranges in the kernel:
 0x02-0x07 -> type 3 (diode), 0x08-0x18 -> type 4 (thermistor),
 0x42-0x49 -> type 5 (AMD TSI), 0x20-0x2b -> type 6 (Intel PECI; this range
-includes `PECI DIMM 0-3` at 0x28-0x2b). Every other source — `Local`, `PCH *`,
-`SMBus`, `DIMM`, `Virtual` — returns 0, so no `tempN_type` is published.
+includes `PECI DIMM 0-3` at 0x28-0x2b). Every other source (`Local`, `PCH *`,
+`SMBus`, `DIMM`, `Virtual`) returns 0, so no `tempN_type` is published.
 Reference: `drivers/hwmon/nct6683.c`, `get_temp_type()` function.
 
 The labels give the **source class** but usually **not** the physical location on the
@@ -198,12 +198,12 @@ Kernel docs: https://docs.kernel.org/hwmon/it87.html
 Out-of-tree fork: https://github.com/frankcrawford/it87 (newer chip support)
 
 Covers `it8xxx` variants. The mainline kernel `it87` driver supports a fixed
-list of chips — the kernel's `enum chips`, 22 types at 7.2 and 7.3-rc4: IT8603E,
+list of chips. The kernel's `enum chips` has 22 types at 7.2 and 7.3-rc4: IT8603E,
 IT8620E, IT8622E, IT8628E, IT8689E (fan control from 7.1), IT8705F, IT8712F,
 IT8716F, IT8718F, IT8720F, IT8721F, IT8728F, IT8732F, IT8771E, IT8772E, IT8781F,
 IT8782F, IT8783E/F, IT8786E, IT8790E, IT8792E/IT8795E and IT87952E (6.3+). IT8613E
-is queued for 7.4. **Newer Gigabyte-era chips —
-IT8625E, IT8686E, IT8688E, IT8696E, IT8698E — and the IT8665E on ASUS AM4
+is queued for 7.4. **Newer Gigabyte-era chips
+(IT8625E, IT8686E, IT8688E, IT8696E, IT8698E) and the IT8665E on ASUS AM4
 300/400-series boards are NOT in mainline** and require the out-of-tree
 [frankcrawford/it87](https://github.com/frankcrawford/it87) driver. The
 kernel.org doc URL above covers behaviour for the in-tree chips; the
@@ -224,7 +224,7 @@ channel. A board-specific override can name such a channel in the Sensor Detail
 dialog, but it does not change the classification or its confidence (see
 [Board-specific override database](#board-specific-override-database)).
 
-### asus_ec_sensors (ASUS Embedded Controller)
+### asus_ec_sensors (ASUS embedded controller)
 
 Kernel docs: https://docs.kernel.org/hwmon/asus_ec_sensors.html
 
@@ -276,9 +276,9 @@ sensor table and choose **Treat as coolant** to classify it as coolant when the 
 above miss it; on a sensor already overridden the same menu offers **Reset
 classification to auto**, and Settings → Sensors & Chart Series → **Clear overrides**
 removes them all. The override is the GUI's alone: the daemon's `kind` for the sensor
-does not change, and it has no effect on thermal safety — including the coolant
+does not change, and it has no effect on thermal safety. That includes the coolant
 emergency, which keys on the daemon's `kind`. What it drives is the GUI's
-own coolant view — the sensor's class everywhere it is shown, the coolant marking in
+own coolant view: the sensor's class everywhere it is shown, the coolant marking in
 the curve sensor picker, which sensor the AIO setup takes as the coolant sensor, and so
 which calibration (coolant or CPU) **Configure AIO** seeds the radiator-fan curve with.
 
@@ -298,7 +298,7 @@ some boards:
 | Label pattern | source_class | Confidence |
 |---|---|---|
 | `Water In` / `Water Out` and any other coolant/water/liquid label | `coolant_in` / `coolant_out` / `coolant` (the cross-driver rule, ahead of this table) | high for in/out, medium otherwise |
-| Contains `CPU` | `cpu_board_side` — the board's reading of the CPU, not a die sensor | medium_high |
+| Contains `CPU` | `cpu_board_side` (the board's reading of the CPU, not a die sensor) | medium_high |
 | Contains `VRM` | `vrm` | medium_high |
 | Contains `Chipset` | `chipset` | medium_high |
 | Contains `T_Sensor` | `external_probe` | medium_high |
@@ -316,7 +316,7 @@ Upgrading to new BIOS version with method version greater than or equal to two
 should rectify the issue."* When users report
 stuck-fan or artificially-low fan behaviour on a supported ASUS WMI board, the
 durable fix is a BIOS update to a WMI method version ≥ 2, NOT a kernel
-workaround — the driver refuses to bind below version 2 in any case.
+workaround. The driver refuses to bind below version 2 in any case.
 
 All classifications carry a standing note about potential WMI polling issues
 and the BIOS-update remedy.
@@ -355,7 +355,7 @@ sensor source `intel_gpu`, kind `gpu_temp`. The `xe` and `i915` drivers do
 `tempN` channel name; the meaning is positional, taken from the kernel ABI
 docs.
 
-`xe` (Arc B-series "Battlemage" and later Xe2) — note temperatures start at
+`xe` (Arc B-series "Battlemage" and later Xe2). Note that its temperatures start at
 `temp2` (there is no `temp1`):
 
 | Index | Meaning |
@@ -392,7 +392,7 @@ sensor source `nvidia_gpu`, kind `gpu_temp`, and classified `gpu_package` at
 | `nvml` | a **daemon-synthetic** identifier for the proprietary NVML polling path (no sysfs hwmon node) | one temperature, plus a measured fan **duty %** (`duty_pct`) |
 
 All NVIDIA GPU temperatures are read-only. Fan control is unavailable through
-the daemon — `nouveau`'s writable `pwm1` is deliberately excluded and the NVML
+the daemon: `nouveau`'s writable `pwm1` is deliberately excluded and the NVML
 backend is telemetry-only. See
 [NVIDIA discrete GPU monitoring](19_Hardware_Compatibility.md#nvidia-discrete-gpu-monitoring).
 
@@ -429,7 +429,7 @@ daemon's CPU plausibility check and never reaches the thermal ladder.
 registration order, so a GPU swap or a driver-load reorder renumbers them. The
 daemon therefore names a module by what does not move: its SMBus controller (normally
 a PCI address), the adapter's port (`p<N>`, piix4) or mux channel (`ch<K>`), and the
-SPD address — `hwmon:spd5118:0000:00:14.0-p0-0051:temp1`. Where it cannot name the
+SPD address, for example `hwmon:spd5118:0000:00:14.0-p0-0051:temp1`. Where it cannot name the
 topology unambiguously (two adapters that look alike, an ACPI-named client) it keeps the
 older bus-numbered form, `hwmon:spd5118:21-0051:temp1`. Saved ids cross between the
 two forms by one rule, applied by the daemon's engine and by the GUI on the first
@@ -452,7 +452,7 @@ look identical. The GUI names them from the SPD address in their id (**DIMM 0x51
 on every surface that names a sensor (`sensor_display_name`), in both id forms. No slot
 is claimed: the kernel registers modules without knowing which slot an address belongs
 to. Where two modules share an address on different SMBus segments, the segment is
-added — **DIMM 0x51 (p2)**, **(ch1)**, or **(bus 21)** in the older form. Board
+added: **DIMM 0x51 (p2)**, **(ch1)**, or **(bus 21)** in the older form. Board
 channels keep their own label.
 
 **Grouping.** The Dashboard's sensor list files memory under its own **Memory** group,
@@ -478,7 +478,7 @@ These surfaces consume this knowledge base:
 
 1. **Cell tooltips** on every Overview-page sensor-table cell (`format_sensor_tooltip`).
    The note list is capped at 3 entries for readability.
-2. **Sensor Detail dialog** (`Diagnostics_SensorDetail_Dialog`) — opens by
+2. **Sensor Detail dialog** (`Diagnostics_SensorDetail_Dialog`): opens by
    double-clicking a row, pressing Enter on it, or right-click → **Open detail…**.
    Shows the full classification description **and every classification note** (not
    truncated), the matching board override if one exists, board context, the
@@ -488,7 +488,7 @@ These surfaces consume this knowledge base:
    GUI's levels below. This is the canonical surface when a user wants the full story
    behind a sensor.
 3. **The sensor table's summary line** (in its section header) and **inline `⚠`/`?`
-   prefixes** on the Overview page's sensor table — the `bogus` and `low`-confidence
+   prefixes** on the Overview page's sensor table: the `bogus` and `low`-confidence
    rows have a visible prefix on the Label cell so they're discoverable without
    hovering.
 4. The Dashboard's sensor list and chart, which use the same classification (and the
@@ -525,14 +525,14 @@ some non-standard temperature measurement device. As a result, the temperature
 reported on CPUTIN will not reflect a usable value. It often reports unreasonably high
 temperatures…"
 
-When `chip_name` is any of the nct6775 family — `nct6775`, `nct6776`, `nct6779`,
+When `chip_name` is any of the nct6775 family (`nct6775`, `nct6776`, `nct6779`,
 `nct6791`, `nct6792`, `nct6793`, `nct6795`, `nct6796`, `nct6797`, `nct6798`,
-`nct6799` — and `board_vendor` contains "ASUS", the CPUTIN
+`nct6799`) and `board_vendor` contains "ASUS", the CPUTIN
 channel is classified as `bogus` with `low` confidence and notes explaining the
 issue. This is a well-documented kernel driver quirk, not a GUI assumption. The
 vendor comes from the board's DMI data; where the daemon cannot read it, neither side
-can tell an ASUS board from any other, and `CPUTIN` keeps its normal classification —
-the rule fails open.
+can tell an ASUS board from any other, and `CPUTIN` keeps its normal classification.
+The rule fails open.
 
 **The daemon acts on the same triple.** Its thermal ladder takes the **hottest** CPU
 sensor, so a floating pin reporting a plausible-looking constant 115 °C would outrank
@@ -572,7 +572,7 @@ to `_classify_nct6683`, and both promote `TSI`/`PECI` to a CPU source (`amd_tsi`
 `nct6792` and later, which the kernel accepts as a CPU temperature source. Like any
 Super-I/O CPU proxy, they can read low. The daemon's plausibility filter rejects a
 CPU reading that is **both** below 10 °C **and** more than 15 °C colder than the
-hottest motherboard sensor — so a cold-room boot, where the board is cold too, never
+hottest motherboard sensor. So a cold-room boot, where the board is cold too, never
 trips it, and with no motherboard reading it rejects nothing. A rejected channel is
 treated as unreadable: it is quarantined, logged once, listed among the Overview
 page's unavailable sensors with the reason, left out of the thermal ladder, and
@@ -604,7 +604,7 @@ confidence.
 package ships `/etc/modules-load.d/ventulus.conf` to load the common ones, and
 the Hardware page's readiness checklist and Super-I/O section identify the chip
 without probing hardware. Treat `sensors-detect` as a last resort, and never run it
-after boot on a Gigabyte board — it writes the Super-I/O unlock key and can latch the
+after boot on a Gigabyte board, because it writes the Super-I/O unlock key and can latch the
 bridge in front of a second chip.
 
 `sensors-detect` maintains its own chip ID database, updated independently
@@ -659,7 +659,7 @@ board_model, label)` has one caller, the Sensor Detail dialog, which shows a
 matching entry in its own "Board override" section. It does not replace the
 driver-based classification: the Overview table, its summary, tooltips and the
 dialog's own header line all show the driver classification and its confidence
-(or the user's "Treat as coolant", which does apply everywhere) — so on an ASRock X670E, `AMD TSI Addr 98h` is `medium_high` there while the
+(or the user's "Treat as coolant", which does apply everywhere). So on an ASRock X670E, `AMD TSI Addr 98h` is `medium_high` there while the
 override beside it says `high`.
 
 ### Current entries
@@ -698,7 +698,7 @@ override beside it says `high`.
 - That a sensor is "from" a particular driver (factual)
 - Confidence level (transparent about classification certainty)
 
-### The GUI should NOT assert (unsafe)
+### The GUI should not assert (unsafe)
 
 - Exact physical location of a board thermistor without board-specific documentation
 - That a generic `tempN` channel measures any specific component

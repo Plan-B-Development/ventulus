@@ -1,26 +1,26 @@
 # Controls
 
-The Controls page is the operational heart of the application. It manages **profiles**, **fan roles**, and **curves** — the three layers that determine how your fans respond to temperature.
+The Controls page is the operational heart of the application. It manages **profiles**, **fan roles**, and **curves**: the three layers that determine how your fans respond to temperature.
 
 ![Controls Page](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/02_controls.png)
 
-## How It Works
+## How it works
 
 The control model has three layers:
 
-1. **Profile** — A named collection of fan roles and curves. You switch between profiles (e.g., "Quiet" for nighttime, "Performance" for gaming).
-2. **Fan Role** — A logical group of physical fans that share the same behaviour (e.g., "Case Intake" groups your three front fans together).
-3. **Curve** — A temperature-to-speed mapping that defines how fast fans should spin at any given temperature.
+1. **Profile**: a named collection of fan roles and curves. You switch between profiles (e.g., "Quiet" for nighttime, "Performance" for gaming).
+2. **Fan Role**: a logical group of physical fans that share the same behaviour (e.g., "Case Intake" groups your three front fans together).
+3. **Curve**: a temperature-to-speed mapping that defines how fast fans should spin at any given temperature.
 
 A profile contains one or more fan roles, and each fan role references a curve from the profile's curve library. The [Profiles and Curves Reference](profiles-and-curves.md) explains the model in depth.
 
-## Page Layout
+## Page layout
 
 The page **header** carries the actions that apply to the whole profile:
 
 | Control | What it does |
 |--------|-------------|
-| *Profile name* | A read-only label naming the profile these edits and **Save** apply to — it follows the sidebar selection, and is how you confirm what **Save** will write to |
+| *Profile name* | A read-only label naming the profile these edits and **Save** apply to. It follows the sidebar selection, and is how you confirm what **Save** will write to |
 | **⋮** | Profile-management menu (create / rename / duplicate / delete) |
 | **Set up ▾** | The hardware-setup menu. It always offers **Auto-Connect Wizard…**, which opens the Fan Wizard to identify and label your physical fans (see [Fan Wizard](fan-wizard.md)). **Configure AIO…**, one-click liquid-cooler setup, is offered whenever a liquid cooler is detected or the daemon supports header roles; it does not wait for a detected cooler, because one plugged into a motherboard header cannot be detected (see [Configuring an AIO](#configuring-an-aio--liquid-cooler)). **Dedicate GPU Fan…** appears for a writable AMD GPU fan that supports zero-RPM idle: one-click setup so it can idle at true 0 RPM (see [Dedicating a GPU fan](#dedicating-a-gpu-fan)) |
 | **Revert** | Discards unsaved changes and restores the last saved version of the profile. Enabled only while there are unsaved edits |
@@ -29,27 +29,25 @@ The page **header** carries the actions that apply to the whole profile:
 
 Below the header the page is a **three-pane** workspace:
 
-1. **Assign Roles** (left) — the fan-role cards; the pane header's **+** button creates a role.
-2. **Link Logic** (middle) — the curve library; the pane header's **+** button adds a curve.
-3. **Curve Editor** (right) — an always-mounted inline editor. Its header carries a **Test Curve** button, and until you pick a curve it reads *"Select a curve's Edit action to shape it here."*
+1. **Assign Roles** (left): the fan-role cards; the pane header's **+** button creates a role.
+2. **Link Logic** (middle): the curve library; the pane header's **+** button adds a curve.
+3. **Curve Editor** (right): an always-mounted inline editor. Its header carries a **Test Curve** button, and until you pick a curve it reads *"Select a curve's Edit action to shape it here."*
 
-(The earlier top-section / bottom-section split with a draggable divider is gone — roles, curves, and the editor now sit side by side.)
-
-## Managing Profiles
+## Managing profiles
 
 **Selecting and activating** a profile happen in the sidebar's **Profile** group, and they are two separate actions:
 
-- **Selecting** a profile in the dropdown *shows* it. The Controls page immediately renders that profile's fan roles and curves, and **Save** writes to it. Nothing is sent to the daemon — your fans keep doing exactly what they were doing.
+- **Selecting** a profile in the dropdown *shows* it. The Controls page immediately renders that profile's fan roles and curves, and **Save** writes to it. Nothing is sent to the daemon: your fans keep doing exactly what they were doing.
 - **Apply** hands the selected profile to the daemon, whose profile engine then evaluates its curves every second and drives the fans, so they stay controlled even with the GUI closed ([The Daemon Drives the Fans](profiles-and-curves.md#the-daemon-drives-the-fans)).
-- **Stop**, beside Apply, stops profile control without deleting anything. The daemon stops running the active profile: each fan goes back to what was driving it before the daemon took it — usually the BIOS, or an AMD GPU's own fan curve — and OpenFan fans stay at their last speed or the **Exit minimum** (Settings), whichever is higher. Thermal protection still applies. There is no confirmation — press **Apply** to start a profile again. A banner says what happened. Stop is available only while a profile is running — including one the daemon was started with that this app does not have — and its tooltip names that profile.
+- **Stop**, beside Apply, stops profile control without deleting anything. The daemon stops running the active profile: each fan goes back to what was driving it before the daemon took it (usually the BIOS, or an AMD GPU's own fan curve), and OpenFAN fans stay at their last speed or the **Exit minimum** (Settings), whichever is higher. Thermal protection still applies. There is no confirmation. Press **Apply** to start a profile again. A banner says what happened. Stop is available only while a profile is running (including one the daemon was started with that this app does not have), and its tooltip names that profile.
 
-The profile the daemon is actually running is marked **(active)** in the dropdown. That marker — not the current selection — is what tells you which profile is driving your fans. After **Stop** no entry is marked, and the Controls page keeps showing the profile you were on, unsaved edits included.
+The profile the daemon is actually running is marked **(active)** in the dropdown. That marker, not the current selection, is what tells you which profile is driving your fans. After **Stop** no entry is marked, and the Controls page keeps showing the profile you were on, unsaved edits included.
 
 If the Controls page has unsaved edits when you select a different profile, the GUI first asks whether to discard them; cancel, and the dropdown snaps back to the profile you were looking at.
 
-**Saving** stays on this page. The header **Save** button (`Ctrl+S`) writes your changes to disk. Saving the **active** profile also re-applies it to the daemon, so an edited curve takes effect immediately instead of only on the next activation. A status chip beside the button reads **"Unsaved changes"** whenever you have modified a profile without saving, then confirms afterwards: "Settings saved" for an inactive profile, "Saved & reapplied to daemon" for the active one (or "Saved — reapply failed (see log)" if the daemon rejects the re-apply — your local edit is still kept), and "Saved locally — daemon offline, not published" when the daemon is unreachable. If the daemon is reachable but refuses the profile, the chip reads **"Saved locally — refused by the daemon, not published"** and a dialog lists the daemon's reasons (also in the chip's tooltip): the edit is kept on this computer, but the daemon cannot run it until you correct those and save again. Renaming a profile saves it too, and reports the same two cases as "Renamed locally — …". When the daemon accepts a profile with warnings — for example a sensor this machine does not have, whose curve it will skip — the confirmation adds "— N warnings from the daemon", with the warnings in its tooltip.
+**Saving** stays on this page. The header **Save** button (`Ctrl+S`) writes your changes to disk. Saving the **active** profile also re-applies it to the daemon, so an edited curve takes effect immediately instead of only on the next activation. A status chip beside the button reads **"Unsaved changes"** whenever you have modified a profile without saving, then confirms afterwards: "Settings saved" for an inactive profile, "Saved & reapplied to daemon" for the active one (or "Saved — reapply failed (see log)" if the daemon rejects the re-apply, though your local edit is still kept), and "Saved locally — daemon offline, not published" when the daemon is unreachable. If the daemon is reachable but refuses the profile, the chip reads **"Saved locally — refused by the daemon, not published"** and a dialog lists the daemon's reasons (also in the chip's tooltip): the edit is kept on this computer, but the daemon cannot run it until you correct those and save again. Renaming a profile saves it too, and reports the same two cases as "Renamed locally — …". When the daemon accepts a profile with warnings (for example a sensor this machine does not have, whose curve it will skip), the confirmation adds "— N warnings from the daemon", with the warnings in its tooltip.
 
-**Creating and deleting** profiles are available in two places: **New** and **Delete** sit directly beneath the sidebar's profile dropdown, and the full set — **New Profile**, **Rename Profile**, **Duplicate Profile**, **Delete Profile** — lives under the Controls page header's **⋮** menu. Both routes do the same thing. Deleting a profile names it in the confirmation prompt and cannot be undone; deleting the currently active profile deactivates it on the daemon first, after which **no** profile is active until you apply one. If stopping it fails while the daemon is reachable, the daemon goes on running it and refuses the delete: the profile is kept, still running, and a banner says *Could not delete '<profile>': the daemon is still running it* — press **Stop**, then delete. A profile is also kept, with a banner saying why, when the daemon cannot be reached or fails to delete its copy, and for a profile installed with the daemon (such as **Quiet**), which is read-only: deleting only the copy on this computer would have brought it back the next time the app starts.
+**Creating and deleting** profiles are available in two places: **New** and **Delete** sit directly beneath the sidebar's profile dropdown, and the full set (**New Profile**, **Rename Profile**, **Duplicate Profile**, **Delete Profile**) lives under the Controls page header's **⋮** menu. Both routes do the same thing. Deleting a profile names it in the confirmation prompt and cannot be undone; deleting the currently active profile deactivates it on the daemon first, after which **no** profile is active until you apply one. If stopping it fails while the daemon is reachable, the daemon goes on running it and refuses the delete: the profile is kept, still running, and a banner says *Could not delete '<profile>': the daemon is still running it*. Press **Stop**, then delete. A profile is also kept, with a banner saying why, when the daemon cannot be reached or fails to delete its copy, and for a profile installed with the daemon (such as **Quiet**), which is read-only: deleting only the copy on this computer would have brought it back the next time the app starts.
 
 **On some Dell computers a profile must control all of the fans or none.** The BIOS on
 many Dell machines has one switch for its fan control, shared by every fan, and it sits
@@ -62,21 +60,21 @@ note at the top of the Controls page names the fans to add to a fan role or to r
 A profile saved before this rule existed, or imported, shows the same note until you fix
 it. Dell machines that give each fan its own switch are not affected.
 
-The daemon is the store of record for profiles; the GUI keeps a local draft cache so you can author and edit while disconnected. A profile saved while the daemon is unreachable is held as a **draft**; there is no background auto-sync — open it and **Save** again once the daemon reconnects to publish it. Activation (from the sidebar) is disabled while disconnected — you cannot make a profile active until the daemon can receive it.
+The daemon is the store of record for profiles; the GUI keeps a local draft cache so you can author and edit while disconnected. A profile saved while the daemon is unreachable is held as a **draft**; there is no background auto-sync. Open it and **Save** again once the daemon reconnects to publish it. Activation (from the sidebar) is disabled while disconnected: you cannot make a profile active until the daemon can receive it.
 
-## Fan Roles (Assign Roles)
+## Fan roles (Assign Roles)
 
 The left **Assign Roles** pane lists your fan roles. Its **+** button offers two kinds of role:
 
-- **Single Output Fan Role** — one physical output
-- **Group Fan Role (Multi-Fan)** — several outputs acting together
+- **Single Output Fan Role**: one physical output
+- **Group Fan Role (Multi-Fan)**: several outputs acting together
 
 Each fan role appears as a card:
 
 | Card element | Meaning |
 |--------------|---------|
-| **Title row** | Role name plus a status chip: **Applied** (curve output being written), **Not writing** (a hardware diagnostic — a verify, PWM characterisation, OpenFan calibration or validation sweep — has the daemon's write pause, so the daemon is still working out this control's speed but is not applying it, and the fans hold their last duty), **Manual** (your own inline override active), **External** (an override held by something else — another client, or this app before it restarted), **Not controlled** (the daemon is not driving these fans — either it cannot work out a speed for this role, and they hold their last speed, or none of the role's fans are on hardware it can write (an OpenFan controller that is not connected, or a header it cannot write), and their speed is up to the hardware — the chip carries how long it has been that way, and the tooltip the reason), or **No members** |
-| **Members** | The physical outputs in the role, one row each with its live RPM. A motherboard fan whose header the daemon does not report right now — a driver that has not loaded, or a second fan chip that did not appear at boot — is marked **HEADER MISSING**. It is not being controlled, but it stays in the role and is controlled again once the header comes back. A name too long for the card ends in "…"; hover it to read the whole name |
+| **Title row** | Role name plus a status chip: **Applied** (curve output being written), **Not writing** (a hardware diagnostic has the daemon's write pause: a verify, PWM characterisation, OpenFAN calibration or validation sweep. The daemon is still working out this control's speed but is not applying it, and the fans hold their last duty), **Manual** (your own inline override active), **External** (an override held by something else: another client, or this app before it restarted), **Not controlled** (the daemon is not driving these fans. Either it cannot work out a speed for this role, and they hold their last speed, or none of the role's fans are on hardware it can write (an OpenFAN controller that is not connected, or a header it cannot write), and their speed is up to the hardware. The chip carries how long it has been that way, and the tooltip the reason), or **No members** |
+| **Members** | The physical outputs in the role, one row each with its live RPM. A motherboard fan whose header the daemon does not report right now (a driver that has not loaded, or a second fan chip that did not appear at boot) is marked **HEADER MISSING**. It is not being controlled, but it stays in the role and is controlled again once the header comes back. A name too long for the card ends in "…"; hover it to read the whole name |
 | **Curve** | The assigned curve and its type, or "Curve: Manual" for fixed-speed roles. A **Min: N%** badge appears when a stall-protection floor applies (see [role-aware minimums](profiles-and-curves.md#role-aware-minimum-stall-protection)) |
 | **Now** | Live output and the driving sensor: "Now: 65% • Tctl 45.0°C". Mixed roles with a GPU member also show the GPU's own value ("(GPU 0%)") when it idles below the rest |
 | **Bottom row** | Measured RPM on the left; **Manual**, **Delete**, and **Edit…** buttons on the right |
@@ -85,10 +83,10 @@ Each fan role appears as a card:
 
 **Configure AIO** lives in the **Set up ▾** menu in the page header. It sets your cooler up in one step:
 
-- A **pump** control, driven one of three ways. **Automatic** (the default) follows temperature on a gentle curve; **Fixed speed** holds one level — Low (30%), Mid (60%), High (80%), or Max (100%); **Custom curve** starts from the automatic curve and opens the editor. Whichever you choose, the pump is never driven below 30%.
+- A **pump** control, driven one of three ways. **Automatic** (the default) follows temperature on a gentle curve; **Fixed speed** holds one level: Low (30%), Mid (60%), High (80%), or Max (100%); **Custom curve** starts from the automatic curve and opens the editor. Whichever you choose, the pump is never driven below 30%.
 
-  Which is right depends on your cooler, and there is no universal answer — check its documentation. Many pumps are happiest at a steady speed; some vendors recommend the opposite for their own hardware, and at least one ignores PWM below 20% and boosts itself when the coolant gets hot regardless of what you ask for.
-- A **radiator-fan** control bound to a temperature sensor — the **coolant** sensor by default (recommended, since the radiator's job is to cool the loop), though any sensor is selectable and coolant/CPU are highlighted as preferred. If your machine has no coolant sensor, CPU package temperature is used instead; that is normal, not a problem to fix.
+  Which is right depends on your cooler, and there is no universal answer. Check its documentation. Many pumps are happiest at a steady speed; some vendors recommend the opposite for their own hardware, and at least one ignores PWM below 20% and boosts itself when the coolant gets hot regardless of what you ask for.
+- A **radiator-fan** control bound to a temperature sensor: the **coolant** sensor by default (recommended, since the radiator's job is to cool the loop), though any sensor is selectable and coolant/CPU are highlighted as preferred. If your machine has no coolant sensor, CPU package temperature is used instead; that is normal, not a problem to fix.
 
   The seeded curve is calibrated for **the sensor you actually pick**, not for what your machine happens to have. That matters because the two scales are not interchangeable: CPU package runs 20-30 °C hotter than coolant for the same thermal state, so a coolant curve applied to a CPU sensor would sit the fans at full speed during ordinary use. Pick CPU temperature on a machine that also has a coolant sensor and you get the CPU calibration, as you should.
 
@@ -98,42 +96,42 @@ A USB cooler (NZXT Kraken, Aquacomputer) identifies itself, so its pump is found
 
 So Configure AIO **asks**. Its first step lists your controllable headers and you pick the one the pump is on. If you are not sure, use the **Fan Wizard** first to identify each header, then come back.
 
-Telling it which header is the pump is worth doing even if you do not change anything else — it is what earns that header its 30% minimum speed, and what stops it being stopped during fan identification. Choose "No pump on a motherboard header" if your pump is not connected this way, and only the radiator fans are set up.
+Telling it which header is the pump is worth doing even if you do not change anything else. It is what earns that header its 30% minimum speed, and what stops it being stopped during fan identification. Choose "No pump on a motherboard header" if your pump is not connected this way, and only the radiator fans are set up.
 
-The dialog also asks what to **name** the cooler. The name is presentation only — it does not change how the pump or fans are controlled — but it is what lets Ventulus treat the pump, its radiator fans and its temperature source as one cooling device rather than three unrelated channels. Naming confers nothing on its own: the 30% minimum and identify protection come from telling it which header is the pump, above.
+The dialog also asks what to **name** the cooler. The name is presentation only (it does not change how the pump or fans are controlled), but it is what lets Ventulus treat the pump, its radiator fans and its temperature source as one cooling device rather than three unrelated channels. Naming confers nothing on its own: the 30% minimum and identify protection come from telling it which header is the pump, above.
 
-A read-only / monitor-only cooler (one whose pump the kernel cannot drive, such as an older NZXT Kraken2) skips the pump step and offers radiator + coolant monitoring only — it never offers control that would fail. The controls it creates are ordinary fan roles you can edit afterward.
+A read-only / monitor-only cooler (one whose pump the kernel cannot drive, such as an older NZXT Kraken2) skips the pump step and offers radiator + coolant monitoring only. It never offers control that would fail. The controls it creates are ordinary fan roles you can edit afterward.
 
 ### Dedicating a GPU fan
 
 When a writable, zero-RPM-capable AMD GPU is detected, **Dedicate GPU Fan…** appears in the **Set up ▾** menu in the page header. Use it to let the GPU fan idle at **true 0 RPM** when the card is cool. In one step it:
 
-- pulls the GPU fan out of any role that currently drives it, and creates a **GPU-only** role — because that role holds only the GPU, its curve can be drawn all the way down to 0% (no chassis/CPU stall-protection minimum applies);
-- binds a dedicated curve to a **GPU temperature** sensor (edge/junction preferred) — the default idles at 0% up to 45 °C, then ramps (20% / 40% / 60% / 100% at 47 / 58 / 75 / 95 °C);
+- pulls the GPU fan out of any role that currently drives it, and creates a **GPU-only** role: because that role holds only the GPU, its curve can be drawn all the way down to 0% (no chassis/CPU stall-protection minimum applies);
+- binds a dedicated curve to a **GPU temperature** sensor (edge/junction preferred). The default curve idles at 0% up to 45 °C, then ramps (20% / 40% / 60% / 100% at 47 / 58 / 75 / 95 °C);
 - turns on the GPU firmware's **zero-RPM idle stop** for that fan.
 
-That last step is the important one: a 0% point on the curve alone is *not* enough — the card does not accept a fan-curve point below its own minimum (board-specific, often around 15%), so the daemon raises it to that minimum and the fan keeps spinning. True 0 RPM comes from the zero-RPM stop, which the firmware releases as soon as the GPU warms and the curve ramps up. The daemon restores automatic zero-RPM control when it shuts down. In the dialog you pick the sensor and can un-tick zero-RPM to keep the fan always spinning at the firmware minimum instead.
+That last step is the important one: a 0% point on the curve alone is *not* enough. The card does not accept a fan-curve point below its own minimum (board-specific, often around 15%), so the daemon raises it to that minimum and the fan keeps spinning. True 0 RPM comes from the zero-RPM stop, which the firmware releases as soon as the GPU warms and the curve ramps up. The daemon restores automatic zero-RPM control when it shuts down. In the dialog you pick the sensor and can un-tick zero-RPM to keep the fan always spinning at the firmware minimum instead.
 
 This is the one-click equivalent of building a GPU-only role by hand and ticking **Allow zero-RPM idle** in the [role dialog](#editing-a-fan-role).
 
-### Inline Manual Override
+### Inline manual override
 
-The **Manual** button on each card is a toggle: switch it on and a slider replaces the output line, pinning that role's fans to a fixed speed. This asks the **daemon** to override that role — the daemon, not the GUI, enforces the fixed speed and reverts to the curve when you are done. It is a *temporary* override:
+The **Manual** button on each card is a toggle: switch it on and a slider replaces the output line, pinning that role's fans to a fixed speed. This asks the **daemon** to override that role. The daemon, not the GUI, enforces the fixed speed and reverts to the curve when you are done. It is a *temporary* override:
 
-- it overrides **that role only** — every other role keeps following its curve
-- it is offered only on the cards of the profile the daemon is **running** — the daemon finds the role in the running profile, so on a profile you are only viewing the button is greyed out and its tooltip says why; activate that profile to use it
-- it is **floor-clamped** — the requested speed is raised to the role's stall-protection minimum if you ask for less (see [role-aware minimums](profiles-and-curves.md#role-aware-minimum-stall-protection)). When the daemon holds a fan above what you asked for — a DC pump at its 70 % minimum, say — the figure beside the slider says so: "40% · fans at 70%"
-- it is **expiring** — the GUI keeps the override alive while the slider is up; if the GUI closes or stops renewing it, the daemon lets the override lapse and the curve resumes on its own
-- it is **not saved** to the profile, and it clears the moment you toggle it off or switch profiles — the daemon snaps that role straight back to its curve
+- it overrides **that role only**: every other role keeps following its curve
+- it is offered only on the cards of the profile the daemon is **running**: the daemon finds the role in the running profile, so on a profile you are only viewing the button is greyed out and its tooltip says why; activate that profile to use it
+- it is **floor-clamped**: the requested speed is raised to the role's stall-protection minimum if you ask for less (see [role-aware minimums](profiles-and-curves.md#role-aware-minimum-stall-protection)). When the daemon holds a fan above what you asked for (a DC pump at its 70 % minimum, say), the figure beside the slider says so: "40% · fans at 70%"
+- it is **expiring**: the GUI keeps the override alive while the slider is up; if the GUI closes or stops renewing it, the daemon lets the override lapse and the curve resumes on its own
+- it is **not saved** to the profile, and it clears the moment you toggle it off or switch profiles: the daemon snaps that role straight back to its curve
 - if the daemon **refuses** the override, the card reverts and the page status says why: another client superseded your control ("Override superseded by another client"), an OpenFAN firmware update is running ("Manual unavailable — an OpenFAN firmware update is running"; try again once it has finished), or the role is no longer in the profile the daemon is running ("Manual refused — this fan role is not in the running profile"). A normally-lapsing override just reverts quietly. A thermal emergency does not refuse an override: the daemon runs every OpenFAN and motherboard fan at full speed over it until the emergency clears
 
 Use it for quick experiments ("what does 80% sound like?") without touching the saved profile. To make a role *permanently* fixed-speed, set its mode to Manual in the Edit dialog instead.
 
-### Editing a Fan Role
+### Editing a fan role
 
 Click **Edit…** to open the role dialog:
 
-![Fan Role Dialog — Curve Mode](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/10_fan_role_dialog_curve.png)
+![Fan Role Dialog: Curve Mode](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/10_fan_role_dialog_curve.png)
 
 | Field | Description |
 |-------|-------------|
@@ -143,28 +141,28 @@ Click **Edit…** to open the role dialog:
 | **Manual Output** | Fixed percentage with slider and spinbox (Manual mode only) |
 | **Members** | Read-only summary, with an **Edit Members** button |
 
-![Fan Role Dialog — Manual Mode](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/11_fan_role_dialog_manual.png)
+![Fan Role Dialog: Manual Mode](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/11_fan_role_dialog_manual.png)
 
 When the role contains an AMD GPU fan, a **GPU fan idle behaviour** section appears with a per-GPU **Allow zero-RPM idle** checkbox: leave it checked to let the GPU's firmware stop the fan at idle (it spins up with the curve), or uncheck it so the fan tracks the curve continuously. For a fresh setup, the header's [**Dedicate GPU Fan**](#dedicating-a-gpu-fan) button does this for you in one step (GPU-only role + 0%-capable curve + zero-RPM enabled).
 
-### Managing Members
+### Managing members
 
-**Edit Members** shows two lists — available outputs and selected members — with **>** / **<** buttons to move fans between them. Entries are tagged by source (`[openfan]`, `[hwmon]`, `[amd_gpu]`).
+**Edit Members** shows two lists (available outputs and selected members) with **>** / **<** buttons to move fans between them. Entries are tagged by source (`[openfan]`, `[hwmon]`, `[amd_gpu]`).
 
 A member whose header the daemon does not report right now stays in the selected list, marked "(header missing)"; remove it with **<** if the header is gone for good.
 
-Each physical fan can belong to **only one role**: outputs already assigned elsewhere appear greyed out with "(Assigned to: …)" so you can see which role owns them. A GPU fan the daemon cannot drive from a profile is shown greyed out, marked "(read-only)" — usually an RX 7000/9000 that needs its [kernel setting](driver-setup.md#amd-gpu-fan-control-prerequisite-rdna3) — or "(verify only)" — an RX 6000 or older, which can be tested and reset from the System State page but keeps its own fan curve. Hover it to see why.
+Each physical fan can belong to **only one role**: outputs already assigned elsewhere appear greyed out with "(Assigned to: …)" so you can see which role owns them. A GPU fan the daemon cannot drive from a profile is shown greyed out, marked "(read-only)" for what is usually an RX 7000/9000 that needs its [kernel setting](driver-setup.md#amd-gpu-fan-control-prerequisite-rdna3), or "(verify only)" for an RX 6000 or older, which can be tested and reset from the System State page but keeps its own fan curve. Hover it to see why.
 
-Fans belonging to a configured cooler are marked "(Part of: …)" with the device's name. Outside a configured cooler, a header the cooling stack claims is marked too: "(Pump role assigned)" for a pump you assigned, "(Pump)" for one the daemon protects on its own — its label or hardware, or the active profile naming it a pump — "(Radiator fan role assigned)" for a radiator fan you assigned (in the Fan Wizard or with **Set role…** on the Hardware page), and "(Radiator fan)" for a liquid cooler's radiator channel. These stay **selectable** — a cooler's layout is a description, not a lock, so you are allowed to move its fans — but you are asked to confirm first, because assigning a pump to an unrelated curve is rarely what you meant. The same confirmation appears when you use the **Unassigned Fans** quick-assign menu.
+Fans belonging to a configured cooler are marked "(Part of: …)" with the device's name. Outside a configured cooler, a header the cooling stack claims is marked too: "(Pump role assigned)" for a pump you assigned, "(Pump)" for one the daemon protects on its own (its label or hardware, or the active profile naming it a pump), "(Radiator fan role assigned)" for a radiator fan you assigned (in the Fan Wizard or with **Set role…** on the Hardware page), and "(Radiator fan)" for a liquid cooler's radiator channel. These stay **selectable** (a cooler's layout is a description, not a lock, so you are allowed to move its fans), but you are asked to confirm first, because assigning a pump to an unrelated curve is rarely what you meant. The same confirmation appears when you use the **Unassigned Fans** quick-assign menu.
 
-To release a fan permanently rather than confirming each time: for a cooler's member, forget the device on the **Hardware** page, or re-run **Configure AIO** and leave it out; for a pump or radiator fan role you assigned, choose **Set role… ▸ Not set** on its card on the **Hardware** page (or pick another pump, or no pump, in **Configure AIO** or the Fan Wizard; untick a radiator fan in the Fan Wizard). Removing a pump you assigned asks first. A pump or radiator fan the daemon detected from its label or hardware has no release — a role from the hardware cannot be removed, only overridden for display — so the mark stays, and you confirm each time.
+To release a fan permanently rather than confirming each time: for a cooler's member, forget the device on the **Hardware** page, or re-run **Configure AIO** and leave it out; for a pump or radiator fan role you assigned, choose **Set role… ▸ Not set** on its card on the **Hardware** page (or pick another pump, or no pump, in **Configure AIO** or the Fan Wizard; untick a radiator fan in the Fan Wizard). Removing a pump you assigned asks first. A pump or radiator fan the daemon detected from its label or hardware has no release (a role from the hardware cannot be removed, only overridden for display), so the mark stays, and you confirm each time.
 
-> This is advisory. It keeps the cooler's layout coherent; it is not what keeps your pump safe. Pump protection — the 30% floor, and the refusal to stop it — comes from the header's **role**, and applies no matter which curve the fan is assigned to.
+> This is advisory. It keeps the cooler's layout coherent; it is not what keeps your pump safe. Pump protection (the 30% floor, and the refusal to stop it) comes from the header's **role**, and applies no matter which curve the fan is assigned to.
 
-### Arranging and Resizing Cards
+### Arranging and resizing cards
 
 - **Drag a card** to reorder it within its section (a drop indicator shows the insertion point); the order is saved with the profile.
-- **Drag the grip** in a card's bottom-right corner to resize it — sizes snap to a shared 20px grid, so making several cards exactly the same size is easy. **Double-click the grip** to reset the card to its theme-derived size. Per-card sizes persist across restarts and profile switches.
+- **Drag the grip** in a card's bottom-right corner to resize it. Sizes snap to a shared 20px grid, so making several cards exactly the same size is easy. **Double-click the grip** to reset the card to its theme-derived size. Per-card sizes persist across restarts and profile switches.
 - The baseline card size follows the theme font size and the **Card size** preference (Compact / Comfortable / Large) on the [Theme page](settings.md#theme-page).
 
 ## Curves (Link Logic)
@@ -174,45 +172,45 @@ The curve library is the middle **Link Logic** pane. Its **+** button offers the
 | Type | Description | Use case |
 |------|-------------|----------|
 | **Graph Curve** | Multiple draggable points defining a custom temperature-to-speed shape | Full control over the response |
-| **Stepped Curve** | The same draggable points as a graph, but the output *holds* each point's value until the next point's temperature is reached — a staircase, not a ramp | A fixed fan speed per temperature band, with fewer speed changes |
+| **Stepped Curve** | The same draggable points as a graph, but the output *holds* each point's value until the next point's temperature is reached: a staircase, not a ramp | A fixed fan speed per temperature band, with fewer speed changes |
 | **Linear Curve** | Two-point ramp: start temp/speed to end temp/speed | Simple "ramp up between X and Y" |
 | **Flat Curve** | Constant output regardless of temperature | Always-on fans, and pumps you want held at one speed |
 | **Trigger Curve** | A two-state latch: an idle speed below the idle temperature, a load speed above the load temperature, holding its state in between (its own hysteresis) | "Stay quiet, then ramp hard past X°" |
-| **Mix Curve** | Combines several *other* curves — each evaluated at its own sensor — into one output using a function: **Max**, **Min**, **Average**, **Sum**, or **Subtract** (result clamped 0–100%). Has no sensor of its own | "Drive this fan from whichever of CPU/GPU/VRM is hottest" |
+| **Mix Curve** | Combines several *other* curves (each evaluated at its own sensor) into one output using a function: **Max**, **Min**, **Average**, **Sum**, or **Subtract** (result clamped 0–100%). Has no sensor of its own | "Drive this fan from whichever of CPU/GPU/VRM is hottest" |
 | **Sync Curve** | Mirrors another fan role's current output, plus an optional offset (−100…+100%). Has no sensor of its own | "Keep the rear fans a few percent above the front fans" |
 
 Mix and Sync are *composite* curves: they reference other curves (Mix) or another fan role (Sync) **by name**, and the editor only offers choices that cannot form a loop, so a composite can never depend on itself.
 
-Each curve card shows the curve's name and type, the bound sensor with its live reading (Flat and composite curves read no sensor and show none), a preview, and which roles use it ("Used by: …" with an **Assigned** / **Unassigned** chip). The preview is a sparkline for graph curves, a staircase for stepped curves, and otherwise a short summary — for example "35°C→80°C: 30%→100%", "Flat: 65%", "Idle 30% <40° / Load 80% >60°", "Max of 3 curves" (Mix), or "Mirror control +5%" (Sync). The card's **Actions** menu has **Edit**, **Rename**, **Duplicate**, **Unlink** (detach the curve from every role using it: each switches to **Manual** at its own manual output), and **Delete**. Deleting a curve unlinks it the same way first and removes it from any Mix curve that combined it, so the profile still saves and publishes. A fan role that a Sync curve mirrors cannot be deleted until that Sync curve points at another role or is itself deleted — the message names it. **Sync Curve** in the add menu needs a role to mirror: it starts on the first one, and is greyed out while the profile has none. Likewise a new fan role starts in **Manual** when the profile has no curve yet, and **Curve-based** is not offered in its dialog until one exists.
+Each curve card shows the curve's name and type, the bound sensor with its live reading (Flat and composite curves read no sensor and show none), a preview, and which roles use it ("Used by: …" with an **Assigned** / **Unassigned** chip). The preview is a sparkline for graph curves, a staircase for stepped curves, and otherwise a short summary, for example "35°C→80°C: 30%→100%", "Flat: 65%", "Idle 30% <40° / Load 80% >60°", "Max of 3 curves" (Mix), or "Mirror control +5%" (Sync). The card's **Actions** menu has **Edit**, **Rename**, **Duplicate**, **Unlink** (detach the curve from every role using it: each switches to **Manual** at its own manual output), and **Delete**. Deleting a curve unlinks it the same way first and removes it from any Mix curve that combined it, so the profile still saves and publishes. A fan role that a Sync curve mirrors cannot be deleted until that Sync curve points at another role or is itself deleted. The message names it. **Sync Curve** in the add menu needs a role to mirror: it starts on the first one, and is greyed out while the profile has none. Likewise a new fan role starts in **Manual** when the profile has no curve yet, and **Curve-based** is not offered in its dialog until one exists.
 
-### Editing a Graph or Stepped Curve
+### Editing a graph or stepped curve
 
-**Actions → Edit** on a graph or stepped curve loads it into the always-mounted **Curve Editor** pane on the right (a stepped curve uses the same point editor — only its preview line renders as a staircase):
+**Actions → Edit** on a graph or stepped curve loads it into the always-mounted **Curve Editor** pane on the right (a stepped curve uses the same point editor, and only its preview line renders as a staircase):
 
 - **Drag points** on the graph, or type exact values in the numeric table beside it. **Double-click** empty graph space (or click **+ Add Point**) to add a point; **Remove Point** or the `Delete` key removes the selected one (a curve keeps at least 2 points)
 - The **sensor selector** chooses which temperature drives the curve; a live readout shows the current evaluation ("45.0°C → 62%")
 - **Presets** (Linear, Quiet, Aggressive) load a starting shape you can refine
 - **Undo / redo** with `Ctrl+Z` / `Ctrl+Shift+Z`
 - The valid range is 0–120°C and 0–100% output; if a role using this curve has a stall-protection minimum, the editor stops you dragging points below that floor
-- Edits update the card preview immediately and mark the profile unsaved; the editor header's **Test Curve** button refreshes the live readout so you can check the curve's output at the current sensor temperature. To edit a different curve, pick its **Edit** action — it loads into the same pane
+- Edits update the card preview immediately and mark the profile unsaved; the editor header's **Test Curve** button refreshes the live readout so you can check the curve's output at the current sensor temperature. To edit a different curve, pick its **Edit** action, which loads it into the same pane
 
-### Editing a Linear, Flat, Trigger, Mix, or Sync Curve
+### Editing a Linear, Flat, Trigger, Mix, or Sync curve
 
 These open a small parameter dialog instead:
 
 ![Curve Edit Dialog](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/12_curve_edit_dialog.png)
 
-- **Linear** — name, a sensor, and start/end temperature and output values.
-- **Flat** — just a name and an output percentage (no sensor needed).
-- **Trigger** — a sensor plus idle/load temperatures and speeds (the idle temperature must be below the load temperature).
-- **Mix** — a combine **function** (Max / Min / Average / Sum / Subtract) and a checklist of **curves to combine**. No sensor: each combined curve evaluates at its own sensor and the results are merged. Only curves that would not create a cycle are offered; if none exist the list reads "No other curves available to combine."
-- **Sync** — the fan role to **mirror** and an **offset** percentage (−100…+100). No sensor: the output tracks the chosen role's current value plus the offset. Only roles that would not create a cycle are offered.
+- **Linear**: name, a sensor, and start/end temperature and output values.
+- **Flat**: just a name and an output percentage (no sensor needed).
+- **Trigger**: a sensor plus idle/load temperatures and speeds (the idle temperature must be below the load temperature).
+- **Mix**: a combine **function** (Max / Min / Average / Sum / Subtract) and a checklist of **curves to combine**. No sensor: each combined curve evaluates at its own sensor and the results are merged. Only curves that would not create a cycle are offered; if none exist the list reads "No other curves available to combine."
+- **Sync**: the fan role to **mirror** and an **offset** percentage (−100…+100). No sensor: the output tracks the chosen role's current value plus the offset. Only roles that would not create a cycle are offered.
 
-## Empty States
+## Empty states
 
-A new profile shows "No fan roles configured. Click + to create one." The Curves section stays hidden until at least one fan role exists — curves are always assigned *to* roles, so the page walks you through creating a role first.
+A new profile shows "No fan roles configured. Click + to create one." The Curves section stays hidden until at least one fan role exists. Curves are always assigned *to* roles, so the page walks you through creating a role first.
 
-With **no** profile at all — you deleted the last one — the page says so and the **+** buttons are disabled until you create one with **New** in the sidebar.
+With **no** profile at all (you deleted the last one), the page says so and the **+** buttons are disabled until you create one with **New** in the sidebar.
 
 ---
 

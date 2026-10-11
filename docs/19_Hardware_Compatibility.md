@@ -440,7 +440,7 @@ was rejected on 2026-08-25 (superseded by #128); it is not a pending fix.
 
 **Never replace the stopgap with a curve that has a 0% point.** Where a header still
 cannot be controlled on a current build, use another header, move the fan to an
-external controller such as the OpenFan Controller, or let the BIOS curve drive it.
+external controller such as the OpenFAN controller, or let the BIOS curve drive it.
 
 #### Where a header still cannot be controlled
 

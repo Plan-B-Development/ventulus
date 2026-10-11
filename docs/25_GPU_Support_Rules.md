@@ -11,14 +11,14 @@ misreported as controlled, or driven when it should not be.
 
 ## Discovery and identity
 
-- AMD dGPU sensors report `source: "amd_gpu"` (not `"hwmon"`) — used for display grouping.
+- AMD dGPU sensors report `source: "amd_gpu"` (not `"hwmon"`), which is used for display grouping.
 - GPU identity uses the PCI BDF address (stable across reboots), not the hwmon index.
-- Exactly one fan entity per GPU — the kernel exposes only `fan1_input` (an aggregate
+- Exactly one fan entity per GPU: the kernel exposes only `fan1_input` (an aggregate
   RPM for all physical fans).
 - Navi 48 (RX 9070 XT / 9070 / 9070 GRE) has PCI device ID `0x7550`, distinguished by
   revision (`0xC0` = XT, `0xC3` = non-XT, `0xC2` = GRE). Device `0x7551` is the
   workstation Navi 48: Radeon AI PRO R9700 (`0xC0`), R9700S (`0xC1`) and R9600D (`0xC8`)
-  (libdrm `amdgpu.ids`) — so a rule keyed on `0x7551` alone covers all three.
+  (libdrm `amdgpu.ids`). A rule keyed on `0x7551` alone therefore covers all three.
 - Daemon hwmon discovery excludes `chip_name == "amdgpu"` (and `nouveau`) from the
   hwmon headers (DEC-102, `is_gpu_owned_hwmon_chip`): GPU fans are reached only through
   the `amd_gpu:` / `nvidia_gpu:` ids and the GPU endpoints, never as a motherboard
@@ -26,8 +26,8 @@ misreported as controlled, or driven when it should not be.
 
 ## Write path
 
-- **RDNA3+ GPUs (RX 7000/9000 series) do NOT support `pwm1_enable=1` manual mode** —
-  fan control MUST use the PMFW `fan_curve` sysfs interface. *(Safety-critical.)*
+- **RDNA3+ GPUs (RX 7000/9000 series) do NOT support `pwm1_enable=1` manual mode**.
+  Fan control MUST use the PMFW `fan_curve` sysfs interface. *(Safety-critical.)*
 - Pre-RDNA3 GPUs (RX 6000 and older) expose traditional `pwm1_enable=1` + `pwm1`
   control, and the daemon writes it **only** from the GPU fan verify and reset. No
   engine has ever driven it, so no profile controls these fans: `/capabilities`
@@ -38,21 +38,21 @@ misreported as controlled, or driven when it should not be.
 - **GPU fans are outside the thermal force, and keep following the profile through it.**
   Neither the 100 % emergency nor the 40 % no-sensor floor is ever written to a GPU fan
   (the GPU firmware owns its own thermal protection). On a forced tick the daemon still
-  writes each GPU member its own command — its curve, a manual override, or an identify
-  — after the forced writes, so a GPU fan does not freeze at the duty it had when the
+  writes each GPU member its own command (its curve, a manual override, or an identify)
+  after the forced writes, so a GPU fan does not freeze at the duty it had when the
   force began. During a force a GPU curve runs without its step-rate limit, like every
   other member's. The write is skipped while a hardware verify holds the write pause and
   once the daemon is shutting down.
 
   **The two generations reach that outcome by different mechanisms, and the
   difference is safety-relevant** (kernel source re-read 2026-08-26, and again at
-  torvalds master on 2026-09-26 for DEC-430 — `hwmon_attributes_visible()` only
+  torvalds master on 2026-09-26 for DEC-430: `hwmon_attributes_visible()` only
   masks the read/write bits of `pwm1_enable` when the SMU lacks the mode
   callbacks, and an attribute whose mode ends at 0 is never created):
 
   - **RDNA4 (RX 9000, `smu_v14_0_2_ppt.c`, SMU 14.0.2 / 14.0.3)** registers only the
-    two fan getters, `.get_fan_speed_pwm` and `.get_fan_speed_rpm` — no
-    `.set_fan_speed_pwm`, no `.get/.set_fan_control_mode` (re-read at 7.3-rc4). `hwmon_attributes_visible()`
+    two fan getters, `.get_fan_speed_pwm` and `.get_fan_speed_rpm`. It registers no
+    `.set_fan_speed_pwm` and no `.get/.set_fan_control_mode` (re-read at 7.3-rc4). `hwmon_attributes_visible()`
     therefore strips the permissions outright: `pwm1` is read-only and `pwm1_enable`
     is not exposed at all. The rule is **structurally enforced by the driver**.
   - **RDNA3 (RX 7000, `smu_v13_0_0_ppt.c` / `smu_v13_0_7_ppt.c`)** *does* register all
@@ -66,12 +66,12 @@ misreported as controlled, or driven when it should not be.
 
     So on RX 7000 a `pwm1_enable=1` write **can return success and do nothing**
     (the widely-reported "write 1, read back 2" symptom). **Never treat a successful
-    write as proof of control on RDNA3** — any capability probe that does will
+    write as proof of control on RDNA3**: any capability probe that does will
     falsely report an RX 7000 fan as writable, which is exactly the class of lie
     the truthfulness rule below forbids. Confirm by reading the value back,
     or use the `fan_curve` path, which is the supported interface either way.
   - **So the daemon fails closed on the device id (DEC-430).** File presence
-    cannot tell an RX 7000 from an RX 6000 — both have `pwm1` and `pwm1_enable` —
+    cannot tell an RX 7000 from an RX 6000 (both have `pwm1` and `pwm1_enable`),
     so `AmdGpuInfo::can_write_legacy_pwm` refuses every id in
     `is_rdna3_or_rdna4` (every RDNA3/RDNA4 id libdrm 2.4.134 lists), whatever
     files exist. An RDNA3/RDNA4 card's only write path is PMFW `fan_curve`; an id
@@ -79,7 +79,7 @@ misreported as controlled, or driven when it should not be.
     current with libdrm.
 - GPU fan writes use an imperative model (`set_static_speed` via a flat PMFW curve);
   no lease is required. The curve's lowest allowed duty is the card's own `OD_RANGE`
-  minimum, read from `fan_curve` — board-specific (often around 15%; one R9700 reports
+  minimum, read from `fan_curve`. It is board-specific (often around 15%; one R9700 reports
   about 30%). The **kernel rejects** a point outside the range with `-EINVAL`
   (`"Fan curve pwm setting(%ld) must be within [%d, %d]!"`); it does not clamp. The
   clamp is the daemon's own, which reads the range before writing.
@@ -90,7 +90,7 @@ misreported as controlled, or driven when it should not be.
   Do not key a fault diagnosis on it. The daemon's `smu_mismatch_navi48_r9700`
   advisory did, and DEC-422 retired it.
 - The `amdgpu.ppfeaturemask` kernel parameter is required for PMFW `fan_curve` access.
-- ppfeaturemask bit 14 (`0x4000`) is required for PMFW — diagnostics must explain this
+- ppfeaturemask bit 14 (`0x4000`) is required for PMFW. Diagnostics must explain this
   when it is missing.
 - **A missing `fan_curve` is no longer proof that `ppfeaturemask` is wrong.** Since
   kernel 7.0/7.1 (`470891606` for smu v13, `ab4905d46` for smu v14) the driver
@@ -100,20 +100,20 @@ misreported as controlled, or driven when it should not be.
   parameter that is already right.
 - smu v14.0.x now parses OD-table upload failures into named dmesg messages
   (`OD_FAN_CURVE_PWM_ERROR`, `OD_FAN_CURVE_TEMP_ERROR`, `OD_FAN_MIN_PWM_ERROR`,
-  `OD_FAN_ZERO_RPM_STOP_TEMP_ERROR`, …) — cheap, high-value diagnostic output to
+  `OD_FAN_ZERO_RPM_STOP_TEMP_ERROR`, …): cheap, high-value diagnostic output to
   surface when a curve write is rejected.
 - Kernel docs warn: **do not** drive `pwm1` and `fan[1-*]_target` at the same time.
 - GPU PMFW fan writes use a **5% threshold** (not 1%) to avoid SMU firmware churn
   during gaming (DEC-070).
 - The daemon disables `fan_zero_rpm_enable` before writing a PMFW curve, so the fan
-  spins at the commanded speed, and re-enables it on reset (DEC-053) — **except** for a
+  spins at the commanded speed, and re-enables it on reset (DEC-053), **except** for a
   profile member marked `fan_zero_rpm: true` (the **Allow zero-RPM idle** checkbox,
   and what **Dedicate GPU Fan** sets), where the card's own zero-RPM setting is left as
   it is and the firmware stops the fan at idle. A manual write (a hardware verify or
   test) always disables it.
-- `fan_zero_rpm_enable` sysfs returns multi-line formatted output — parse header+value,
+- `fan_zero_rpm_enable` sysfs returns multi-line formatted output: parse header+value,
   do not just `trim()`.
-- **The daemon must reset the GPU fan curves it drove to automatic on shutdown — and only
+- **The daemon must reset the GPU fan curves it drove to automatic on shutdown, and only
   those (DEC-435).** A card whose PMFW curve the daemon wrote (a profile's curve or a hardware
   verify) is named in a write-ahead record before the first write and reset on every stop path,
   including SIGKILL via `ExecStopPost`; a card it never wrote, or handed back itself with
@@ -121,8 +121,8 @@ misreported as controlled, or driven when it should not be.
   *(Safety-critical.)*
 - **A GPU the active profile stops naming is handed back at once, not at the next stop
   (DEC-448).** On the tick after a deactivate, or a switch to a profile
-  that drops the card, the engine resets it to firmware auto — the same reset
-  `POST /gpu/{id}/fan/reset` makes, under the same GPU write lock — and takes it off the
+  that drops the card, the engine resets it to firmware auto (the same reset
+  `POST /gpu/{id}/fan/reset` makes, under the same GPU write lock) and takes it off the
   hand-back list. A card a skipped or overridden control still names is kept; a verify
   holding the write pause defers it; a reset that fails leaves the card listed (so the
   stop still resets it) and is retried after a minute. The member set it judges by is its
@@ -132,7 +132,7 @@ misreported as controlled, or driven when it should not be.
 
 - **Do not claim GPU fan write support unless PMFW `fan_curve` or hwmon `pwm1` is
   actually available.** The control method must be truthful: `"read_only"` when no
-  write path exists — no PMFW, and either no `pwm1_enable` or an RDNA3/RDNA4 device
+  write path exists, meaning no PMFW and either no `pwm1_enable` or an RDNA3/RDNA4 device
   id (DEC-430). *(Safety-critical.)*
 - The read-only hint says why: while overdrive is off it names
   `amdgpu.ppfeaturemask`; with it on, it says the kernel did not expose the curve
@@ -144,15 +144,15 @@ misreported as controlled, or driven when it should not be.
 ## Display and UX
 
 - GPU model name: libdrm's `amdgpu.ids`, matched on PCI device id **and
-  revision** — one id is often several cards (0x744C is the RX 7900 XTX, XT, GRE
-  and 7900M) — for every RDNA2/3/4 card it lists (DEC-430). An unlisted
+  revision** (one id is often several cards: 0x744C is the RX 7900 XTX, XT, GRE
+  and 7900M) for every RDNA2/3/4 card it lists (DEC-430). An unlisted
   (device, revision) has no model name rather than a guessed one.
 - GPU display label: the model name with an `"RX "` name compacted
   (e.g. "9070XT") and any other kept as written ("Pro W7900"), otherwise
   "AMD D-GPU".
 - GPU fan display name: `"{model} Fan"` from capabilities, falling back to
   `"D-GPU Fan"` (DEC-050).
-- GPU fans are **always** displayable on the dashboard — zero-RPM idle is normal, not
+- GPU fans are **always** displayable on the dashboard: zero-RPM idle is normal, not
   a disconnected header (DEC-047).
 - GPU fans participate in fan roles, curves, profiles, the dashboard fan table, and
   diagnostics.
@@ -163,7 +163,7 @@ misreported as controlled, or driven when it should not be.
 
 ## Dependencies and platform
 
-- Do **not** adopt the `amdgpu-sysfs` crate — LGPL-3.0 licence friction, and our
+- Do **not** adopt the `amdgpu-sysfs` crate. Its LGPL-3.0 licence causes friction, and our
   focused code suffices (DEC-043).
 - The daemon socket must be `chmod 0666` after bind to allow non-root GUI connections
   (DEC-049).

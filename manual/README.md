@@ -1,39 +1,39 @@
 # Ventulus User Manual
 
-**Ventulus** is a desktop fan control application for Linux. It communicates with the `ventulusd` service to monitor temperatures, manage fan speeds, and apply custom fan curves — all from a graphical interface.
+**Ventulus** is a desktop fan control application for Linux. It communicates with the `ventulusd` service to monitor temperatures, manage fan speeds, and apply custom fan curves, all from a graphical interface.
 
-It controls fans on an OpenFan Controller, on motherboard hwmon headers, and on AMD discrete GPUs, and it additionally **monitors** AMD, Intel, and NVIDIA discrete GPU temperatures and fan RPM (Intel Arc and NVIDIA fans are read-only — the GPU firmware owns them).
+It controls fans on an OpenFAN controller, on motherboard hwmon headers, and on AMD discrete GPUs, and it additionally **monitors** AMD, Intel, and NVIDIA discrete GPU temperatures and fan RPM (Intel Arc and NVIDIA fans are read-only: the GPU firmware owns them).
 
 This manual covers every page, setting, and feature of the application.
 
-> All guidance in this manual is informational and provided **as-is, without warranty of any kind**. Changes you make to your system are **at your own risk**, and the project and its contributors accept no liability for them (MIT License — see the LICENSE file shipped with the package).
+> All guidance in this manual is informational and provided **as-is, without warranty of any kind**. Changes you make to your system are **at your own risk**, and the project and its contributors accept no liability for them (MIT License; see the LICENSE file shipped with the package).
 
-## Table of Contents
+## Table of contents
 
-1. [Getting Started](getting-started.md) — Installation, first launch, and connecting to the daemon
-2. [Setup Checklist](setup-checklist.md) — Ordered path from fresh install to verified fan control: sensors → readiness → drivers/BIOS → verify → first profile
-3. [Dashboard](dashboard.md) — Real-time overview of fans, sensors, and system health
-4. [Controls](controls.md) — Profiles, fan roles, curves, and manual override
-5. [Settings](settings.md) — Application preferences, themes, and backup/restore
-6. [System Health](diagnostics.md) — The Overview, System State, Hardware and Logs pages, section by section
-7. [Fan Tests and Reports](fan-tests.md) — Test PWM Control, Characterise, Discover Control Path, OpenFan calibration, the GPU fan test, the PWM Test Report and the recording sessions
-8. [Fan Wizard](fan-wizard.md) — Guided fan identification and labelling
-9. [Profiles and Curves Reference](profiles-and-curves.md) — How profiles, fan roles, and curves work together
-10. [Hardware Troubleshooting](hardware-troubleshooting.md) — From a symptom to its fix: missing sensors or headers, read-only headers, fans at full speed, GPU fans
-11. [Driver Setup](driver-setup.md) — Beginner walkthrough for the out-of-tree motherboard fan drivers (DKMS), Secure Boot, the AMD GPU kernel parameter, verification, and rollback
-12. [Understanding Motherboard Fan Control (hwmon)](understanding-fan-control.md) — Plain-English primer: what hwmon, sysfs, Super I/O, and PWM are, why drivers and BIOS settings matter, and what keeps your machine safe
-13. [OpenFan Controller](openfan-controller.md) — The OpenFan USB fan controller: detection, serial access, channels, firmware updates, recovery, and troubleshooting
+1. [Getting Started](getting-started.md): Installation, first launch, and connecting to the daemon
+2. [Setup Checklist](setup-checklist.md): Ordered path from fresh install to verified fan control: sensors → readiness → drivers/BIOS → verify → first profile
+3. [Dashboard](dashboard.md): Real-time overview of fans, sensors, and system health
+4. [Controls](controls.md): Profiles, fan roles, curves, and manual override
+5. [Settings](settings.md): Application preferences, themes, and backup/restore
+6. [System Health](diagnostics.md): The Overview, System State, Hardware and Logs pages, section by section
+7. [Fan Tests and Reports](fan-tests.md): Test PWM Control, Characterise, Discover Control Path, OpenFAN calibration, the GPU fan test, the PWM Test Report and the recording sessions
+8. [Fan Wizard](fan-wizard.md): Guided fan identification and labelling
+9. [Profiles and Curves Reference](profiles-and-curves.md): How profiles, fan roles, and curves work together
+10. [Hardware Troubleshooting](hardware-troubleshooting.md): From a symptom to its fix: missing sensors or headers, read-only headers, fans at full speed, GPU fans
+11. [Driver Setup](driver-setup.md): Beginner walkthrough for the out-of-tree motherboard fan drivers (DKMS), Secure Boot, the AMD GPU kernel parameter, verification, and rollback
+12. [Understanding Motherboard Fan Control (hwmon)](understanding-fan-control.md): Plain-English primer: what hwmon, sysfs, Super I/O, and PWM are, why drivers and BIOS settings matter, and what keeps your machine safe
+13. [OpenFAN Controller](openfan-controller.md): The OpenFAN USB fan controller: detection, serial access, channels, firmware updates, recovery, and troubleshooting
 
-## Reference Docs
+## Reference docs
 
 For deeper hardware and sensor topics, see:
 
-- [Hardware Compatibility](../docs/19_Hardware_Compatibility.md) — chip support matrix, kernel driver requirements, vendor quirks, ACPI conflicts
-- [AMD Motherboard Fan Control Guide](../docs/21_AMD_Motherboard_Fan_Control_Guide.md) — vendor by vendor (ASUS, MSI, ASRock, Gigabyte): which chip and driver each AMD board needs
-- [Sensor Interpretation Guide](../docs/20_Sensor_Interpretation_Guide.md) — what each sensor name means and which to trust
-- [AMD Sensor Interpretation Deep Dive](../docs/22_AMD_Sensor_Interpretation_Deep_Dive.md) — Tctl vs Tdie, edge vs junction, and common AMD-specific traps
-- [Intel Motherboard Fan Control Guide](../docs/23_Intel_Motherboard_Fan_Control_Guide.md) — the same for Intel LGA1700 and LGA1851 boards
-- [Cooling Hardware Readiness Guide](../docs/24_Cooling_Hardware_Readiness_Guide.md) — what the Hardware page's readiness checks mean and how to clear them
+- [Hardware Compatibility](../docs/19_Hardware_Compatibility.md): chip support matrix, kernel driver requirements, vendor quirks, ACPI conflicts
+- [AMD Motherboard Fan Control Guide](../docs/21_AMD_Motherboard_Fan_Control_Guide.md): vendor by vendor (ASUS, MSI, ASRock, Gigabyte): which chip and driver each AMD board needs
+- [Sensor Interpretation Guide](../docs/20_Sensor_Interpretation_Guide.md): what each sensor name means and which to trust
+- [AMD Sensor Interpretation Deep Dive](../docs/22_AMD_Sensor_Interpretation_Deep_Dive.md): Tctl vs Tdie, edge vs junction, and common AMD-specific traps
+- [Intel Motherboard Fan Control Guide](../docs/23_Intel_Motherboard_Fan_Control_Guide.md): the same for Intel LGA1700 and LGA1851 boards
+- [Cooling Hardware Readiness Guide](../docs/24_Cooling_Hardware_Readiness_Guide.md): what the Hardware page's readiness checks mean and how to clear them
 
 ## Screenshots
 

@@ -13,7 +13,7 @@ the symptom-first view (*my fans do not show up*, *my fans run at full speed*), 
 | [Test PWM Control](#test-pwm-control) | **Test Control** on each header card on the **Hardware** page; **Test PWM Control** and **Verify All Writable** under **System State ▸ Advanced actions** | Does a write reach the fan at all? |
 | [Characterise PWM Response](#characterise-pwm-response) | **Characterise** on each header card, **Characterise Pump** on a cooling-device card; also under **System State ▸ Advanced actions** | How does the fan respond across its range? |
 | [Discover Control Path](#discover-control-path) | **Discover Control Path** on each header card | Which fan does this header actually drive? |
-| [Calibrate OpenFan Channel](#calibrate-openfan-channel) | **Hardware ▸ Hardware Diagnostics** | Where does an OpenFan fan stop, and where does it start again? |
+| [Calibrate OpenFan Channel](#calibrate-openfan-channel) | **Hardware ▸ Hardware Diagnostics** | Where does an OpenFAN fan stop, and where does it start again? |
 | [Test GPU Fan Control](#test-gpu-fan-control) | **System State ▸ Advanced actions**, when a writable AMD GPU is present | Does the GPU fan follow a curve? |
 | [PWM Test Report](#pwm-test-report) | **Hardware ▸ Hardware Diagnostics** | All of the above for the headers you choose, written down as a report |
 | [Recording sessions](#recording-sessions) | **Hardware ▸ Hardware Diagnostics** | What does the cooler do at startup, under load and across changes? |
@@ -271,8 +271,8 @@ to:
 
 ## Calibrate OpenFan Channel
 
-**Calibrate OpenFan Channel…** measures two things about one fan on an OpenFan
-Controller: the duty at which it **stops** as its speed is lowered (the *stall
+**Calibrate OpenFan Channel…** measures two things about one fan on an OpenFAN
+controller: the duty at which it **stops** as its speed is lowered (the *stall
 duty*), and the duty at which it **starts again** as its speed is raised (the
 *restart duty*). The second is usually higher: a fan that is already turning keeps
 turning at a duty that could not start it from a stop.
@@ -375,7 +375,7 @@ the daemon performs and undoes every one of them.
    the Hardware page's header cards, so you can name an unlabelled header here; the
    table refreshes and keeps your ticks, and it also follows a role you set on a
    Hardware card while it is open. A test that cannot run says why in its tooltip.
-   OpenFan channels and GPU fans are reported but not tested.
+   OpenFAN channels and GPU fans are reported but not tested.
 2. **Your setup (optional).** What software cannot see: what is plugged into each
    header, how many fans share it (with a splitter, the RPM is one fan's), the BIOS
    header mode, and your cooler's model and pump switch position. Anything you leave

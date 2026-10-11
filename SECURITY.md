@@ -1,6 +1,6 @@
 # Security Policy
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
 If you discover a security vulnerability in Ventulus GUI, please report it privately:
 
@@ -28,11 +28,11 @@ The GUI communicates with a local daemon over a Unix domain socket. The primary 
 
 The daemon is a separate project with its own security considerations (sysfs access, serial I/O, socket permissions). Report daemon vulnerabilities to the [daemon repository](https://github.com/Plan-B-Development/ventulusd).
 
-## Supported Versions
+## Supported versions
 
 | Version | Supported |
 |---------|-----------|
 | Latest release | Yes |
 | Any earlier release | No |
 
-Only the latest published release receives security fixes. Older releases, including earlier patch versions of the current major line, are not separately supported — upgrade to the current release.
+Only the latest published release receives security fixes. Older releases, including earlier patch versions of the current major line, are not separately supported. Upgrade to the current release.

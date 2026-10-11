@@ -3,7 +3,7 @@
 The **Hardware** page (the *Cooling Hardware Readiness* page) is a
 read-only, plain-language assessment of your cooling hardware: what is ready, what
 needs attention, and the recommended next step. Opening or refreshing it **does not
-change your system** — it never loads kernel modules, installs packages, writes fan
+change your system**: it never loads kernel modules, installs packages, writes fan
 speeds, probes hardware ports, or changes your sensor selection. Every "Learn how"
 link on that page points here.
 
@@ -11,13 +11,13 @@ link on that page points here.
 > guidance for your hardware before proceeding. Ventulus does not apply these
 > changes automatically.
 
-Each finding distinguishes four different things, in order of certainty — do not
+Each finding distinguishes four different things, in order of certainty. Do not
 conflate them:
 
-- **detected** — a chip or PWM attribute is present;
-- **writable** — the daemon can write the attribute;
-- **driver bound** — a kernel driver is actually bound and exposing the chip;
-- **control verified** — writing the value was observed to move the intended fan.
+- **detected**: a chip or PWM attribute is present;
+- **writable**: the daemon can write the attribute;
+- **driver bound**: a kernel driver is actually bound and exposing the chip;
+- **control verified**: writing the value was observed to move the intended fan.
 
 Detecting a writable PWM attribute is **not** proof that changing it controls the
 fan you expect. When in doubt, use the fan-control verification workflow below.
@@ -31,8 +31,8 @@ and kernel version first.
 
 ## No usable CPU temperature source
 
-The daemon's thermal safety reads the hottest CPU temperature sensor — `k10temp` on
-AMD, `coretemp` on Intel. With none, there is no thermal emergency to trip, and once
+The daemon's thermal safety reads the hottest CPU temperature sensor (`k10temp` on
+AMD, `coretemp` on Intel). With none, there is no thermal emergency to trip, and once
 no CPU reading has been fresh for five seconds the fans your **active profile**
 controls are held at 40 % or more. Fans no profile controls are not touched, and with
 no profile active nothing is forced.
@@ -47,11 +47,11 @@ lsmod | grep -E 'k10temp|coretemp'
 If neither is listed, load the one for your CPU (`sudo modprobe k10temp` or
 `sudo modprobe coretemp`) and click **Rescan Hardware** in the footer. To load it at
 every boot, put its name on a line of its own in a file under `/etc/modules-load.d/`.
-If the module loads but reports no temperature, your kernel may predate your CPU —
-update the kernel. On a board with a Nuvoton chip, the chip's CPU channels (`PECI`,
+If the module loads but reports no temperature, your kernel may predate your CPU.
+Update the kernel. On a board with a Nuvoton chip, the chip's CPU channels (`PECI`,
 `TSI`, and `CPUTIN` except on ASUS boards, where it is often unconnected) count as
-CPU sensors too, so loading the board's driver can also supply one — see *Loading an
-in-kernel Super-I/O driver*. Picking a preferred CPU sensor (below) changes none of
+CPU sensors too, so loading the board's driver can also supply one (see *Loading an
+in-kernel Super-I/O driver*). Picking a preferred CPU sensor (below) changes none of
 this: thermal safety always uses the hottest CPU sensor.
 
 ## Selecting a preferred sensor
@@ -59,7 +59,7 @@ this: thermal safety always uses the hottest CPU sensor.
 The daemon auto-picks a CPU (and motherboard) temperature sensor, but you can choose
 a specific one. The **Pick a CPU sensor** / **Pick a motherboard sensor** action
 opens the **Settings** page (Preferred Sensors card). Your choice is persisted by the daemon and is
-advisory — it never silently replaces a working sensor, and a selection that later
+advisory: it never silently replaces a working sensor, and a selection that later
 disappears (a chip that stopped being detected) is flagged as *stale* here so you can
 re-pick. This changes only the daemon's own configuration file; no hardware is touched.
 
@@ -79,7 +79,7 @@ driver, not the board:
   - **MSI (NCT6687D):** install `nct6687d-dkms-git` and blacklist `nct6683`, then
     reboot. With both loaded they can bind the same chip and garble readings.
   - **ASRock (NCT6686D / NCT6683D):** the fans on that chip need a board-specific
-    out-of-tree driver — for example `asrock-nct6683` for the boards it lists, or
+    out-of-tree driver, for example `asrock-nct6683` for the boards it lists, or
     `nct6687d` on some boards (its fan labels are MSI's, so check which header is
     which).
 
@@ -98,13 +98,13 @@ The daemon found writable PWM (`pwmN`) attributes, but has not confirmed that wr
 them moves a fan. Writable ≠ controllable: routed PWM pins, BIOS/EC behaviour, and
 ACPI can all override the chip. Use the fan-control verification workflow to confirm.
 
-The daemon remembers each header's latest verdict, so this item counts what is left — "2 of 5 writable PWM header(s) have not been verified
-yet" — and disappears once every writable header has passed. A verdict survives a
+The daemon remembers each header's latest verdict, so this item counts what is left ("2 of 5 writable PWM header(s) have not been verified
+yet") and disappears once every writable header has passed. A verdict survives a
 daemon restart, and is dropped when its header disappears from discovery. Both a
 single-header test and a PWM sweep (characterisation) that shows the duty held and
-the fan followed count as a pass. A test that could not decide — no tach, a readback
+the fan followed count as a pass. A test that could not decide (no tach, a readback
 that failed, a run stopped early, or a test the thermal emergency or another diagnostic
-took the header from — leaves the previous verdict in place. A test in which the fan's
+took the header from) leaves the previous verdict in place. A test in which the fan's
 speed did not change *is* a decision: it is recorded as a failure (next section).
 
 ## PWM control failed verification
@@ -112,9 +112,9 @@ speed did not change *is* a decision: it is recorded as a failure (next section)
 At least one writable header's **latest** verdict is a failure: a test
 wrote a duty and the fan's speed did not change, or the header did not keep the value
 written (the header's mode was switched away from manual, or its duty read back as
-something else), or a sweep found the header's `pwm_enable` out of manual mode —
-another controller, usually the BIOS or EC, has it. It is a warning, not a block — the daemon still
-drives the header — because the usual causes are fixable: a BIOS fan curve or
+something else), or a sweep found the header's `pwm_enable` out of manual mode,
+which means another controller, usually the BIOS or EC, has it. It is a warning, not a block (the daemon still
+drives the header), because the usual causes are fixable: a BIOS fan curve or
 "Smart Fan" mode that takes the header back, a fan plugged into a different header
 than the one tested, or no fan on that header at all. Fix the cause and test the
 header again; a pass replaces the failure.
@@ -125,7 +125,7 @@ The **Test PWM control** action scrolls to this page's own **Hardware Diagnostic
 section, whose **PWM Test Report…** tests the headers you choose in one run. Each
 header's card under **Cooling Hardware** also has its own **Test Control** button, and
 the **System State** page keeps the same test as an advanced shortcut. It briefly nudges a fan and observes the RPM
-response to confirm the control path actually works — the honest way to turn
+response to confirm the control path actually works. That is the honest way to turn
 "detected/writable" into "control verified". It is thermally guarded and reverts
 after the test.
 
@@ -146,8 +146,8 @@ sudo modprobe nct6775
   with that header present: `sudo systemctl restart ventulusd`. The same
   applies after reloading a driver.
 - **On a Gigabyte board, `nct6775` and `w83627ehf` do not load.** The daemon
-  package's Super-I/O guard declines both there — Gigabyte boards use ITE chips,
-  which those drivers cannot bind, and their probe can hide a second chip — so the
+  package's Super-I/O guard declines both there: Gigabyte boards use ITE chips,
+  which those drivers cannot bind, and their probe can hide a second chip. So the
   command reports success and nothing appears. `sudo journalctl -b -t
   ventulus-superio-guard` shows each module it declined. You need `it87` there.
 - **Temporary vs. persistent:** `modprobe` lasts until reboot. The daemon package's
@@ -160,7 +160,7 @@ sudo modprobe nct6775
   BIOS/ACPI is claiming the chip's I/O ports (see *ACPI I/O-port conflicts*).
 - **Compatibility:** confirm the recommended module matches your board and kernel.
   The page marks whether the driver is in the mainline kernel or needs an
-  out-of-tree (DKMS) build — see below.
+  out-of-tree (DKMS) build: see below.
 
 ## Unsupported chips and DKMS drivers
 
@@ -168,7 +168,7 @@ Some chips (notably several Gigabyte ITE variants) are not supported by the main
 `it87` driver on common LTS kernels and need an out-of-tree build such as
 `it87-dkms-git`. The page marks these as **needs out-of-tree (DKMS) driver** and shows
 the driver, but installing a DKMS package is a system change you should make
-deliberately, after checking it matches your chip. Never pass `force_id` — it can
+deliberately, after checking it matches your chip. Never pass `force_id`: it can
 misconfigure the chip. **`it87-dkms-git` builds from 2026-09-09 (the driver's v2.0)
 rename Gigabyte chips**, e.g. `it8696_a008090a`. The daemon strips that suffix, so no
 fan header's id changes; an `/etc/sensors.d` block written for the old name stops
@@ -182,12 +182,12 @@ typically failing with *Device or resource busy*. The page lists the affected
 driver(s). Prefer a BIOS update where one addresses the conflict; otherwise the
 remedies differ by driver, and they are **not** equally safe:
 
-- **`it87` (ITE) — preferred: the driver-local option.** Add
+- **`it87` (ITE): prefer the driver-local option.** Add
   `options it87 ignore_resource_conflict=1` to `/etc/modprobe.d/it87.conf`. This
   relaxes the check for **this driver only**. Upstream recommends it over the
   system-wide parameter, because there are reports that a system-wide
   `acpi_enforce_resources=lax` can cause **boot failures** on some systems.
-- **`nct6775` / `nct6687` (Nuvoton) — no driver-local equivalent exists.** These
+- **`nct6775` / `nct6687` (Nuvoton): no driver-local equivalent exists.** These
   drivers expose no `ignore_resource_conflict` parameter, so the system-wide
   `acpi_enforce_resources=lax` kernel parameter is the only kernel-side remedy.
   Treat it as the larger hammer it is. On supported ASUS boards `nct6775`
@@ -219,7 +219,7 @@ access the chip's configuration I/O ports directly to identify it. This:
   only the port that driver owns. With `it87` loaded on a dual-chip
   Gigabyte board it therefore never runs. It also refuses when `/proc/ioports`
   cannot be read, and skips a port that file shows reserved by a driver or ACPI;
-- is a deliberate one-shot — it never runs automatically, and a second run within
+- is a deliberate one-shot: it never runs automatically, and a second run within
   10 seconds is refused with a note to try again.
 
 Its result is labelled as coming from the active probe (evidence `port_probe`) so it

@@ -1,8 +1,8 @@
 # Profiles and Curves Reference
 
-This page explains how the three control layers — profiles, fan roles, and curves — work together to control your fans.
+This page explains how the three control layers (profiles, fan roles, and curves) work together to control your fans.
 
-## The Control Model
+## The control model
 
 ```
 Profile ("Quiet")
@@ -40,15 +40,15 @@ A profile is a named collection of fan roles and curves. You can have multiple p
 
 Only one profile can be **active** at a time. The daemon evaluates the active profile's fan roles every second and drives the fans.
 
-### Built-in Profiles
+### Built-in profiles
 
-Ventulus ships with three default profiles (Quiet, Balanced, Performance) that are created on first launch if no profiles exist. These are fully editable — they are regular profiles, not special. **As shipped they control no fans:** each has one *All Fans* role with no fans in it, and a curve with no sensor chosen. Add your fans to the role and pick a sensor for the curve before you activate one.
+Ventulus ships with three default profiles (Quiet, Balanced, Performance) that are created on first launch if no profiles exist. These are fully editable: they are regular profiles, not special. **As shipped they control no fans:** each has one *All Fans* role with no fans in it, and a curve with no sensor chosen. Add your fans to the role and pick a sensor for the curve before you activate one.
 
-### Profile Storage
+### Profile storage
 
-The daemon is the store of record for profiles — it holds the active profile and evaluates it. The GUI keeps a local draft cache of profiles as individual JSON files in your profiles directory (default: `~/.config/ventulus/profiles/`) so you can author and edit them, including while disconnected. There is no background auto-sync: an offline draft is published only when you explicitly re-save it after the GUI reconnects, not automatically on connect.
+The daemon is the store of record for profiles: it holds the active profile and evaluates it. The GUI keeps a local draft cache of profiles as individual JSON files in your profiles directory (default: `~/.config/ventulus/profiles/`) so you can author and edit them, including while disconnected. There is no background auto-sync: an offline draft is published only when you explicitly re-save it after the GUI reconnects, not automatically on connect.
 
-## Fan Roles
+## Fan roles
 
 A fan role groups physical fan outputs that should behave the same way. For example, if you have three front intake fans, you probably want them all to follow the same temperature curve.
 
@@ -63,15 +63,15 @@ A fan role groups physical fan outputs that should behave the same way. For exam
 
 Each fan role contains a list of physical fan outputs (members). A member can be:
 
-- An OpenFan Controller channel (e.g., channels 0-9)
+- An OpenFAN controller channel (e.g., channels 0-9)
 - A motherboard hwmon fan header (e.g., CPU Fan, chassis fans)
 - An AMD GPU fan output
 
 Each physical fan can only belong to one role. If you try to add a fan that is already assigned elsewhere, the member editor shows which role currently owns it.
 
-### Tuning Parameters
+### Tuning parameters
 
-Each fan role carries a set of tuning parameters that the daemon applies to the raw curve output before it is written to the hardware. These are stored in the profile and applied automatically — there is **no dedicated UI to hand-edit them**; they use sensible role-aware defaults (and **Minimum** in particular is set automatically from the role — see below).
+Each fan role carries a set of tuning parameters that the daemon applies to the raw curve output before it is written to the hardware. These are stored in the profile and applied automatically. There is **no dedicated UI to hand-edit them**; they use sensible role-aware defaults (and **Minimum** in particular is set automatically from the role; see below).
 
 | Parameter | Effect |
 |-----------|--------|
@@ -80,27 +80,27 @@ Each fan role carries a set of tuning parameters that the daemon applies to the 
 | **Start %** | Kickstart value when a fan resumes from 0% (helps overcome motor stiction). Default: 0% |
 | **Stop %** | Below this output, snap to 0% (enables zero-RPM idle). Default: 0% |
 | **Offset** | Fixed percentage added to the curve output. Default: 0% |
-| **Minimum** | Hard floor — output never goes below this value |
+| **Minimum** | Hard floor: output never goes below this value |
 
 #### Role-aware minimum (stall protection)
 
 The **Minimum** floor is chosen automatically from the role inferred for the fan group, so chassis and CPU/pump fans don't stall, while GPU fans are free to idle at 0%:
 
-- **30%** for CPU / pump-labelled hwmon members, for every fan channel on a liquid cooler's own controller (an NZXT Kraken's fan channel, for example — it cools the loop the pump serves), and for a member whose header you assigned the **pump** role. The **Min** badge and the Dashboard fan cards show that 30% as soon as you assign the role, even for a fan you added to the group before. The manual slider and the curve editor still go down to the group's own minimum. The daemon raises anything lower to 30%.
-- **20%** for chassis / OpenFan members
-- **0%** for GPU members — and in a *mixed* group, the GPU member idles to its own 0% floor in the same cycle the chassis/CPU members hold their floor (the card's own fan minimum — board-specific, often around 15% — still decides how slowly the fan can actually turn)
+- **30%** for CPU / pump-labelled hwmon members, for every fan channel on a liquid cooler's own controller (an NZXT Kraken's fan channel, for example, which cools the loop the pump serves), and for a member whose header you assigned the **pump** role. The **Min** badge and the Dashboard fan cards show that 30% as soon as you assign the role, even for a fan you added to the group before. The manual slider and the curve editor still go down to the group's own minimum. The daemon raises anything lower to 30%.
+- **20%** for chassis / OpenFAN members
+- **0%** for GPU members. In a *mixed* group, the GPU member idles to its own 0% floor in the same cycle the chassis/CPU members hold their floor (the card's own fan minimum, board-specific and often around 15%, still decides how slowly the fan can actually turn)
 
-These per-role floors are GUI-owned policy baked into the profile. The daemon additionally enforces the **pump/CPU 30% floor** as a hard backstop: it rejects a profile whose pump/CPU control declares a `minimum_pct` below 30% at validate time, and re-applies the 30% floor on every evaluation tick regardless of the declared value. The 20% chassis / 0% GPU floors remain GUI policy — the daemon does not enforce those.
+These per-role floors are GUI-owned policy baked into the profile. The daemon additionally enforces the **pump/CPU 30% floor** as a hard backstop: it rejects a profile whose pump/CPU control declares a `minimum_pct` below 30% at validate time, and re-applies the 30% floor on every evaluation tick regardless of the declared value. The 20% chassis / 0% GPU floors remain GUI policy: the daemon does not enforce those.
 
 A pump on a motherboard header that runs in **DC mode** gets a higher daemon floor: **70%** instead of 30%, because a pump driven by voltage rather than PWM stalls higher in its range. Like the 30% floor it is hardcoded in the daemon and applies whatever the profile's own minimum says. The **Min** badge does not show it; the header's **Details** on the **Hardware** page ([System Health § Cooling Hardware](diagnostics.md#cooling-hardware)) show the floor the daemon applies.
 
-A profile saved before one of its fans earned the 30% floor — say, a cooler Ventulus did not yet recognise when the profile was saved — is **healed when it loads**: a pump/CPU control below 30% is raised to 30%, so the daemon does not refuse it when you apply it. Only the 30% floor is healed; a chassis control you deliberately set below 20% keeps your value.
+A profile saved before one of its fans earned the 30% floor (say, a cooler Ventulus did not yet recognise when the profile was saved) is **healed when it loads**: a pump/CPU control below 30% is raised to 30%, so the daemon does not refuse it when you apply it. Only the 30% floor is healed; a chassis control you deliberately set below 20% keeps your value.
 
 ## Curves
 
 Curves define the relationship between a temperature sensor reading and a fan output percentage.
 
-### Graph (Freeform)
+### Graph (freeform)
 
 A multi-point curve where you define exactly which temperature maps to which output. Points are draggable on a visual graph and editable in a numeric table.
 
@@ -111,9 +111,9 @@ A multi-point curve where you define exactly which temperature maps to which out
 - Below the first point, output equals the first point's value
 - Above the last point, output equals the last point's value
 
-### Stepped (Staircase)
+### Stepped (staircase)
 
-The same point editor as Graph, but it **holds** each point's output until the next point's temperature is reached instead of ramping between points — a staircase. Each band `[this point, next point)` runs at the lower point's output; the step changes exactly at the next point's temperature.
+The same point editor as Graph, but it **holds** each point's output until the next point's temperature is reached instead of ramping between points. The result is a staircase. Each band `[this point, next point)` runs at the lower point's output; the step changes exactly at the next point's temperature.
 
 Good for "run quiet up to 60C, then jump to a fixed louder speed" without a sloped ramp.
 
@@ -132,101 +132,101 @@ Good for simple "ramp from 30% at 35C to 100% at 80C" use cases.
 A constant output regardless of temperature. No sensor binding needed.
 
 Good for fans that should run at a fixed speed, and for a pump you want held at one
-level — though a pump can equally follow a curve; see **Configure AIO** in the
+level, though a pump can equally follow a curve; see **Configure AIO** in the
 Controls guide, which offers both.
 
-### Trigger (Two-State Latch)
+### Trigger (two-state latch)
 
 A two-speed curve with its own hysteresis band. Below the **idle temperature** it runs the idle speed; at/above the **load temperature** it runs the load speed; **within the band it holds** whichever state it is already in. This latch (idle must be below load) prevents the fan hunting back and forth at the boundary.
 
 Good for "stay silent at an idle speed, then jump to a fixed load speed past X degrees, and don't flip-flop while cooling back down".
 
-### Mix (Composite)
+### Mix (composite)
 
-Combines the outputs of **other curves** — each evaluated at its own sensor — into one value with a function:
+Combines the outputs of **other curves**, each evaluated at its own sensor, into one value with a function:
 
-- **Max** — the loudest of its inputs (the classic "follow whichever of CPU/GPU is hotter")
-- **Min** — the quietest of its inputs
-- **Average** — the mean
-- **Sum** — added together (clamped at 100%)
-- **Subtract** — the first input minus the rest (clamped at 0%)
+- **Max**: the loudest of its inputs (the classic "follow whichever of CPU/GPU is hotter")
+- **Min**: the quietest of its inputs
+- **Average**: the mean
+- **Sum**: added together (clamped at 100%)
+- **Subtract**: the first input minus the rest (clamped at 0%)
 
-Edited in a dialog: pick the function and tick the curves to combine. A Mix has no sensor of its own — its inputs bring their own. The editor only offers curves that cannot form a loop.
+Edited in a dialog: pick the function and tick the curves to combine. A Mix has no sensor of its own: its inputs bring their own. The editor only offers curves that cannot form a loop.
 
-### Sync (Composite)
+### Sync (composite)
 
-Mirrors **another control's** output, plus an offset — for example "rear exhaust = CPU fans + 10%". Useful to keep a group of fans tracking another group without re-creating its curve. Edited in a dialog: pick the control to mirror and an offset. The editor only offers controls that cannot form a loop.
+Mirrors **another control's** output, plus an offset: for example, "rear exhaust = CPU fans + 10%". Useful to keep a group of fans tracking another group without re-creating its curve. Edited in a dialog: pick the control to mirror and an offset. The editor only offers controls that cannot form a loop.
 
-### Sensor Binding
+### Sensor binding
 
-Graph, Stepped, Linear, and Trigger curves are each bound to one temperature sensor that drives evaluation. Flat needs no sensor (constant output); **Mix and Sync also have no sensor of their own** — Mix reads each input curve at *its* sensor, and Sync mirrors a control's already-computed output. Common single-sensor bindings:
+Graph, Stepped, Linear, and Trigger curves are each bound to one temperature sensor that drives evaluation. Flat needs no sensor (constant output); **Mix and Sync also have no sensor of their own**: Mix reads each input curve at *its* sensor, and Sync mirrors a control's already-computed output. Common single-sensor bindings:
 
 | Curve Purpose | Typical Sensor |
 |---------------|---------------|
 | Case fans | CPU temperature (since CPU is usually the hottest component) |
 | CPU cooler | CPU temperature |
 | GPU fans | GPU temperature |
-| Radiator fans | The **coolant** temperature where your cooler reports one — the radiator's job is to cool the loop. Without a coolant sensor, the temperature of what the loop cools (CPU, or GPU for a GPU loop). A curve drawn for coolant is too aggressive on a CPU sensor, which runs 20–30 °C hotter; see [Configuring an AIO](controls.md#configuring-an-aio--liquid-cooler) |
+| Radiator fans | The **coolant** temperature where your cooler reports one, since the radiator's job is to cool the loop. Without a coolant sensor, the temperature of what the loop cools (CPU, or GPU for a GPU loop). A curve drawn for coolant is too aggressive on a CPU sensor, which runs 20–30 °C hotter; see [Configuring an AIO](controls.md#configuring-an-aio--liquid-cooler) |
 
-### Slow-down Band
+### Slow-down band
 
 When the temperature falls, the daemon keeps a curve's fan speed until the temperature has dropped a little below where the speed last changed, so the fans do not step down at every small dip. That distance is the curve's **slow-down band**: 2 °C unless you set your own.
 
 Graph, Stepped and Linear curves have a **Slow-down band** box under the sensor selector (in the curve dialog for Linear). Set 0 to 10 °C in half-degree steps; **Off** (0) follows the curve exactly. A wider band keeps the fans steadier at the cost of slowing down later. **Apply to all curves** copies the value to every Graph, Stepped and Linear curve in the profile; in the curve dialog it is a toggle that takes effect when you click **Save**.
 
-- A rising temperature always speeds the fans up at once — the band only delays slowing down.
+- A rising temperature always speeds the fans up at once. The band only delays slowing down.
 - A steady temperature releases the band after about 30 seconds, so the fans settle to the curve's value.
 - The band never keeps the fans slower than the curve asks for at the current temperature.
 - Trigger curves use their own idle and load temperatures instead; Flat, Mix and Sync curves have no band.
 - The box appears only when your daemon supports it. Demo mode does not simulate the band.
 
-## The Control Loop
+## The control loop
 
-The **daemon** runs the control loop every second — the GUI never writes fan speeds. Each second the daemon performs this sequence:
+The **daemon** runs the control loop every second. The GUI never writes fan speeds. Each second the daemon performs this sequence:
 
 1. Read the latest sensor temperatures
 2. For each fan role in the active profile:
    - If mode is Manual: use the fixed output percentage
    - If mode is Curve: look up the curve, read the bound sensor's temperature, interpolate the output
 3. While the temperature is falling, apply the curve's [slow-down band](#slow-down-band): hold the current speed until the temperature has dropped that far below where it last changed
-4. Write the final PWM values to every fan backend (OpenFan, motherboard hwmon, and AMD GPU PMFW), **coalescing redundant writes**: for OpenFan and hwmon it skips the write when the new PWM is identical to the last commanded value, and for AMD GPU PMFW it skips changes smaller than 5% (to avoid SMU firmware churn). This coalescing is entirely daemon-internal — the GUI itself never writes PWM
-5. For a motherboard header whose write was skipped, **check the speed held**: the daemon reads the header back, and if something else — usually the BIOS's own fan control — has moved it more than 2 points, it writes the curve's value again. After 3 corrections that do not hold it stops fighting and reports the fan on the **System State** page as *"Fan duty is not holding"* (see [System Health § Conditions](diagnostics.md#conditions))
+4. Write the final PWM values to every fan backend (OpenFAN, motherboard hwmon, and AMD GPU PMFW), **coalescing redundant writes**: for OpenFAN and hwmon it skips the write when the new PWM is identical to the last commanded value, and for AMD GPU PMFW it skips changes smaller than 5% (to avoid SMU firmware churn). This coalescing is entirely daemon-internal: the GUI itself never writes PWM
+5. For a motherboard header whose write was skipped, **check the speed held**: the daemon reads the header back, and if something else (usually the BIOS's own fan control) has moved it more than 2 points, it writes the curve's value again. After 3 corrections that do not hold it stops fighting and reports the fan on the **System State** page as *"Fan duty is not holding"* (see [System Health § Conditions](diagnostics.md#conditions))
 
-## The Daemon Drives the Fans
+## The daemon drives the fans
 
 Once you **Apply** a profile, the daemon owns fan control completely:
 
 - The daemon's profile engine evaluates the active profile and writes every fan backend itself
-- Your fans stay controlled whether the GUI is open, closed, or has crashed — there is nothing to keep running
+- Your fans stay controlled whether the GUI is open, closed, or has crashed: there is nothing to keep running
 - The GUI's job is to author and validate profiles, upload and activate them, poll the daemon once a second, and show you what is happening
 
 This is why **Apply** is the moment that matters: it hands your profile to the daemon, which then keeps your fans managed headlessly.
 
 ### Fans your profile does not control
 
-Apart from a fan test you start yourself — the Fan Wizard, **Test Control**, the PWM Test
-Report — the daemon writes only the fans the active profile names. Everything else stays with
+Apart from a fan test you start yourself (the Fan Wizard, **Test Control**, the PWM Test
+Report), the daemon writes only the fans the active profile names. Everything else stays with
 whatever drove it before: a motherboard header with the BIOS's own fan curve, a GPU fan
-with its firmware, an OpenFan channel at the last speed it was set to (the controller has
+with its firmware, an OpenFAN channel at the last speed it was set to (the controller has
 no curve of its own). With no profile active, the daemon writes no fan. The one
 exception is a thermal emergency, which takes every fan to full speed and gives each one
-back when it ends — see
+back when it ends. See
 [What keeps your machine safe](understanding-fan-control.md#what-keeps-your-machine-safe).
 
 **When you switch profiles**, a motherboard header the new profile does not name is given
-back to exactly what it was doing before the daemon first took it — usually the BIOS curve
-— within a second. So is an AMD GPU the new profile does not name: it goes back to its
-firmware fan curve. The same happens to both when no profile is left active — **Stop** under the
-sidebar's profile selector, the tray's **Stop profile control**, or deleting the active profile. An OpenFan channel, or a
+back to exactly what it was doing before the daemon first took it (usually the BIOS curve)
+within a second. So is an AMD GPU the new profile does not name: it goes back to its
+firmware fan curve. The same happens to both when no profile is left active (**Stop** under the
+sidebar's profile selector, the tray's **Stop profile control**, or deleting the active profile). An OpenFAN channel, or a
 motherboard header with no automatic mode to go back to (an ARCTIC fan hub's channels, for
 example), that the new profile does not name is left at its last speed or at the **Exit
-minimum** (Settings, 50 % by default), whichever is higher — or at full speed if the daemon has
+minimum** (Settings, 50 % by default), whichever is higher, or at full speed if the daemon has
 lost track of its speed. It is never slowed, and with an Exit
 minimum of 0 it keeps its last speed.
 
-**When the daemon stops** — a normal stop, a crash, or an uninstall — each motherboard
+**When the daemon stops** (a normal stop, a crash, or an uninstall), each motherboard
 header goes back to what it was doing before, and each AMD GPU the daemon drove goes back
-to its firmware curve. Two kinds of fan have nothing to go back to: OpenFan channels and
+to its firmware curve. Two kinds of fan have nothing to go back to: OpenFAN channels and
 motherboard headers with no automatic mode. After a clean stop those are left at their last
 speed or the daemon's *exit minimum* (50 % unless you changed it in **Settings**), whichever
 is higher, and at full speed if the daemon had lost track of their speed; after a crash they
@@ -238,9 +238,9 @@ takes every fan back.
 **After sleep and resume**, the firmware often takes the motherboard headers back while the
 machine sleeps. The daemon notices the resume and puts each header your profile controls
 back under its curve on its next tick, within a second or two; you do not need to
-re-apply the profile. An OpenFan Controller keeps its fan speeds when only USB drops, but
+re-apply the profile. An OpenFAN controller keeps its fan speeds when only USB drops, but
 restarts every fan at about 1000 rpm if its power went off, so the daemon remembers each
-fan's speed and sets it again — at once for a fan whose curve cannot run, and through the
+fan's speed and sets it again: at once for a fan whose curve cannot run, and through the
 curve for every other.
 
 > **Demo mode is the one exception.** With no daemon to talk to, the GUI animates fans with its own built-in evaluator so you can explore curves and profiles. Nothing is written to real hardware.

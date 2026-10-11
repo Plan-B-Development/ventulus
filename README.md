@@ -16,7 +16,7 @@ repository is the desktop app, `ventulus`.
 - **Fan curves and profiles.** Seven curve types, from a simple ramp to a mix of
   several sensors or one group of fans following another, grouped into profiles
   you switch between: a quiet one for the evening, a louder one for games.
-- **One place for every fan.** An OpenFan Controller, the fan headers on your
+- **One place for every fan.** An OpenFAN controller, the fan headers on your
   motherboard, and the fan on an AMD RX 7000 or RX 9000 card. NVIDIA and Intel Arc
   fans are shown but cannot be driven.
 - **Liquid coolers.** **Configure AIO** sets up a pump and its radiator fans in
@@ -32,7 +32,7 @@ repository is the desktop app, `ventulus`.
 
 | Hardware | Support |
 |---|---|
-| OpenFan Controller (USB) | Full control |
+| OpenFAN controller (USB) | Full control |
 | Motherboard fan headers | Full control on most boards; newer Gigabyte, MSI and some ASRock boards need a driver installed first |
 | AMD GPU fans, RX 7000 / RX 9000 | Full control after a one-time kernel setting |
 | AMD GPU fans, RX 6000 and older | Monitored; the fan can be tested and reset |
@@ -95,7 +95,7 @@ profiles, see what the daemon reports, and run tests through it.
 [Setup Checklist](manual/setup-checklist.md) ·
 [Understanding Motherboard Fan Control](manual/understanding-fan-control.md) ·
 [Driver Setup](manual/driver-setup.md) ·
-[OpenFan Controller](manual/openfan-controller.md) ·
+[OpenFAN Controller](manual/openfan-controller.md) ·
 [Hardware Troubleshooting](manual/hardware-troubleshooting.md)
 
 **Hardware reference:**

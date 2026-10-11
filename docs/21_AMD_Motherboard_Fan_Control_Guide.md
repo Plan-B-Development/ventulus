@@ -373,7 +373,7 @@ although Windows tools could control the fans. The fork's PR #128 fixes this, wi
 positive IT8689E reports including Rev 1, but none yet on a dual-chip IT8689E board.
 So update `it87-dkms-git`, then verify with Test PWM Control. If a header still cannot
 be controlled on a current build, use a different header, move the fan to an external
-controller such as the OpenFan Controller, or let the BIOS curve drive that header,
+controller such as the OpenFAN controller, or let the BIOS curve drive that header,
 keeping the curve free of 0% points. The fix's status and the old BIOS stopgap are in
 [IT8689E boards](19_Hardware_Compatibility.md#it8689e-boards).
 

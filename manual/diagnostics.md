@@ -29,7 +29,7 @@ window has spare; drag the handle between them to give one more room.
 | **Daemon version** | Version of the running daemon and its API |
 | **Status** | Overall health: "healthy", "warning", or "critical" |
 | **Uptime** | How long the daemon has been running since it last started |
-| **Subsystems** | The subsystems the daemon reports (`openfan`, `hwmon`, `engine` and `controls`), each with its status and age. With no OpenFan Controller the `openfan` line is left out; it reappears if that subsystem reports a fault, so a controller that drops off mid-session still shows |
+| **Subsystems** | The subsystems the daemon reports (`openfan`, `hwmon`, `engine` and `controls`), each with its status and age. With no OpenFAN controller the `openfan` line is left out; it reappears if that subsystem reports a fault, so a controller that drops off mid-session still shows |
 
 **Age** is the time in milliseconds since the daemon last polled that subsystem. Under
 1000 ms means the data is fresh; a high age means the daemon is having trouble
@@ -39,7 +39,7 @@ reaching that hardware.
 
 | Field | Meaning |
 |-------|---------|
-| **OpenFan** | Whether an OpenFan Controller is detected, its channel count, and its write and RPM capability |
+| **OpenFan** | Whether an OpenFAN controller is detected, its channel count, and its write and RPM capability |
 | **hwmon** | Whether motherboard fan headers are detected, how many, and whether they are writable |
 | **AMD GPU** | Whether an AMD discrete GPU is detected, its model, PCI address, and fan control method (`pmfw`, or `pwm1` on an RX 6000 or older) |
 | **Intel GPU** | Whether an Intel Arc discrete GPU is detected, its model and PCI address. Its fan is always `read_only (firmware-managed)`: the `xe`/`i915` drivers expose no fan control |
@@ -281,7 +281,7 @@ curve you then set in LACT or CoreCtrl stays, across daemon restarts too.
 **Rescan Hardware**, in the footer, asks the daemon to look again for hwmon sensors
 and PWM headers: use it right after loading a sensor driver. New sensors appear within
 a couple of seconds. New fan *headers* need a daemon restart
-(`sudo systemctl restart ventulusd`). An OpenFan Controller is the exception: the same
+(`sudo systemctl restart ventulusd`). An OpenFAN controller is the exception: the same
 button asks the daemon to look for one and adopts it at once, and the result names the
 port it was found on.
 
@@ -388,9 +388,9 @@ the daemon's answer, not what was asked for. The button is disabled on a read-on
 header, and stays available while a PWM Test Report runs, because the daemon checks
 roles again at every step.
 
-#### OpenFan channels
+#### OpenFAN channels
 
-An OpenFan channel has no hardware label, so the daemon cannot tell that a pump is
+An OpenFAN channel has no hardware label, so the daemon cannot tell that a pump is
 plugged into one until you say so. *OpenFan Channels*, under the PWM headers, lists
 every channel the controller reports, and any channel you gave a role while it is
 unplugged, each with **Set role…**. **Pump** keeps the channel at or above the pump
@@ -417,10 +417,10 @@ it. Each is explained on [Fan Tests and Reports](fan-tests.md):
 
 - **PWM Test Report…**: the whole-machine assessment. While it runs, every other test
   here and on System State is unavailable.
-- **Calibrate OpenFan Channel…**: where an OpenFan fan stops, where it starts again,
+- **Calibrate OpenFan Channel…**: where an OpenFAN fan stops, where it starts again,
   and the minimum that keeps it running.
 - **Update OpenFAN Firmware…**: installs a firmware file onto the controller; see
-  [OpenFan Controller](openfan-controller.md#updating-the-openfan-firmware).
+  [OpenFAN Controller](openfan-controller.md#updating-the-openfan-firmware).
 - **Test Control**, **Characterise** and **Discover Control Path** on each header
   card, and **Characterise Pump** on a cooling-device card.
 - **Startup / Lifecycle Recording**, **AIO Validation** and **Thermal Observation**:
