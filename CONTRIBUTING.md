@@ -84,6 +84,64 @@ network calls, no timing that can flake.
 
 GPU discovery, writes and naming follow the [GPU support rules](docs/25_GPU_Support_Rules.md).
 
+## Wire models and shared fixtures
+
+The GUI parses every daemon response into typed models in `src/ventulus/api/models.py`. The
+[API contract](docs/08_API_Integration_Contract.md) describes the wire they mirror.
+
+- **One wire struct gets one model class.** Where the daemon reuses a struct across
+  endpoints, the GUI aliases it rather than mirroring it: `pwm_controls[]` on
+  `GET /inventory/hwmon` is `Vec<PwmHeaderEntry>`, literally the `GET /hwmon/headers`
+  element, so `InventoryPwmControl` *is* `HwmonHeader`, not a copy of it. Where the daemon
+  flattens one struct into another (`#[serde(flatten)]`), the GUI subclasses:
+  `InventoryTempSensor` extends `SensorReading`. A second class that claims to mirror the
+  first drifts; that is how eight cooling-device fields, an enforced duty floor among them,
+  once went missing while a docstring asserted a field-for-field match.
+- **One declaration pins the surface on both sides.** `tests/fixtures/wire_fields.json`
+  declares, per daemon `Serialize` struct, the keys it emits and the model that must carry
+  them. The daemon's `wire_field_surface_is_pinned` test (`daemon/src/api/responses.rs`)
+  reads that file and checks the daemon's serialised keys against it.
+  `tests/test_wire_field_coverage.py` checks that each declared key has a model slot and a
+  real read site outside `api/models.py`.
+- **The read check is exhaustive.** Every declared field must be classified, and a new one
+  fails the GUI suite until it is:
+  - `must_be_read`: a production read site must exist.
+  - `inert`: nothing reads it, with the reason. This is checked the other way round as well,
+    so a field that gains a consumer must be reclassified instead of keeping a stale
+    exemption.
+  - `not_assertable`: the name is too common for a name-based check to prove anything
+    (`id`, `label`, `source`).
+  - `unmodelled`: the GUI has no slot for it, with the reason.
+  - `via_capability_registry`, for `ControlCapability` only: read through `daemon_supports`
+    by a feature id that `DAEMON_FEATURE_CAPABILITY_FLAGS` maps to the flag. The test requires
+    a gate on that id (a `daemon_supports` argument, a `feature_id=` keyword or an
+    `_apply_live_key_support` argument), and requires an `inert` registry flag to have none.
+
+  A read is an attribute access, a keyword, a binding, or a string in **argument** position
+  (`getattr(o, "f", d)`, `d.get("f")`, `d["f"]`). A string used as a dict-literal key declares
+  a table entry and is not a read.
+- **Adding a field to a pinned struct** means updating the fixture, in both repositories, and
+  the API contract. Adding a *struct* also needs an arm in the Rust test. The fixture and the
+  arms are checked to cover the same set in both directions, so forgetting either half fails.
+  The fixture's `structs` table lists what is covered: the structs behind `/sensors`, `/fans`,
+  `/poll` (its status half included), `/hwmon/headers`, `/inventory/hwmon`,
+  `/inventory/cooling-devices`, `/capabilities` (`Limits`, `FeatureFlags`,
+  `ControlCapability`) and `/diagnostics/hardware` (`VoltageEntry`, `ThermalSafetyInfo`),
+  the diagnostic surfaces (preflight, control-path discovery, PWM characterisation, steady
+  state, the startup fingerprint) and the OpenFAN maintenance surfaces. `ControlCapability`
+  also pins capability flag names across the repositories: every flag in
+  `DAEMON_FEATURE_CAPABILITY_FLAGS` must be one of its fields. Coverage is partial by design:
+  a struct the fixture does not list is unchecked rather than failing.
+- **`daemon_config_keys.json`** applies the same one-declaration rule to the keys of
+  `GET /config` ([API contract § Config management](docs/08_API_Integration_Contract.md#config-management)).
+
+Seven fixtures in `tests/fixtures/` have a byte-identical copy in the daemon repository:
+`parity_vectors.json`, `role_classification.json`, `header_role_classification.json`,
+`wire_fields.json`, `daemon_config_keys.json`, `chip_name_canonical.json` and
+`memory_sensor_ids.json`. Tests compare the copies when both repositories are checked out
+side by side, and `.github/workflows/parity.yml` compares them in CI. Change both copies in
+the same window.
+
 ## Project structure
 
 ```
