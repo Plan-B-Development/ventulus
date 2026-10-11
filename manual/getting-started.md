@@ -133,7 +133,14 @@ sudo pacman -U ./ventulusd-*.pkg.tar.zst ./ventulus-*.pkg.tar.zst
 ```
 
 Upgrading then means repeating those commands — which is the chore the
-repository above exists to remove.
+repository above exists to remove. Each package carries a keyless
+[Sigstore](https://www.sigstore.dev/) build provenance attestation. To check it,
+run these after the downloads and before the `pacman -U` line:
+
+```bash
+gh attestation verify ./ventulusd-*.pkg.tar.zst --repo Plan-B-Development/ventulusd
+gh attestation verify ./ventulus-*.pkg.tar.zst  --repo Plan-B-Development/ventulus
+```
 
 ### From Source
 

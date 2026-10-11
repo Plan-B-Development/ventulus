@@ -203,7 +203,7 @@ output is version-dependent, and `mutmut`'s floor is 3.6 because 3.5.0 raises on
 | `~/.config/ventulus/profiles/` | Local profile draft cache (daemon holds the canonical copies) |
 | `~/.config/ventulus/themes/` | Custom themes |
 
-Daemon configuration: see the [daemon repo](https://github.com/Plan-B-Development/ventulusd) and the [Operations Guide](https://github.com/Plan-B-Development/ventulus/blob/main/docs/18_Operations_Guide.md).
+Daemon configuration, the service and its troubleshooting: see the daemon's [User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md).
 
 ## Architecture
 
