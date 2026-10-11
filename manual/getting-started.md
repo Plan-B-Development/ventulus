@@ -2,11 +2,9 @@
 
 ## What You Need
 
-Ventulus requires:
-
-- **Linux** with Python 3.12 or newer
-- **ventulusd** running as a systemd service (provides the hardware interface)
-- A supported fan controller (OpenFan Controller, motherboard hwmon headers, or AMD GPU)
+- **Linux**, with Python 3.12 or newer. The packages are built for Arch Linux and CachyOS (x86_64).
+- **ventulusd**, the service that does the hardware work, running under systemd. Installing `ventulus` pulls it in.
+- A supported fan controller: an OpenFan Controller, motherboard fan headers, or an AMD GPU.
 
 The GUI never accesses hardware directly. All reads and writes go through the daemon's API over a local Unix socket.
 
@@ -34,69 +32,32 @@ A cooler with no mainline kernel driver — most USB coolers not listed here —
 visible to Ventulus. Plugging its pump into a motherboard header, where the cooler
 allows it, is the usual way round that.
 
-### Daemon prerequisites
+### Drivers and kernel settings
 
-The daemon has its own prerequisites — kernel modules for your motherboard's
-Super I/O chip, possibly an AUR DKMS driver on newer Gigabyte / MSI / ASRock
-boards (2022+), and (for RDNA3+ AMD GPUs) the kernel parameter
-`amdgpu.ppfeaturemask=0xffffffff`. See the
-[daemon prerequisites guide](https://github.com/Plan-B-Development/ventulusd#prerequisites)
-before installing the daemon — it covers BIOS settings, kernel modules,
-and per-bootloader steps for the kernel parameter.
+The package loads the common motherboard sensor drivers for you, so many machines
+need nothing more. Two cases do:
 
-If you have already installed the daemon, the quickest way to discover
-what your specific system needs is to launch the GUI and open the
-**System State** page, which inspects your hardware and recommends the exact
-AUR packages or kernel parameters required; the **Hardware** page's readiness
-checklist gives the daemon's own go/no-go answer beside it.
+- Newer Gigabyte, MSI and some ASRock boards (2022 and later) need an out-of-tree
+  driver, built with DKMS from the AUR.
+- An AMD RX 7000 or RX 9000 needs the kernel parameter
+  `amdgpu.ppfeaturemask=0xffffffff` before its fan can be controlled.
 
-For the complete ordered path — install → verify sensors → readiness check →
-drivers/BIOS/GPU branch → verify control → first profile — follow the
-[Setup Checklist](setup-checklist.md).
-
-New to Linux and told you need a driver? The [Driver Setup](driver-setup.md)
-page of this manual is a copy-paste beginner walkthrough — identify the
-chip, install the right DKMS package, verify it works, and roll it all
-back if needed.
-
-Want the bigger picture first? [Understanding Motherboard Fan Control](understanding-fan-control.md)
-is a plain-English primer on how Linux controls motherboard fans — hwmon,
-Super I/O chips, drivers, and BIOS settings — and why each setup step is
-asked of you. Using an [OpenFan Controller](openfan-controller.md)? That
-USB fan controller has its own page covering detection, permissions, and
-troubleshooting.
+You do not have to work this out first. Install, launch Ventulus, and the
+**System State** and **Hardware** pages name your chips and say exactly which
+driver or setting your machine needs. [Driver Setup](driver-setup.md) has the
+copy-paste steps for both cases, including each bootloader and how to undo it
+all. The [Setup Checklist](setup-checklist.md) takes you through the whole path in
+order, from install to your first profile, and
+[Understanding Motherboard Fan Control](understanding-fan-control.md) explains
+why each step is needed.
 
 ## Installation
 
-### Arch Linux — signed pacman repository (recommended)
+Ventulus is packaged for Arch Linux and CachyOS (x86_64). The signed pacman
+repository is the recommended route: set it up once, and both packages then
+upgrade with your normal `sudo pacman -Syu`.
 
-Set it up once; both packages then upgrade with your normal `sudo pacman -Syu`.
-
-#### The easy way: the bootstrap script
-
-There is a signed script that does the whole setup for you. It trusts the signing
-key (checking the fingerprint first), adds the repository, installs both packages
-and enables the daemon. It is safe to re-run.
-
-Verify its signature before running it — that is the point of signing it, and the
-step is what stops a tampered script from being the thing that installs your
-system packages:
-
-```bash
-base=https://github.com/Plan-B-Development/pacman-repo/releases/download/repo
-curl -fsSLO "$base/bootstrap.sh"
-curl -fsSLO "$base/bootstrap.sh.sig"
-curl -fsSL https://raw.githubusercontent.com/Plan-B-Development/pacman-repo/main/keys/ventulus.gpg | gpg --import
-gpg --verify bootstrap.sh.sig bootstrap.sh   # expect 4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA
-less bootstrap.sh                            # read it — you are about to run it as root
-bash ./bootstrap.sh
-```
-
-The install is a full `sudo pacman -Syu` and asks you to confirm the transaction
-once, so it may upgrade more than ventulus. If you would rather see every step,
-use the manual path below — the script does exactly the same things.
-
-#### By hand
+### The signed pacman repository
 
 ```bash
 # 1. trust the signing key
@@ -118,45 +79,76 @@ sudo systemctl enable --now ventulusd
 ```
 
 `SigLevel = Required` means pacman refuses any package or database not signed by
-that key. Details, upgrade and removal instructions:
-[Plan-B-Development/pacman-repo](https://github.com/Plan-B-Development/pacman-repo).
+that key. The [pacman-repo README](https://github.com/Plan-B-Development/pacman-repo)
+covers upgrading and removing it. A machine with no desktop needs only the daemon:
+install `ventulusd` instead of `ventulus` in step 3.
 
-### One-off install, without touching `pacman.conf`
+### Or with the bootstrap script
 
-Every release also attaches the same clean-room-built package the CI pipeline
-verifies:
+A signed script does the same setup in one step. It trusts the signing key
+(checking the fingerprint first), adds the repository, installs both packages and
+enables the daemon, and it is safe to re-run. Verify its signature before you run
+it: that check is what stops a tampered script from installing your system
+packages.
+
+```bash
+base=https://github.com/Plan-B-Development/pacman-repo/releases/download/repo
+curl -fsSLO "$base/bootstrap.sh"
+curl -fsSLO "$base/bootstrap.sh.sig"
+curl -fsSL https://raw.githubusercontent.com/Plan-B-Development/pacman-repo/main/keys/ventulus.gpg | gpg --import
+gpg --verify bootstrap.sh.sig bootstrap.sh   # expect 4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA
+less bootstrap.sh                            # read it — you are about to run it as root
+bash ./bootstrap.sh
+```
+
+The install is a full `sudo pacman -Syu` and asks you to confirm the transaction
+once, so it may upgrade more than Ventulus.
+
+### One-off install from a release
+
+To install without touching `pacman.conf`, download the packages attached to each
+release. They are the same clean-room-built packages the CI pipeline verifies, and
+each carries a keyless [Sigstore](https://www.sigstore.dev/) build provenance
+attestation that you can check before installing:
 
 ```bash
 gh release download --repo Plan-B-Development/ventulusd --pattern '*.pkg.tar.zst'
 gh release download --repo Plan-B-Development/ventulus    --pattern '*.pkg.tar.zst'
-sudo pacman -U ./ventulusd-*.pkg.tar.zst ./ventulus-*.pkg.tar.zst
-```
-
-Upgrading then means repeating those commands — which is the chore the
-repository above exists to remove. Each package carries a keyless
-[Sigstore](https://www.sigstore.dev/) build provenance attestation. To check it,
-run these after the downloads and before the `pacman -U` line:
-
-```bash
 gh attestation verify ./ventulusd-*.pkg.tar.zst --repo Plan-B-Development/ventulusd
 gh attestation verify ./ventulus-*.pkg.tar.zst  --repo Plan-B-Development/ventulus
+sudo pacman -U ./ventulusd-*.pkg.tar.zst ./ventulus-*.pkg.tar.zst
+sudo systemctl enable --now ventulusd
 ```
 
-### From Source
+Upgrading then means repeating the downloads, which is the chore the repository
+exists to remove.
+
+### Build the packages yourself
+
+To avoid trusting a prebuilt binary, build both packages from their `PKGBUILD`s.
+Build the daemon first, because the GUI package depends on it:
 
 ```bash
+git clone https://github.com/Plan-B-Development/ventulusd.git
+(cd ventulusd/packaging && makepkg -si)
 git clone https://github.com/Plan-B-Development/ventulus.git
-cd ventulus
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+(cd ventulus/packaging && makepkg -si)
+sudo systemctl enable --now ventulusd
 ```
 
-Arch and CachyOS refuse a `pip install` outside a virtual environment (their Python
-is "externally managed", PEP 668), so the venv is not optional there. The
-`ventulus` command then exists only inside it: activate the venv first, or
-run `.venv/bin/ventulus`. A source install does not include the daemon —
-install `ventulusd` as above.
+`makepkg` builds the tagged release from its source tarball, not the checkout you
+cloned. Each `PKGBUILD`'s `sha256sums` is `SKIP` rather than a pinned hash, so no
+`updpkgsums` step is needed. It cannot be a real hash: the tarball GitHub generates
+for a tag contains that `PKGBUILD`, so writing a sum into it changes the archive the
+sum pins. `makepkg` therefore trusts the HTTPS fetch from the repository's own tag.
+For an input that is pinned and verifiable, use the release packages above and check
+their Sigstore attestations.
+
+### Running from a source checkout
+
+To run the GUI from a checkout, for development, see
+[CONTRIBUTING](https://github.com/Plan-B-Development/ventulus/blob/main/CONTRIBUTING.md#setup).
+A checkout does not include the daemon; install `ventulusd` as above.
 
 ## First Launch
 
@@ -170,6 +162,16 @@ On first launch, Ventulus will:
 2. If the daemon is reachable, fetch hardware capabilities and begin polling
 3. If the daemon is not reachable, show a "Disconnected" state (or enter demo mode if configured)
 4. Open the **Dashboard** page
+
+If it stays **Disconnected**, check that the daemon is running
+(`systemctl is-active ventulusd` should print `active`) and that its socket exists
+(`ls -la /run/ventulus/ventulus.sock`). The daemon's
+[User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md#troubleshooting)
+covers a daemon that will not start.
+
+Applying a profile hands it to the daemon, which saves your choice: it keeps
+running after you close Ventulus and comes back after a reboot. The
+[Setup Checklist](setup-checklist.md) ends with your first one.
 
 ### Demo Mode
 
@@ -223,7 +225,7 @@ Three strips frame every page:
 
 Two banners can appear across the top of the window when the GUI and the daemon do not fit together:
 
-- **"Daemon upgrade required"** — the daemon is older than 2.0.0, which this GUI cannot control, so the GUI stands down. Upgrade `ventulusd`.
+- **"Daemon upgrade required"** — the daemon is too old for this GUI to control, so the GUI stands down. Upgrade `ventulusd`.
 - **"This GUI is older than the daemon supports"** — the daemon declares a minimum GUI version above this one. Fan control is unaffected — the daemon drives the fans itself — but some screens may not show everything the daemon can do. Upgrade `ventulus`.
 
 ### Keyboard shortcuts

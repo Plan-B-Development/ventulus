@@ -1,72 +1,53 @@
-# Ventulus GUI
+# Ventulus
 
 *Formerly Control-OFC (`control-ofc-gui`).*
 
 **Latest release:** v5.0.0 — 2026-10-10. Pairs with `ventulusd` ≥ v3.0.0; version numbers carry on from Control-OFC. Individual features gate on newer daemons and say so in the app when one is missing.
 
-Desktop fan control interface for Linux. Communicates with the [`ventulusd`](https://github.com/Plan-B-Development/ventulusd) service to monitor temperatures, manage fan speeds, and apply custom fan curves.
+Ventulus is a fan control app for Linux desktops. You decide how each group of fans
+should respond to temperature; a background service, [`ventulusd`](https://github.com/Plan-B-Development/ventulusd),
+runs those curves and keeps the machine safe whether or not the app is open. This
+repository is the desktop app, `ventulus`.
 
 ![Dashboard](https://raw.githubusercontent.com/Plan-B-Development/ventulus/main/screenshots/auto/01_dashboard.png)
 
-## What is Ventulus?
+## What it does
 
-Ventulus keeps your computer quiet and cool by managing its fans for you. Instead of fans that are always loud or always guessing, you tell Ventulus how each fan should respond to temperature — and it handles the rest, automatically, in the background.
+- **Fan curves and profiles.** Seven curve types, from a simple ramp to a mix of
+  several sensors or one group of fans following another, grouped into profiles
+  you switch between: a quiet one for the evening, a louder one for games.
+- **One place for every fan.** An OpenFan Controller, the fan headers on your
+  motherboard, and the fan on an AMD RX 7000 or RX 9000 card. NVIDIA and Intel Arc
+  fans are shown but cannot be driven.
+- **Liquid coolers.** **Configure AIO** sets up a pump and its radiator fans in
+  one step, and makes sure the pump is never stopped or run below its safe speed.
+- **Finds out what your hardware needs.** The **System State** and **Hardware**
+  pages name your board's fan chips, the driver each one needs, and whether fan
+  control actually works.
+- **Tests your fans.** Fan identification, per-header control tests, and a
+  **PWM Test Report** that measures how every fan responds.
+- **Demo mode** (`ventulus --demo`) shows the whole app with simulated hardware.
 
-This is the **desktop app** (`ventulus`). It pairs with a small background service (`ventulusd`) that does the actual hardware work: the app is where you see what's happening and set up how your fans behave; the service keeps your fans controlled even when the app is closed.
+## Supported hardware
 
-Ventulus controls fans in a few different places, and it helps to know which one you have:
-
-- **OpenFan Controller** — a USB fan controller you plug fans into. Full control. → [OpenFan Controller guide](manual/openfan-controller.md)
-- **Motherboard fan headers** — the fan connectors on your motherboard, reached through Linux's hwmon interface. Full control on most boards; some need a driver and/or one BIOS setting first. → [Understanding Motherboard Fan Control](manual/understanding-fan-control.md)
-- **AMD GPU fans** — the fan on a discrete AMD graphics card. Full control (RDNA3+ cards need a one-time kernel setting).
-- **Intel Arc GPU fans** — **monitor only.** Ventulus shows their temperature and RPM, but Intel's firmware owns the fan and no Linux tool can set its speed.
-- **NVIDIA GPU fans** — **monitor only.** Ventulus shows their temperature and RPM (via the open `nouveau` driver or NVIDIA's NVML), but the fan is not driven through this daemon.
-
-Just curious, or have no hardware yet? Explore the whole app with **demo mode** (`ventulus --demo`) — no daemon or hardware required.
-
-## Features
-
-- **Dashboard** — real-time sensor temperatures, fan RPM, active profile, system health with per-sensor freshness indicators; a dual-axis telemetry chart with latest-value markers and a hover tooltip
-- **Controls** — profile switching, seven curve types (graph, stepped, linear, flat, trigger, plus mix/sync composites), fan roles, manual override; drag-resizable cards that snap to a shared grid (double-click the grip to reset)
-- **Multi-source fan control** — OpenFan Controller channels, motherboard hwmon headers (daemon-managed), and AMD discrete GPU fans (RX 7000/9000, PMFW `fan_curve`; older cards can be tested and reset but are not profile-driven), with a one-click **Dedicate GPU Fan** setup for true 0-RPM idle when the GPU is cool
-- **GPU monitoring** — AMD, Intel Arc, and NVIDIA discrete GPU temperatures and fan RPM (Intel Arc and NVIDIA fans are read-only — the GPU firmware owns them)
-- **Settings** — GUI preferences, daemon runtime config, full theme editor with contrast checking, import/export
-- **Overview · System State · Hardware · Logs** — connection health, subsystem status, 8-column sensor table, Test PWM Control / Test GPU Fan Control, Restore GPU Fan to Automatic, hardware rescan, hardware-readiness reporting, support bundle export
-- **PWM Test Report** — a guided test of every fan channel (control, tach pairing, a full PWM sweep, stall probing) that saves a shareable report of how your hardware responds
-- **Fan Wizard** — guided fan identification and labelling
-- **Demo mode** — full UI without hardware (`--demo`)
-
-## Which path should I follow?
-
-| Your situation | Start here |
+| Hardware | Support |
 |---|---|
-| **I have an OpenFan Controller** | [OpenFan Controller guide](manual/openfan-controller.md) — plug it in and it auto-detects; then the [Setup Checklist](manual/setup-checklist.md) for profiles |
-| **I want to control my motherboard fans** | [Setup Checklist](manual/setup-checklist.md) for the ordered path, [Understanding Motherboard Fan Control](manual/understanding-fan-control.md) for the "why", and [Driver Setup](manual/driver-setup.md) if your board needs a driver |
-| **I want to control an AMD GPU fan** | [Setup Checklist](manual/setup-checklist.md), then [Driver Setup — AMD GPU prerequisite](manual/driver-setup.md#amd-gpu-fan-control-prerequisite-rdna3) for the one-time kernel setting RDNA3+ cards need |
-| **I only want to try the GUI in demo mode** | `ventulus --demo` — the full interface with simulated hardware, no daemon required ([Getting Started → Demo Mode](manual/getting-started.md#demo-mode)) |
+| OpenFan Controller (USB) | Full control |
+| Motherboard fan headers | Full control on most boards; newer Gigabyte, MSI and some ASRock boards need a driver installed first |
+| AMD GPU fans, RX 7000 / RX 9000 | Full control after a one-time kernel setting |
+| AMD GPU fans, RX 6000 and older | Monitored; the fan can be tested and reset |
+| Liquid coolers with a Linux driver (NZXT Kraken, Aquacomputer) | Pump and fans where the driver allows it, plus coolant temperature |
+| NVIDIA and Intel Arc GPU fans | Monitor only |
+
+[Getting Started](manual/getting-started.md#supported-coolers-and-controllers) lists
+coolers model by model, and the [Hardware Compatibility](docs/19_Hardware_Compatibility.md)
+guide covers chips and boards.
 
 ## Install
 
-**Signed pacman repository (recommended).** Set it up once; both packages then
-upgrade with your normal `sudo pacman -Syu`. Arch / x86_64.
-
-**Bootstrap script (easiest).** Download it, verify its signature, read it, run
-it. It trusts the signing key (checking the fingerprint first), adds the
-repository, installs both packages, and enables the daemon — and it is safe to
-re-run. The install is a full `pacman -Syu` and asks you to confirm the
-transaction once, so it may upgrade more than ventulus.
-
-```bash
-base=https://github.com/Plan-B-Development/pacman-repo/releases/download/repo
-curl -fsSLO "$base/bootstrap.sh"
-curl -fsSLO "$base/bootstrap.sh.sig"
-curl -fsSL https://raw.githubusercontent.com/Plan-B-Development/pacman-repo/main/keys/ventulus.gpg | gpg --import
-gpg --verify bootstrap.sh.sig bootstrap.sh   # expect 4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA
-less bootstrap.sh
-bash ./bootstrap.sh
-```
-
-**Or by hand:**
+Ventulus is packaged for Arch Linux and CachyOS (x86_64) in a signed pacman
+repository. Add it once, and both packages then upgrade with your normal
+`sudo pacman -Syu`:
 
 ```bash
 # 1. trust the signing key
@@ -87,159 +68,55 @@ sudo pacman -Syu ventulus
 sudo systemctl enable --now ventulusd
 ```
 
-`SigLevel = Required` means pacman refuses any package or database not signed by
-that key. Details, upgrade and removal instructions:
-[Plan-B-Development/pacman-repo](https://github.com/Plan-B-Development/pacman-repo).
+[Getting Started](manual/getting-started.md#installation) also has a signed script
+that does all of this in one step, a one-off install from a release, and building
+the packages yourself.
 
-**One-off install without touching `pacman.conf`:** every release also attaches
-the same clean-room-built package the CI pipeline verifies.
+## Quick start
 
-```bash
-# Both packages in one transaction — the GUI depends on the daemon
-gh release download --repo Plan-B-Development/ventulusd --pattern '*.pkg.tar.zst'
-gh release download --repo Plan-B-Development/ventulus    --pattern '*.pkg.tar.zst'
-sudo pacman -U ./ventulusd-*.pkg.tar.zst ./ventulus-*.pkg.tar.zst
-```
+1. Check the daemon is running: `systemctl is-active ventulusd`.
+2. Start the app: `ventulus`.
+3. Follow the [Setup Checklist](manual/setup-checklist.md). It checks your sensors,
+   tells you whether your board needs a driver, confirms that fan control works,
+   and ends with your first profile.
 
-Upgrading then means repeating those commands — which is the chore the
-repository above exists to remove. Each package additionally carries a keyless
-[Sigstore](https://www.sigstore.dev/) build provenance attestation:
+## How it fits together
 
-```bash
-gh attestation verify ./ventulus-*.pkg.tar.zst \
-  --repo Plan-B-Development/ventulus
-```
-
-**Build the package yourself** from the in-repo `PKGBUILD` instead — same
-result, and it does not trust a prebuilt binary:
-
-```bash
-git clone https://github.com/Plan-B-Development/ventulus.git
-cd ventulus/packaging
-makepkg -si
-```
-
-> The in-repo `sha256sums` is `SKIP` rather than a pinned hash, so no
-> `updpkgsums` step is needed. It cannot be a real hash: the tarball GitHub
-> generates for a tag *contains* that `PKGBUILD`, so writing a sum into it
-> changes the archive the sum is pinning. `makepkg` therefore trusts the HTTPS
-> fetch from this repository's own tag. For a build whose input is pinned and
-> verifiable, use the release asset and check its Sigstore attestation with the
-> `gh attestation verify` command above.
-
-**From source (development install):**
-
-```bash
-git clone https://github.com/Plan-B-Development/ventulus.git
-cd ventulus
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-```
-
-## Quick Start
-
-```bash
-# 1. Ensure daemon is running
-systemctl is-active ventulusd
-
-# 2. Launch the GUI
-ventulus
-
-# 3. Or try demo mode (no daemon required)
-ventulus --demo
-```
-
-> **First-time daemon setup?** The daemon has its own prerequisites — kernel
-> modules for your motherboard's Super I/O chip, possibly an AUR DKMS driver
-> on newer Gigabyte / MSI / ASRock boards (2022+), and a kernel parameter
-> for RDNA3+ AMD GPU fan control. Follow the ordered
-> [Setup Checklist](manual/setup-checklist.md), see the
-> [daemon prerequisites guide](https://github.com/Plan-B-Development/ventulusd#prerequisites),
-> or open the **Hardware** page in the GUI after install — its Hardware
-> Readiness report identifies your chip and recommends the exact
-> AUR package.
-
-## CLI
-
-```
-ventulus [OPTIONS]
-
-Options:
-  --socket <path>   Daemon socket path (default: /run/ventulus/ventulus.sock)
-  --demo            Run in demo mode with simulated hardware
-```
-
-## Requirements
-
-System:
-- Python >= 3.12 (developed on 3.14)
-- Linux (primary target: Arch Linux / CachyOS, KDE Plasma)
-- A running `ventulusd` instance (or use `--demo`)
-- `hicolor-icon-theme` (for the application icon to be picked up by launchers)
-
-Python runtime dependencies (resolved automatically by `pip install` or
-the Arch package — listed here for transparency):
-- `PySide6 >= 6.6` — Qt6 bindings (UI toolkit)
-- `httpx >= 0.27` — HTTP client used for the daemon's Unix-socket API
-- `pyqtgraph >= 0.14` — chart rendering (timeline + curve editor)
-- `numpy >= 2.0` — numerical helpers behind chart maths
-- `colorama >= 0.4` — required transitively at `import pyqtgraph` time;
-  pyqtgraph imports it unconditionally even on Linux
-
-Development extras (`pip install -e ".[dev]"`):
-- `pytest >= 8.0`, `pytest-qt >= 4.3`, `pytest-timeout >= 2.3`, `pytest-cov >= 5`,
-  `ruff >= 0.15.20, < 0.16`, `pip-audit >= 2.7`, `vulture >= 2.16`, `mutmut >= 3.6`,
-  `pyyaml >= 6`
-
-Two bounds are deliberate, not lazy: `ruff` is **upper**-bounded because a formatter's
-output is version-dependent, and `mutmut`'s floor is 3.6 because 3.5.0 raises on Python
-3.14. `pyproject.toml` explains both at the pin and is the source of record.
-
-## Configuration
-
-| Location | Contents |
-|----------|----------|
-| `~/.config/ventulus/app_settings.json` | GUI preferences |
-| `~/.config/ventulus/profiles/` | Local profile draft cache (daemon holds the canonical copies) |
-| `~/.config/ventulus/themes/` | Custom themes |
-
-Daemon configuration, the service and its troubleshooting: see the daemon's [User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md).
-
-## Architecture
-
-The GUI is a **daemon API client only**. All hardware access goes through the daemon's HTTP-over-Unix-socket API.
-
-As of **2.0.0** the daemon owns all runtime control — it evaluates curves and is the sole writer of every fan backend. The GUI authors profiles, polls, and renders; it never writes PWM.
-
-| Owned by GUI | Owned by daemon |
-|-------------|----------------|
-| Profile authoring + validation UX | Fan curve evaluation + all PWM writes |
-| Theme / settings / alias persistence | Hardware access (hwmon, serial, GPU PMFW) |
-| Local profile draft cache | Profile storage of record + thermal safety |
-| User-facing presentation | Hwmon lease, sensor polling, socket/IPC |
-
-See the [API contract](https://github.com/Plan-B-Development/ventulus/blob/main/docs/08_API_Integration_Contract.md) for details.
+The app never touches hardware. It talks only to `ventulusd`, through an HTTP API
+on the Unix socket `/run/ventulus/ventulus.sock`. The daemon evaluates the active
+profile once a second, writes every fan, and owns thermal safety, so closing or
+crashing the app changes nothing about cooling. The app is where you edit
+profiles, see what the daemon reports, and run tests through it.
 
 ## Documentation
 
-- **[User Manual](manual/README.md)** — installation, features, and usage guide
-- **[Setup Checklist](manual/setup-checklist.md)** — ordered path from fresh install to verified sensors and fan control
-- **[Hardware Troubleshooting](manual/hardware-troubleshooting.md)** — the System State health report, fan tests, vendor quirks
-- **[OpenFan Controller](manual/openfan-controller.md)** — the OpenFan USB fan controller: detection, serial access, channels, profiles, and troubleshooting
-- **[Understanding Motherboard Fan Control](manual/understanding-fan-control.md)** — plain-English primer on hwmon, sysfs, Super I/O, and PWM, and why drivers/BIOS settings matter
-- **[Hardware Compatibility](docs/19_Hardware_Compatibility.md)** — chip support matrix, kernel drivers, ACPI conflicts
-- **[AMD Motherboard Fan Control Guide](docs/21_AMD_Motherboard_Fan_Control_Guide.md)** — vendor-by-vendor BIOS notes (Gigabyte, ASUS, MSI, ASRock)
-- **[Intel Motherboard Fan Control Guide](docs/23_Intel_Motherboard_Fan_Control_Guide.md)** — Intel LGA1700/1851 Super-I/O fan control, per-vendor notes
-- **[Sensor Interpretation Guide](docs/20_Sensor_Interpretation_Guide.md)** — what each sensor name means and which to trust
-- **[AMD Sensor Interpretation Deep Dive](docs/22_AMD_Sensor_Interpretation_Deep_Dive.md)** — Tctl/Tdie, edge/junction, and common AMD-specific traps
-- **[API Contract](https://github.com/Plan-B-Development/ventulus/blob/main/docs/08_API_Integration_Contract.md)** — daemon endpoint reference
-- **[Changelog](CHANGELOG.md)** — version history
-- **[Contributing](https://github.com/Plan-B-Development/ventulus/blob/main/CONTRIBUTING.md)** — build, test, and PR guidelines
+**User manual** ([contents](manual/README.md)):
+[Getting Started](manual/getting-started.md) ·
+[Setup Checklist](manual/setup-checklist.md) ·
+[Understanding Motherboard Fan Control](manual/understanding-fan-control.md) ·
+[Driver Setup](manual/driver-setup.md) ·
+[OpenFan Controller](manual/openfan-controller.md) ·
+[Hardware Troubleshooting](manual/hardware-troubleshooting.md)
 
-## Contributing
+**Hardware reference:**
 
-See [CONTRIBUTING.md](https://github.com/Plan-B-Development/ventulus/blob/main/CONTRIBUTING.md) for build instructions, quality gates, and PR guidelines.
+- [Hardware Compatibility](docs/19_Hardware_Compatibility.md): chips, drivers and boards
+- [Sensor Interpretation Guide](docs/20_Sensor_Interpretation_Guide.md): what each sensor name means and which to trust
+- [AMD Motherboard Fan Control Guide](docs/21_AMD_Motherboard_Fan_Control_Guide.md) and
+  [Intel Motherboard Fan Control Guide](docs/23_Intel_Motherboard_Fan_Control_Guide.md): vendor-by-vendor notes
+- [AMD Sensor Interpretation Deep Dive](docs/22_AMD_Sensor_Interpretation_Deep_Dive.md): Tctl, Tdie, edge and junction
+- [Cooling Hardware Readiness Guide](docs/24_Cooling_Hardware_Readiness_Guide.md): what each item on the Hardware page's readiness checklist means, and how to fix it
+
+**Daemon:** the [ventulusd README](https://github.com/Plan-B-Development/ventulusd) and
+its [User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md)
+(configuration, the service, safety, troubleshooting).
+
+**For contributors:** [CONTRIBUTING](https://github.com/Plan-B-Development/ventulus/blob/main/CONTRIBUTING.md) ·
+[API contract](https://github.com/Plan-B-Development/ventulus/blob/main/docs/08_API_Integration_Contract.md) ·
+[GPU support rules](https://github.com/Plan-B-Development/ventulus/blob/main/docs/25_GPU_Support_Rules.md) ·
+[Changelog](CHANGELOG.md) ·
+[Security policy](https://github.com/Plan-B-Development/ventulus/blob/main/SECURITY.md)
 
 ## License
 
-MIT
+MIT. Third-party notices are in [NOTICE.md](https://github.com/Plan-B-Development/ventulus/blob/main/NOTICE.md).

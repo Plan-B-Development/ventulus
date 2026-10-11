@@ -209,8 +209,8 @@ def test_release_attaches_package_files():
     files = release_step["with"].get("files")
     assert files and "pkg.tar.zst" in files, (
         "the Release step must attach the built *.pkg.tar.zst (DEC-239); "
-        f"got files={files!r}. Without it the AUR-free install path in README.md "
-        "is a dead link."
+        f"got files={files!r}. Without it the one-off install path in "
+        "manual/getting-started.md is a dead link."
     )
 
 
@@ -264,7 +264,8 @@ def test_release_attests_build_provenance_with_required_permissions():
 
     `actions/attest-build-provenance` fails at runtime without `id-token: write`
     (keyless Sigstore) and `attestations: write`. Dropping either turns the
-    documented `gh attestation verify` command in README.md into a lie.
+    documented `gh attestation verify` command in manual/getting-started.md
+    into a lie.
     """
     job = _release_workflow()["jobs"]["github-release"]
     attest = _step_using(job, "actions/attest-build-provenance")

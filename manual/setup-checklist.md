@@ -4,11 +4,12 @@ This page is the **ordered path** from a fresh install to verified, working fan 
 
 New to how Linux fan control works? [Understanding Motherboard Fan Control](understanding-fan-control.md) is a short, plain-English primer on the concepts this checklist puts into practice (hwmon, Super I/O chips, drivers, and BIOS settings). It is optional background — you can follow the steps below without it.
 
-> ## ⚠ Read this first
->
-> This checklist is **informational guidance only**. Some linked steps install third-party kernel modules, change firmware (UEFI/BIOS) settings, alter kernel boot parameters, or change fan behaviour — done incorrectly these can make a system unbootable, cause overheating, or damage hardware.
->
-> Everything here is provided **as-is, without warranty of any kind**. You proceed **at your own risk**; the Ventulus project and its contributors **accept no liability** for hardware, firmware, or data damage, boot failures, or any other consequence of following this guide (MIT License — see the LICENSE file shipped with the package). If anything conflicts with your hardware vendor's or distribution's documentation, **prefer theirs**.
+> **Before you start.** Some steps link to pages that install third-party kernel
+> modules, change UEFI/BIOS settings or kernel boot parameters, or change how fans
+> behave. Done wrong, these can stop the system booting or let it overheat.
+> [Driver Setup](driver-setup.md) says what each change risks and how to undo it.
+> Where this guide conflicts with your hardware vendor's or distribution's
+> documentation, prefer theirs. The manual's [notice](README.md) applies throughout.
 
 ## Step 0 — What "working" looks like
 
@@ -22,32 +23,10 @@ You are done when all of these are true:
 
 ## Step 1 — Install the daemon and GUI
 
-Add the signed `[ventulus]` pacman repository once, then install. The GUI pulls `ventulusd` in as a dependency, and both packages upgrade with your normal `sudo pacman -Syu` from then on.
-
-```bash
-# trust the signing key
-curl -fsSL https://raw.githubusercontent.com/Plan-B-Development/pacman-repo/main/keys/ventulus.gpg \
-  | sudo pacman-key --add -
-sudo pacman-key --lsign-key 4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA
-
-# add the repository — run once; `tee -a` would append a duplicate block
-grep -q '^\[ventulus\]' /etc/pacman.conf || sudo tee -a /etc/pacman.conf <<'EOF'
-
-[ventulus]
-SigLevel = Required
-Server = https://github.com/Plan-B-Development/pacman-repo/releases/download/repo
-EOF
-
-# install
-sudo pacman -Syu ventulus
-sudo systemctl enable --now ventulusd
-```
-
-A signed `bootstrap.sh` does all of the above in one step — download it, verify
-its signature against `4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA`, read it, run it.
-Full commands in [Getting Started](getting-started.md#the-easy-way-the-bootstrap-script).
-
-The one-off `pacman -U` alternative and the from-source path are in [Getting Started](getting-started.md). The daemon's own prerequisites table lives in the [daemon README](https://github.com/Plan-B-Development/ventulusd#prerequisites).
+Add the signed `[ventulus]` pacman repository, install `ventulus` (it pulls in
+`ventulusd`), and enable the daemon. [Getting Started](getting-started.md#installation)
+has the commands, a signed script that does it all in one step, and the other ways
+to install. From then on both packages upgrade with your normal `sudo pacman -Syu`.
 
 ## Step 2 — Verify sensors first
 
@@ -91,13 +70,13 @@ sudo systemctl disable --now fan2go.service          # fan2go
 
 Also worth knowing:
 
-- **LACT / CoreCtrl** (GPU tools): don't let them manage the fan of a GPU that Ventulus controls — pick one owner per device. From daemon 2.56.4, a GPU Ventulus has never driven is left alone when the daemon stops or restarts, so these tools can own it; daemon 2.56.3 and older put every AMD GPU back on its firmware curve whenever they stop. Once a profile has driven a GPU, the daemon puts that GPU back on its firmware curve when the profile stops naming it — deactivated, or switched to a profile without it (from daemon 3.0.0) — or when the daemon stops; **Restore GPU Fan to Automatic** hands it back straight away, and after that the daemon leaves it alone until a profile is next activated or the daemon restarts.
+- **LACT / CoreCtrl** (GPU tools): pick one owner for each GPU fan. A GPU that no Ventulus profile has driven is left alone, even when the daemon stops or restarts, so one of these tools can own it. Once a profile has driven a GPU, the daemon puts it back on its firmware curve when the profile stops naming it (deactivated, or switched to a profile without it) or when the daemon stops. **Restore GPU Fan to Automatic** hands it back at once, and the daemon then leaves it alone until a profile is next activated or the daemon restarts.
 - **`pwmconfig`** (lm_sensors' interactive prober) stops fans while it tests. Fine as a one-off diagnostic, but only run it while `ventulusd` is stopped.
 
 ## Step 6 — Verify control end-to-end
 
 1. On the **Hardware** page, under **Cooling Hardware**, press **Test Control** on a **non-critical chassis fan** header (not CPU or pump). *"PWM control is working correctly"* is the finish line; every other verdict comes with a tailored next step — see [the result table](hardware-troubleshooting.md#test-pwm-control). To test several headers in one run, use **PWM Test Report…** under **Hardware Diagnostics** on the same page.
-2. If you have an AMD GPU with a write path, run **Test GPU Fan Control** (daemon ≥ 1.11.0) from **Advanced actions** on the **System State** page — see [its result table](hardware-troubleshooting.md#test-gpu-fan-control).
+2. If you have an AMD GPU with a write path, run **Test GPU Fan Control** from **Advanced actions** on the **System State** page — see [its result table](hardware-troubleshooting.md#test-gpu-fan-control).
 
 ## Step 7 — Create your first profile
 
