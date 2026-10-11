@@ -213,7 +213,7 @@ frankcrawford/it87 [PR #120](https://github.com/frankcrawford/it87/pull/120)
 **rebuilding the DKMS module (`it87-dkms-git`) fixes the fan with no kernel parameter.**
 *Fallback for builds older than the merge:* set `options it87 mmio=off` instead.
 
-The ventulus daemon detects this case: when DMI matches
+`ventulusd` detects this case: when DMI matches
 a known dual-chip board but only one ITE chip enumerated, the
 System State page surfaces a warning banner with the exact
 remediation steps. See `21_AMD_Motherboard_Fan_Control_Guide.md` §

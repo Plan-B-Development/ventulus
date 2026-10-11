@@ -135,14 +135,6 @@ sudo pacman -U ./ventulusd-*.pkg.tar.zst ./ventulus-*.pkg.tar.zst
 Upgrading then means repeating those commands — which is the chore the
 repository above exists to remove.
 
-> **The AUR package is no longer updated.** `ventulus` was published to
-> the AUR through v2.34.0 and is frozen there. If you installed with
-> `paru -S ventulus`, either path above upgrades it in place — it is the
-> same package name, so pacman simply replaces the AUR copy. This applies to
-> *this* package only; the out-of-tree DKMS drivers on the
-> [Driver Setup](driver-setup.md) page are separate third-party AUR packages
-> and are still installed from the AUR.
-
 ### From Source
 
 ```bash

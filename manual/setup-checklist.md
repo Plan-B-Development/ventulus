@@ -47,7 +47,7 @@ A signed `bootstrap.sh` does all of the above in one step — download it, verif
 its signature against `4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA`, read it, run it.
 Full commands in [Getting Started](getting-started.md#the-easy-way-the-bootstrap-script).
 
-The one-off `pacman -U` alternative, the from-source path, and the note on the frozen AUR package are in [Getting Started](getting-started.md). The daemon's own prerequisites table lives in the [daemon README](https://github.com/Plan-B-Development/ventulusd#prerequisites).
+The one-off `pacman -U` alternative and the from-source path are in [Getting Started](getting-started.md). The daemon's own prerequisites table lives in the [daemon README](https://github.com/Plan-B-Development/ventulusd#prerequisites).
 
 ## Step 2 — Verify sensors first
 

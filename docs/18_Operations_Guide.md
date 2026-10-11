@@ -86,7 +86,8 @@ source for every value here; this is the summary an operator needs.
   It cannot reach an OpenFan channel, so after a crash those channels stay at their last
   duty until the daemon starts again.
 - **Reload.** `systemctl reload` sends `SIGHUP`, which re-reads the profile search
-  directories and the exit floor; everything else needs a restart (see below).
+  directories, the exit floor and the coolant limit; everything else needs a restart
+  (see below).
 
 ---
 
@@ -237,10 +238,10 @@ persisted change is not yet in effect (`restart_pending`). The GUI's
 | `ipc.socket_path` | **No — read-only** | A bad value locks every client out of the daemon |
 | `state.state_dir` | **No — read-only** | Moving it orphans `runtime.toml` and the profile store |
 
-**Everything except the profile search dirs and the exit floor takes effect only
-on restart.** Those two apply immediately (both via their API and on SIGHUP), which
-is why `GET /config` reports them with `requires_restart: false`; every other key is
-consumed once at startup:
+**Everything except the profile search dirs, the exit floor and the coolant limit
+takes effect only on restart.** Those three apply immediately (via their API and on
+SIGHUP), which is why `GET /config` reports them with `requires_restart: false`; every
+other key is consumed once at startup:
 ```bash
 sudo systemctl restart ventulusd
 ```
@@ -330,7 +331,7 @@ When using `--profile <name>`, the daemon searches (highest priority first):
 ## Permissions and groups
 
 ### hwmon sysfs access
-The daemon reads from and writes to the motherboard PWM nodes (`/sys/class/hwmon/hwmonN/pwmN`, which are symlinks resolving to `/sys/devices/...`). Running as root (via systemd) provides the necessary permissions, **and** the packaged unit's sandbox must expose the device tree for writing — `ReadWritePaths=/sys/devices` (daemon ≥ v2.5.2; see "Motherboard/GPU fans discovered but not responding" under Troubleshooting, DEC-199).
+The daemon reads from and writes to the motherboard PWM nodes (`/sys/class/hwmon/hwmonN/pwmN`, which are symlinks resolving to `/sys/devices/...`). Running as root (via systemd) provides the necessary permissions, **and** the packaged unit's sandbox must expose the device tree for writing — `ReadWritePaths=/sys/devices` (see "Motherboard/GPU fans discovered but not responding" under Troubleshooting).
 
 ### Serial device access
 The daemon runs as root, so no group membership gates its access to the serial device on any distribution, and Debian/Ubuntu need no `dialout` drop-in. What does limit it is the unit's `DeviceAllow=char-ttyACM rw` and `DeviceAllow=char-ttyUSB rw`: the service can open only `/dev/ttyACM*` and `/dev/ttyUSB*` nodes (a `/dev/serial/by-id/` link to one is fine). A controller on another kind of node needs a drop-in adding its device class, for example `DeviceAllow=char-ttyS rw`.
@@ -453,14 +454,9 @@ If a header or GPU fan appears in the dashboard but never changes speed, and the
 [WARN] hwmon write failed for hwmon:it8696:pwm1: … /sys/class/hwmon/hwmonN/pwm1_enable: Read-only file system (os error 30)
 ```
 
-then the packaged daemon is older than **v2.5.2**: its systemd sandbox carved out `/sys/class/hwmon` / `/sys/class/drm` (symlink directories) instead of the real device tree, so every fan write hit `EROFS` and the fans stayed in BIOS/PMFW automatic mode. **Upgrade the daemon package** — the fix sets `ReadWritePaths=/sys/devices` (DEC-199). If you cannot upgrade immediately, a systemd drop-in restores control:
-```bash
-sudo systemctl edit ventulusd
-#   [Service]
-#   ReadWritePaths=/sys/devices
-sudo systemctl daemon-reload && sudo systemctl restart ventulusd
-```
-If writes still fail **after** upgrading, the cause is hardware prerequisites rather than the sandbox — open the **Hardware** page, which detects a missing Super I/O driver, `acpi_enforce_resources=lax`, or `amdgpu.ppfeaturemask` and shows the exact fix.
+then the service's sandbox does not let it write the device tree. The packaged unit sets `ReadWritePaths=/sys/devices`, so look for a drop-in that overrides it (`systemctl cat ventulusd` shows every file in effect) and remove it, then `sudo systemctl daemon-reload && sudo systemctl restart ventulusd`.
+
+Without that journal line, the cause is a hardware prerequisite rather than the sandbox — open the **Hardware** page, which detects a missing Super I/O driver, `acpi_enforce_resources=lax`, or `amdgpu.ppfeaturemask` and shows the exact fix.
 
 ### A fan's duty keeps being changed back
 

@@ -526,9 +526,9 @@ latched the thermal emergency, and never released (release requires <= 80 C). Ev
 fan sat at 100% on a cold machine until the daemon restarted. The daemon now
 classifies the same chip+vendor+label as `mb`, so the channel never reaches the
 ladder. The same change also promotes the sources the kernel docs tell you to
-prefer. On every chip in `NUVOTON_PECI_TSI_CHIPS` (`hwmon/discovery.rs:201`), a
+prefer. On every chip in `NUVOTON_PECI_TSI_CHIPS` (`hwmon/discovery.rs`), a
 label containing `AMD TSI`, `TSI`, `PECI` or `CPU` classifies as `cpu`
-(`discovery.rs:263`), **unless it also contains `DIMM`**: nct6683's `PECI DIMM
+(`classify_chip`), **unless it also contains `DIMM`**: nct6683's `PECI DIMM
 0`–`3` are memory temperatures, and as `cpu` they entered the ladder's
 hottest-CPU reduce and, on a board with no k10temp/coretemp, stood in for a
 missing CPU and kept the no-sensor floor off. That list is the eleven nct6775-family chips plus
@@ -541,10 +541,10 @@ Nuvoton chip gave the thermal ladder no CPU input at all.
 **Those are two different chip lists, and they are different on purpose. Do not
 unify them.** The bogus-CPUTIN gate above requires all three: one of the eleven
 chips, an ASUS board vendor, and an exact `cputin` label
-(`is_known_bogus_cpu_sensor`, `discovery.rs:213`). The `PECI`/`TSI` promotion
+(`is_known_bogus_cpu_sensor`). The `PECI`/`TSI` promotion
 covers fourteen chips and is not vendor-gated at all. `PECI`/`TSI` is a CPU source
 on any board that wires it; only the claim that `CPUTIN` is disconnected is
-ASUS-specific. The bogus gate runs first (`discovery.rs:247`, before `:263`), so on
+ASUS-specific. `classify_chip` runs the bogus gate before its chip dispatch, so on
 an ASUS board `CPUTIN` is demoted before the promotion arm is reached. Widening the
 vendor-gated rule to every board would demote a real CPU sensor on every non-ASUS
 board carrying the same chip. That is the opposite fault, and the worse one. The

@@ -16,8 +16,8 @@ The **OpenFan Controller** (branded **OpenFAN**) is a USB fan controller that dr
 
 The OpenFan Controller connects to your PC over **USB**, where it appears as a serial port (a USB CDC-ACM device — `/dev/ttyACM*` on Linux). Ventulus reaches it through the daemon:
 
-- The **ventulusd** opens the serial port, polls each channel's RPM about once a second, and is the **only** component that sends speed commands to the controller.
-- The **ventulus** is a client: it shows the controller's fans and lets you label them, assign curves, and override speeds — but it never talks to the USB device directly.
+- The daemon, `ventulusd`, opens the serial port, polls each channel's RPM about once a second, and is the **only** component that sends speed commands to the controller.
+- The GUI, `ventulus`, is a client. It shows the controller's fans and lets you label them, assign curves and override speeds, but it never talks to the USB device directly.
 
 This is the same boundary as the rest of Ventulus: the daemon owns the hardware; the GUI sends intent. The OpenFan Controller offers up to **10 channels** (numbered 0–9); each populated channel appears as a fan you can monitor and control.
 
@@ -151,7 +151,7 @@ Then click **Read again** in the window. To remove it, delete `/etc/systemd/syst
 | Controller not detected | Daemon started before the device was plugged in, or a non-standard port | Plug in the controller, then use **Rescan Hardware** in the footer — no restart needed. Confirm the device exists with `ls /dev/ttyACM*`. If it only appears under a non-standard path, set `[serial] port` explicitly (see above), which also makes the daemon retry for longer at boot |
 | Detected, but no fans show RPM | Fans not connected to populated channels, or 3-pin fans with no tachometer | A `0` RPM on an empty or tach-less channel is normal. Connect a known-good 4-pin fan to confirm |
 | Worked, then stopped after unplug / replug | USB re-enumeration | The daemon detects the dropout and **auto-reconnects** — after 5 consecutive failed reads it tries again on a backoff that doubles up to 30 poll intervals — about 1 s up to 30 s at the default poll interval, and proportionally shorter if you have lowered it — and resumes when it reappears. Each try opens only your configured port, the controller's own device, and a serial device that has just appeared, so other USB-serial hardware is left alone. A pinned `by-id` path is tried first on every attempt |
-| Permission denied on the serial port | The service is not in the serial group (most likely on non-Arch distros) | Add the serial group via a systemd drop-in (see permissions above), then restart the daemon |
+| Permission denied on the serial port | The controller is on a device node the service may not open: only `/dev/ttyACM*` and `/dev/ttyUSB*` are allowed | Allow its device class with a `DeviceAllow=` drop-in (see [Serial / USB access](#serial--usb-access-permissions)), then restart the daemon |
 | *OpenFAN board not answering* warning | The board runs firmware Ventulus cannot talk to — such as the 2023 FW_01 build — or has hung | Update it from **Update OpenFAN Firmware…** (see [A board that does not answer](#updating-the-openfan-firmware)). If it has hung, press its **RESET** button, then **Rescan Hardware** in the footer |
 
 If the controller itself behaves oddly (the firmware's own behaviour, the on-device web UI, the hardware), that is a question for the upstream project — see the official links above. Installing a firmware release is covered in [Updating the OpenFAN firmware](#updating-the-openfan-firmware).

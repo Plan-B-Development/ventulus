@@ -70,7 +70,7 @@ ventulus --socket /tmp/ventulus.sock
 ## Testing
 
 ```bash
-# Full suite — see CHANGELOG.md for the current passing count
+# Full suite
 QT_QPA_PLATFORM=offscreen python -m pytest
 
 # Specific file

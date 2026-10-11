@@ -6,7 +6,7 @@ None of this applies to an [OpenFan Controller](openfan-controller.md) (a USB de
 
 ## The one-paragraph version
 
-Your motherboard's fan headers are driven by a small dedicated chip (the **Super I/O** chip, or sometimes the board's embedded controller). Linux talks to that chip through a kernel driver, which exposes each fan as a handful of plain-text files under a system called **hwmon**. Ventulus's daemon reads and writes those files for you. Most boards work out of the box; some newer ones need an extra driver loaded first, and most boards need one BIOS setting changed so the firmware stops fighting Linux for control. That is the whole story — the sections below just expand each part.
+Your motherboard's fan headers are driven by a small dedicated chip (the **Super I/O** chip, or sometimes the board's embedded controller). Linux talks to that chip through a kernel driver, which exposes each fan as a handful of plain-text files under a system called **hwmon**. Ventulus's daemon reads and writes those files for you. Many boards work out of the box. Some newer ones need an extra driver loaded first, and the BIOS fan settings are worth a check, because the firmware still runs the fans at boot. That is the whole story — the sections below just expand each part.
 
 ## What is hwmon?
 
@@ -86,7 +86,7 @@ These come up only on some systems, and the [Driver Setup](driver-setup.md) page
 
 ## How Ventulus removes the guesswork
 
-You do not have to discover any of the above by hand. By design, the **ventulusd** owns all hardware access — it reads your hwmon chips, evaluates fan curves, and is the **only** component that writes PWM. The **ventulus** is a client: it shows you what the daemon sees and lets you author profiles and run tests. The GUI never writes to a fan directly.
+You do not have to discover any of the above by hand. By design, the daemon, `ventulusd`, owns all hardware access: it reads your hwmon chips, evaluates fan curves, and is the **only** component that writes PWM. The GUI, `ventulus`, is a client. It shows you what the daemon sees and lets you author profiles and run tests. The GUI never writes to a fan directly.
 
 Four GUI features turn the concepts above into concrete answers:
 

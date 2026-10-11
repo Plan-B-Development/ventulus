@@ -247,8 +247,8 @@ echo 'options nct6687 fan_config=msi_alt1' | sudo tee /etc/modprobe.d/nct6687.co
 sudo modprobe -r nct6687 && sudo modprobe nct6687
 ```
 
-The ventulus System State page surfaces this guidance
-automatically on MSI boards with `board_name` containing `Z890`.
+The GUI's System State page surfaces this guidance
+automatically on MSI boards whose `board_name` contains `Z890`.
 
 ### Gigabyte LGA1700 (Z690 / Z790 AORUS)
 
