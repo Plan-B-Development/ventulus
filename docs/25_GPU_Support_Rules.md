@@ -170,4 +170,6 @@ misreported as controlled, or driven when it should not be.
 - GPU-only controls and the 0-RPM idle feature: DEC-221 (`fan_zero_rpm` is the lever;
   a 0% floor is not the same thing as 0 RPM).
 - GPU floor behaviour: DEC-119.
-- Role-aware floors and `member_label` (the CPU/pump 30% rule): DEC-095, DEC-162.
+- Role-aware floors and `member_label` (the CPU/pump 30% rule): DEC-095, DEC-162. A pump
+  on a motherboard header in DC mode gets 70% instead (DEC-443); neither floor applies to a
+  GPU fan.

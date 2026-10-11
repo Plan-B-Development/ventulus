@@ -780,6 +780,11 @@ flags pump/fan headers `is_aio`, and reports a dynamic `aio_hwmon` capability. *
 writability is asymmetric** — the GUI reflects the kernel's per-channel `is_writable` and never
 fakes control. **A coolant sensor is a safety input since daemon 3.0.0**: at or above
 the coolant limit (default 60 °C, settable 40–70) the daemon forces every fan and pump to 100 %.
+**Pump floors:** the daemon never drives a pump below 30 %, and never below 70 % on a
+motherboard header the kernel reports in DC (voltage) mode (`pwmN_mode` = 0, published by
+`nct6775` and a few older chips), because a voltage-driven pump stalls much higher in its
+range (DEC-443). The it87 driver publishes no `pwmN_mode`, so a pump on an it87 header keeps
+30 %. Where the table below says 30 %, a pump on a DC-mode header gets 70 %.
 
 | Driver (hwmon `name`) | Devices | Coolant temp | Pump/fan control |
 |---|---|---|---|

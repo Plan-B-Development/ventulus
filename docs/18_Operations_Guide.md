@@ -489,7 +489,9 @@ again or the command next changes. The manual's
 
 ## Safety behaviour
 
-The daemon enforces a single thermal safety rule (non-negotiable, not configurable):
+The daemon enforces these rules itself, whatever the GUI or the active profile asks for. None can be turned off; the only setting is the coolant limit.
+
+**CPU emergency**:
 - **Trigger**: hottest CPU temperature reaches the emergency limit. That limit is **per-machine** (DEC-308): 105°C is the floor and the fallback, raised to `min(CPU-reported design ceiling + 5°C, 115°C)` where the kernel publishes the ceiling (`tempN_crit`). `GET /diagnostics/hardware` reports the value in use — read it there, never assume 105
 - **Action**: Force every OpenFan channel and writable hwmon header the machine has to 100% PWM. GPU fans are excluded — there is no GPU emergency threshold; AMD PMFW firmware protects the GPU independently (DEC-130)
 - **Hold**: Until a fresh reading at or below 80°C. A CPU sensor that stops updating or disappears does not end it — the emergency stays at 100% while the daemon is blind (DEC-386)
@@ -498,6 +500,13 @@ The daemon enforces a single thermal safety rule (non-negotiable, not configurab
 - **Floors, not replacements** (DEC-307): every duty above is a floor over the active profile's output — each fan gets `max(commanded, forced)`, and only the 100% emergency also reaches a fan no control commands (DEC-382). The ladder can only ever raise a fan
 - **After a reconnect or resume**: the daemon treats each OpenFan channel's duty on the device as unknown until it next writes the channel (DEC-393, daemon ≥ 2.51.1), and remembers the duty it had (DEC-466, daemon ≥ 3.3.0). A channel whose control is skipped is put back at that duty on the next tick, and an emergency starting in that window gives it back afterwards. A channel whose duty was already unknown before the loss has nothing to be given back, so one no control commands stays at 100% when the emergency ends
 - **Visibility**: `GET /status` reports `thermal_state` (`normal` / `emergency` / `no_sensor_fallback`, and `recovery` from daemons before DEC-386); the GUI has no fan control to pause and only **shows** a poll-driven thermal-protection banner while protection is active (DEC-165, superseding the retired DEC-132 GUI stand-down)
+
+**Cooling-failure checks** (DEC-443). The CPU emergency sits above the CPU's own throttle point, so a stopped pump usually shows up as a CPU pinned at its ceiling, not as an emergency. These cover that gap:
+- **Coolant emergency**: when the hottest current coolant reading is at or above `safety.coolant_limit_c` (default 60 °C, 40–70, see the configuration table above), every fan and pump is forced to 100 % exactly as in the CPU emergency, until a current reading is 5 °C below the limit. A stale or vanished coolant sensor holds an emergency already under way and otherwise does nothing; a machine with no coolant sensor is unaffected. `thermal_state` is `emergency` for either cause, and `emergency_causes` on `GET /status` says which fired
+- **Pump stall response**: a pump in the active profile that the daemon has seen spinning, and that then reads 0 RPM for 10 s while commanded to 30 % or more, is driven to 100 % for 30 s. If it turns, it returns to its curve; if not, it stays at 100 %. A second stall in one run holds it at 100 % until the daemon restarts or a profile is activated. Reported in `pump_stalls[]` on `GET /status`
+- **Cooling advisory**: a CPU at or above its ceiling (its own `crit`, else 85 °C) for a minute while no fan or pump is commanded at 50 % or more raises `cpu_at_ceiling_low_cooling` in `advisories[]` on `GET /status`. It forces nothing
+
+**Pump floors**: a pump is never driven below 30 %, and a pump on a motherboard header the kernel reports in DC (voltage) mode (`pwmN_mode` = 0) never below 70 %, because a voltage-driven pump stalls much higher in its range (DEC-443). The 70 % floor applies wherever the pump floor does: curves, overrides, identify and every diagnostic. A header whose driver reports no mode (it87) keeps 30 %. A pump is never stopped.
 
 There are no per-*header* PWM floors: the daemon reports `min_pwm_percent: 0` for every hwmon header. The **role-aware minimum** is different. The GUI *bakes* a role-aware default into each control's `LogicalControl.minimum_pct` (30% for CPU/pump-labelled members, 20% for chassis/openfan, 0% for GPU-only — DEC-095), and as of 2.0.0 the **daemon enforces and backstops** it (DEC-162): a profile whose pump/CPU control sets `minimum_pct` below the hard 30% floor (`HARD_PUMP_CPU_FLOOR_PCT`) is rejected with `400 validation_error` (`FLOOR_TOO_LOW`), and the profile engine independently re-clamps every eval tick (`member_effective_floor` → `max(minimum_pct, 30%)`). So floor enforcement is **not** purely the GUI's responsibility — the daemon does refuse and re-floor on the role-aware minimum.
 
