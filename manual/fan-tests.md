@@ -77,7 +77,7 @@ it on every writable header in turn. The result is one of:
 | Result | Meaning |
 |--------|---------|
 | **PWM control is working correctly** | The write took effect and the RPM responded. The header is controllable from Linux |
-| **BIOS/EC reverted pwm_enable** | The board's firmware switched the header from manual back to automatic during the wait, so fan control is being overridden. This is the usual failure on Gigabyte / AORUS boards with Smart Fan 6. See the [AMD Motherboard Fan Control Guide § Gigabyte](../docs/21_AMD_Motherboard_Fan_Control_Guide.md) |
+| **BIOS/EC reverted pwm_enable** | The board's firmware switched the header from manual back to automatic during the wait, so fan control is being overridden. This is the usual failure on Gigabyte / AORUS boards with Smart Fan 6. See the [AMD Motherboard Fan Control Guide § Gigabyte](../docs/21_AMD_Motherboard_Fan_Control_Guide.md#gigabyte) |
 | **PWM value was clamped or ignored** | The write was accepted, but the duty the hardware reports back differs from the one written. Often a partial BIOS override |
 | **PWM accepted but RPM did not change** | The write took effect, but the fan did not respond. The header has nothing connected, the fan is stalled, or there is no tachometer to confirm |
 | **PWM accepted; RPM readback unavailable** | The write looks fine, but the board has no RPM reading for this header to confirm it |

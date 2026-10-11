@@ -1,7 +1,11 @@
-# 25 — GPU Support Rules
+# GPU Support Rules
 
-Detailed AMD GPU fan-control rules for this project. Read this file before changing
-anything under GPU discovery, GPU fan writes, PMFW handling, or GPU display naming.
+**For contributors.** These are the rules the GUI and daemon code follow for AMD GPU
+fan control. Read this file before changing GPU discovery, GPU fan writes, PMFW
+handling or GPU display naming. `DEC-` numbers refer to the project's decision log.
+For what users see, read the
+[Hardware Compatibility Guide](19_Hardware_Compatibility.md#amd-gpu-fan-control).
+
 Rules marked *(Safety-critical)* are the ones whose violation would let a GPU fan be
 misreported as controlled, or driven when it should not be.
 
@@ -29,8 +33,8 @@ misreported as controlled, or driven when it should not be.
   engine has ever driven it, so no profile controls these fans: `/capabilities`
   reports `fan_control_method: "hwmon_pwm"` with `fan_write_supported: false`, the
   GUI labels the fan "verify only", its picker will not assign it, and a control
-  bound to it is listed as `backend_unavailable` (DEC-445). Building an engine arm
-  for them is deferred work (`GPU-c`).
+  bound to it is listed as `backend_unavailable` (DEC-445). An engine path for them
+  is deferred.
 - **GPU fans are outside the thermal force, and keep following the profile through it.**
   Neither the 100 % emergency nor the 40 % no-sensor floor is ever written to a GPU fan
   (the GPU firmware owns its own thermal protection). On a forced tick the daemon still
@@ -71,8 +75,8 @@ misreported as controlled, or driven when it should not be.
     so `AmdGpuInfo::can_write_legacy_pwm` refuses every id in
     `is_rdna3_or_rdna4` (every RDNA3/RDNA4 id libdrm 2.4.134 lists), whatever
     files exist. An RDNA3/RDNA4 card's only write path is PMFW `fan_curve`; an id
-    missing from that list would be judged by file presence again (`DC-ci`). Until DEC-430 the daemon's own comments said RDNA3
-    lacked `pwm1_enable`; that was wrong, and this section was right.
+    missing from that list would be judged by file presence again, so keep the list
+    current with libdrm.
 - GPU fan writes use an imperative model (`set_static_speed` via a flat PMFW curve);
   no lease is required. The curve's lowest allowed duty is the card's own `OD_RANGE`
   minimum, read from `fan_curve` — board-specific (often around 15%; one R9700 reports
@@ -113,11 +117,10 @@ misreported as controlled, or driven when it should not be.
   those (DEC-435).** A card whose PMFW curve the daemon wrote (a profile's curve or a hardware
   verify) is named in a write-ahead record before the first write and reset on every stop path,
   including SIGKILL via `ExecStopPost`; a card it never wrote, or handed back itself with
-  `POST /gpu/{id}/fan/reset`, is not touched, so LACT or CoreCtrl can own it. This holds from
-  daemon 2.56.4; daemon 2.56.3 and older reset every AMD card at every stop.
+  `POST /gpu/{id}/fan/reset`, is not touched, so LACT or CoreCtrl can own it.
   *(Safety-critical.)*
 - **A GPU the active profile stops naming is handed back at once, not at the next stop
-  (DEC-448, daemon ≥ 3.0.0).** On the tick after a deactivate, or a switch to a profile
+  (DEC-448).** On the tick after a deactivate, or a switch to a profile
   that drops the card, the engine resets it to firmware auto — the same reset
   `POST /gpu/{id}/fan/reset` makes, under the same GPU write lock — and takes it off the
   hand-back list. A card a skipped or overridden control still names is kept; a verify

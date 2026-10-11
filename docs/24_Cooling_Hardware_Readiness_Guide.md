@@ -1,4 +1,4 @@
-# Cooling Hardware Readiness — user guide
+# Cooling Hardware Readiness Guide
 
 The **Hardware** page (the *Cooling Hardware Readiness* page) is a
 read-only, plain-language assessment of your cooling hardware: what is ready, what
@@ -98,8 +98,7 @@ The daemon found writable PWM (`pwmN`) attributes, but has not confirmed that wr
 them moves a fan. Writable ≠ controllable: routed PWM pins, BIOS/EC behaviour, and
 ACPI can all override the chip. Use the fan-control verification workflow to confirm.
 
-Since daemon 3.2.0 the daemon remembers each header's latest verdict, so
-this item counts what is left — "2 of 5 writable PWM header(s) have not been verified
+The daemon remembers each header's latest verdict, so this item counts what is left — "2 of 5 writable PWM header(s) have not been verified
 yet" — and disappears once every writable header has passed. A verdict survives a
 daemon restart, and is dropped when its header disappears from discovery. Both a
 single-header test and a PWM sweep (characterisation) that shows the duty held and
@@ -171,10 +170,9 @@ Some chips (notably several Gigabyte ITE variants) are not supported by the main
 the driver, but installing a DKMS package is a system change you should make
 deliberately, after checking it matches your chip. Never pass `force_id` — it can
 misconfigure the chip. **`it87-dkms-git` builds from 2026-09-09 (the driver's v2.0)
-rename Gigabyte chips** — e.g. `it8696_a008090a`. ventulusd 3.0.0 and newer
-strip that suffix, so no fan header's id changes; on an older daemon every id changes and
-pump roles, fan names and profile members need re-checking afterwards — the manual's
-Driver Setup page explains how to stay on the old names until the daemon is updated.
+rename Gigabyte chips**, e.g. `it8696_a008090a`. The daemon strips that suffix, so no
+fan header's id changes; an `/etc/sensors.d` block written for the old name stops
+matching ([Driver Setup](../manual/driver-setup.md#it87-v20-renames-your-chips)).
 
 ## ACPI I/O-port conflicts
 

@@ -2,7 +2,7 @@
 
 This page walks a **new Linux user** from "my motherboard fans don't show up" to "verified working fan headers", one copy-paste step at a time. It also covers the one [kernel parameter](#amd-gpu-fan-control-prerequisite-rdna3) that AMD RDNA3+ GPU fan control needs, and [what to do when Secure Boot blocks a driver](#secure-boot-and-dkms-modules). It targets **Arch Linux and CachyOS** (the platforms Ventulus is packaged for); the concepts carry to other distributions but the commands will differ.
 
-If you already know your way around DKMS and modprobe, the condensed reference lives in the [AMD](../docs/21_AMD_Motherboard_Fan_Control_Guide.md) and [Intel](../docs/23_Intel_Motherboard_Fan_Control_Guide.md) fan-control guides.
+For board-by-board detail, see the [AMD](../docs/21_AMD_Motherboard_Fan_Control_Guide.md) and [Intel](../docs/23_Intel_Motherboard_Fan_Control_Guide.md) fan-control guides; the full chip matrix is [Hardware Compatibility](../docs/19_Hardware_Compatibility.md).
 
 > **⚠ Before you start.** These steps change kernel parameters, driver and module
 > configuration, or firmware (UEFI/BIOS) settings. Back up your configuration first:
@@ -50,7 +50,7 @@ Rule of thumb by vendor (full matrix: [Hardware Compatibility](../docs/19_Hardwa
 | ASUS (AM4 500, Intel 600/700) | Nuvoton NCT6798D | usually **none** — mainline `nct6775` |
 | ASUS (AM5, Intel Z890/B860) | Nuvoton NCT6799D (AM5 600) or NCT6701D (AM5 800, Z890/B860), both reported as `nct6799` | usually **none** — mainline `nct6775` |
 | ASUS (AM4 300/400-series, e.g. PRIME X470-PRO) | ITE IT8665E | `it87-dkms-git` (AUR) — mainline has no IT8665E driver |
-| ASRock | Nuvoton NCT67xx, and on many boards an NCT6686D/NCT6683D carrying some or all fans | the NCT67xx needs none; the NCT668x fans are read-only in the kernel driver and need a board-specific out-of-tree driver — see the [ASRock notes](../docs/21_AMD_Motherboard_Fan_Control_Guide.md) |
+| ASRock | Nuvoton NCT67xx, and on many boards an NCT6686D/NCT6683D carrying some or all fans | the NCT67xx needs none; the NCT668x fans are read-only in the kernel driver and need a board-specific out-of-tree driver — see the [ASRock notes](../docs/21_AMD_Motherboard_Fan_Control_Guide.md#asrock) |
 | Dell (laptops, and some desktops) | none — the fans are run by the BIOS's System Management Mode, not a Super-I/O chip | **none** — mainline `dell_smm_hwmon` (it appears as `dell_smm`). Software control needs your model on the driver's fan-control list; without it the BIOS stays in charge and can override any speed that is set. Many models give every fan **one shared BIOS switch**, so a profile must control all of their fans or none (see [Controls](controls.md)), and the fans usually have only a few speed steps rather than a smooth range |
 
 > **Don't guess.** Installing the wrong out-of-tree driver can actively harm: the `nct6687`/`nct6775` chip-ID collision has bricked a CPU fan header in the wild. If both are loaded, the **System State** page shows a critical *Driver module collision* condition; deactivate the active profile at once (**Stop** under the sidebar's profile selector, or the tray's **Stop profile control**) and run no fan tests until you have rebooted and it is gone. That stops your curve, but not every write: the daemon still restores each header's original setting once, and only removing the wrong driver (blacklist it, then reboot) stops writes to the chip. Only install a driver the readiness report or the compatibility matrix recommends for your identified chip.
@@ -256,7 +256,7 @@ If bit 14 (`0x4000`, `PP_OVERDRIVE_MASK` — [kernel amdgpu module-parameters do
 amdgpu.ppfeaturemask=0xffffffff
 ```
 
-That value is what the daemon's diagnostics, this GUI, and most distro guides standardise on; any narrower mask also works as long as bit 14 is set — [CoolerControl documents OR-ing `0x4000` into your current mask](https://docs.coolercontrol.org/hardware-support.html) as the minimal alternative. Background: [Hardware Compatibility § ppfeaturemask](../docs/19_Hardware_Compatibility.md).
+That value is what the daemon's diagnostics, this GUI, and most distro guides standardise on; any narrower mask also works as long as bit 14 is set — [CoolerControl documents OR-ing `0x4000` into your current mask](https://docs.coolercontrol.org/hardware-support.html) as the minimal alternative. Background: [Hardware Compatibility § ppfeaturemask](../docs/19_Hardware_Compatibility.md#ppfeaturemask).
 
 How to add a kernel parameter, per bootloader — the same steps as `man ventulusd`; see also the [Arch Wiki](https://wiki.archlinux.org/title/Kernel_parameters) and, for Limine, the [CachyOS boot-manager guide](https://wiki.cachyos.org/configuration/boot_manager_configuration/):
 

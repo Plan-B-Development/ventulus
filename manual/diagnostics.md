@@ -189,8 +189,10 @@ which motherboard you own rather than on anything your machine is doing, so they
 reference material, not alarms, and they never clear by themselves. Currently
 surfaced quirks include Smart Fan 6 BIOS notes for Gigabyte AM5 800-series AORUS
 boards (IT8696E), and the usual driver paths and ASUS WMI sensor helpers for NCT6798 /
-NCT6799 on ASUS. The full list of vendor workarounds is in the
-[AMD Motherboard Fan Control Guide](../docs/21_AMD_Motherboard_Fan_Control_Guide.md).
+NCT6799 on ASUS. The vendor workarounds are in
+[Hardware Compatibility § Manufacturer quirks](../docs/19_Hardware_Compatibility.md#manufacturer-quirks),
+and the [AMD](../docs/21_AMD_Motherboard_Fan_Control_Guide.md) and
+[Intel](../docs/23_Intel_Motherboard_Fan_Control_Guide.md) guides go board by board.
 
 Each note is its own row, most severe first, with a badge that pairs an icon, a word
 and a colour: **CRITICAL** (red), **HIGH** (orange), **MEDIUM** or **LOW** (amber),
