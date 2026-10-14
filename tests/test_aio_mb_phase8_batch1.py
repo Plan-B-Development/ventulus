@@ -847,12 +847,17 @@ class TestDiscoveryCallSite:
             poll_requested = _Sig()
             cancel_requested = _Sig()
 
-            def __init__(self, header_id, label, *, is_pump, parent=None):
+            def __init__(self, header_id, label, *, is_pump, name_for=None, parent=None):
                 captured["header_id"] = header_id
                 captured["is_pump"] = is_pump
 
             def request_preflight(self):
                 captured["preflight_requested"] = True
+
+            def request_attach(self):
+                pass
+
+            cancel_sent_on_close = False
 
             def exec(self):
                 return 0
@@ -895,6 +900,11 @@ class TestDiscoveryCallSite:
             def request_preflight(self):
                 order.append("preflight")
 
+            def request_attach(self):
+                order.append("attach")
+
+            cancel_sent_on_close = False
+
             def exec(self):
                 order.append("exec")
                 return 0
@@ -907,7 +917,9 @@ class TestDiscoveryCallSite:
         )
         monkeypatch.setattr(page, "_ensure_discover_worker", lambda: True)
         page._open_control_path_discovery(_downgraded_pump().id)
-        assert order == ["preflight", "exec"]
+        # The open-time status read (#17) follows the preflight, both before
+        # the modal blocks.
+        assert order == ["preflight", "attach", "exec"]
 
 
 class TestWorkerWiring:

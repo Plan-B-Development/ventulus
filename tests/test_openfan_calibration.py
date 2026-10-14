@@ -668,8 +668,9 @@ class TestHardwarePageWiring:
             page.findChild(QPushButton, "Hardware_Btn_openfanCalibration").click()
         finally:
             page.cleanup()
-        assert fake.calls[0] == ("start", 3, True)
-        assert ("status",) in fake.calls
+        # The open-time status read (#17) goes first, then the start.
+        assert fake.calls[:2] == [("status",), ("start", 3, True)]
+        assert fake.calls.count(("status",)) >= 2
         assert seen == [False]
 
     def test_a_theme_switch_reaches_the_open_dialog(self, qtbot, monkeypatch):

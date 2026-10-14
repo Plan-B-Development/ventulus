@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QMessageBox,
     QTableWidget,
     QTableWidgetItem,
     QWidget,
@@ -40,7 +39,13 @@ from ventulus.services.openfan_calibration_view import (
     pump_confirmation_text,
 )
 from ventulus.ui.components.a11y import name_value_control
-from ventulus.ui.components.dialog import ModalDialog
+from ventulus.ui.components.dialog import (
+    CLOSE_KEEP,
+    CLOSE_STAY,
+    CLOSE_STOP,
+    ModalDialog,
+    ask_close_mid_run,
+)
 from ventulus.ui.components.tables import apply_dense_table
 from ventulus.ui.widgets.pwm_response_chart import PwmResponseChart
 
@@ -48,10 +53,7 @@ POLL_INTERVAL_MS = 1000
 
 _COLUMNS = ("Duty", "Direction", "RPM", "Result")
 
-#: What `_ask_close_mid_run` answers.
-CLOSE_STOP = "stop"
-CLOSE_KEEP = "keep"
-CLOSE_STAY = "stay"
+__all__ = ["CLOSE_KEEP", "CLOSE_STAY", "CLOSE_STOP", "OpenFanCalibrationDialog"]
 
 
 def _clear_layout(layout) -> None:
@@ -103,6 +105,11 @@ class OpenFanCalibrationDialog(ModalDialog):
         self._channel_label = ""
         # P8-e: one poll in flight at a time (see PwmCharacterizationDialog).
         self._poll_in_flight = False
+        #: The next reply answers :meth:`request_attach`, not a run we started.
+        self._attaching = False
+        #: The user closed mid-run with "Stop calibration": the page reports a
+        #: failed stop, because this dialog is gone when the reply lands.
+        self.cancel_sent_on_close = False
 
         body = self.body_layout()
 
@@ -328,6 +335,19 @@ class OpenFanCalibrationDialog(ModalDialog):
         self.start_requested.emit(opt.channel)
         self._timer.start()
 
+    def request_attach(self) -> None:
+        """Ask once whether the daemon already has a calibration. Call BEFORE ``exec()``.
+
+        The walk runs daemon-side and outlives this window ("Keep running", or a
+        GUI restart). Without this a reopened dialog read "Ready to start." while
+        the channel sat near 0 %, with no Cancel and no result to show.
+        """
+        if self._demo:
+            return
+        self._attaching = True
+        self._poll_in_flight = True
+        self.poll_requested.emit()
+
     @Slot()
     def _on_poll_tick(self) -> None:
         if self._poll_in_flight:
@@ -363,6 +383,14 @@ class OpenFanCalibrationDialog(ModalDialog):
     def apply_run(self, run) -> None:
         """Render a run snapshot. ``None`` means the daemon has no run."""
         self._poll_in_flight = False
+        if self._attaching:
+            # The answer to `request_attach`. Replies arrive in request order, so
+            # it is always the first. If Start was pressed before it landed it
+            # describes an earlier run and must not be read as the new one's.
+            self._attaching = False
+            if not self._started:
+                self._attach(run)
+            return
         # A reply queued before the run ended must not repaint a finished
         # dialog with a stale "Walking down…".
         if not self._started or self._finished:
@@ -402,6 +430,11 @@ class OpenFanCalibrationDialog(ModalDialog):
         carries on; the next snapshot, or a `404` (the run is gone), decides.
         """
         self._poll_in_flight = False
+        if self._attaching:
+            # `request_attach` could not be answered. Best effort: the dialog
+            # stays as it opened, and a refused start ends nothing.
+            self._attaching = False
+            return
         if not self._run_id:
             self._end_run()
         # A safety refusal is protection, not failure — show the daemon's own
@@ -409,6 +442,42 @@ class OpenFanCalibrationDialog(ModalDialog):
         self._status_lbl.setText(
             message if category == "unavailable" else f"Calibration error: {message}"
         )
+
+    def _attach(self, run) -> None:
+        """Show the daemon's current or most recent calibration on open.
+
+        A run still going is adopted: its channel is selected, polling resumes
+        and Cancel works while the walk can still be stopped. A finished one is
+        shown as the most recent result, with Start offered again. The daemon
+        keeps one run, in memory, so this is never older than its own uptime.
+        """
+        if run is None:
+            return
+        fan_id = getattr(run, "fan_id", "") or ""
+        channel = getattr(run, "channel", None)
+        opt = next(
+            (o for o in self._options if (fan_id and o.fan_id == fan_id) or o.channel == channel),
+            None,
+        )
+        if opt is not None:
+            self._channel_combo.setCurrentIndex(self._options.index(opt))
+        label = opt.label if opt is not None else (fan_id or f"CH{channel}")
+        view = build_calibration_view(run, channel_label=label)
+        self._render(view)
+        if view.finished:
+            self._status_lbl.setText(f"Most recent run — {view.status_text}")
+            self._start_btn.setText("Run again")
+            return
+        self._started = True
+        self._finished = False
+        self._run_id = getattr(run, "run_id", "") or ""
+        self._channel = channel
+        self._fan_id = fan_id
+        self._channel_label = label
+        self._can_cancel = view.can_cancel
+        self._cancel_btn.setEnabled(view.can_cancel)
+        self._refresh_start()
+        self._timer.start()
 
     def _end_run(self) -> None:
         self._timer.stop()
@@ -468,28 +537,21 @@ class OpenFanCalibrationDialog(ModalDialog):
 
     def _ask_close_mid_run(self) -> str:
         """Stop the run, keep it running daemon-side, or stay (DEC-453)."""
-        box = QMessageBox(self)
-        box.setObjectName("OfanCal_Msg_closeMidRun")
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Calibration still running")
-        box.setText(
-            "The calibration is still running. Curve control stays paused and this "
-            "channel stays near its test duty until it ends."
+        return ask_close_mid_run(
+            self,
+            object_name="OfanCal_Msg_closeMidRun",
+            title="Calibration still running",
+            text=(
+                "The calibration is still running. Curve control stays paused and this "
+                "channel stays near its test duty until it ends."
+            ),
+            informative=(
+                "Stop it now, or keep it running and close this window? The daemon "
+                "restores the channel itself either way, and reopening this window "
+                "shows the run."
+            ),
+            stop_label="Stop calibration",
         )
-        box.setInformativeText(
-            "Stop it now, or keep it running and close this window? The daemon "
-            "restores the channel itself either way."
-        )
-        stop = box.addButton("Stop calibration", QMessageBox.ButtonRole.DestructiveRole)
-        keep = box.addButton("Keep running", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Stay here", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is stop:
-            return CLOSE_STOP
-        if clicked is keep:
-            return CLOSE_KEEP
-        return CLOSE_STAY
 
     def reject(self) -> None:  # Qt override — Close, Escape and the title-bar X
         # Only while a DELETE can still act: during the kick or the restore the
@@ -498,7 +560,10 @@ class OpenFanCalibrationDialog(ModalDialog):
             answer = self._ask_close_mid_run()
             if answer == CLOSE_STAY:
                 return
-            if answer == CLOSE_STOP:
+            # Polling carries on behind the question, so the walk may have
+            # reached its kick or ended meanwhile; a stop then would do nothing.
+            if answer == CLOSE_STOP and self.is_running and self._can_cancel:
+                self.cancel_sent_on_close = True
                 self.cancel_requested.emit()
         self._timer.stop()
         super().reject()

@@ -53,6 +53,7 @@ SYSTEM_STATE_OBJECTNAMES = frozenset(
         "SystemState_Btn_verifyBoardNotes",
         "SystemState_Label_boardNotesSubtitle",
         "SystemState_Label_verifyHint",
+        "SystemState_Label_verifyBoardNotesStatus",
         "SystemState_Row_verifyBoardNotes",
         "SystemState_Section_boardNotes",
         "SystemState_Section_boardNotes_Content",

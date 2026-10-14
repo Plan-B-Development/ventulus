@@ -383,6 +383,17 @@ class HealthCard(ContentSizedCard):
         verify_layout.addWidget(self._verify_hint, 1)
         verify_layout.addWidget(self._verify_btn)
         self._notes_section.add_widget(self._verify_row)
+        # The sweep's progress and result, here as well as under Advanced
+        # actions (GUI audit 2026-10-14, #7): that section starts collapsed, so a
+        # click on this button used to change nothing on screen. Outside the
+        # row on purpose: a sweep that settles every note hides the row, and
+        # the result must outlive it.
+        self._verify_status = QLabel("")
+        self._verify_status.setObjectName("SystemState_Label_verifyBoardNotesStatus")
+        self._verify_status.setProperty("class", "CardMeta")
+        self._verify_status.setWordWrap(True)
+        self._verify_status.setVisible(False)
+        self._notes_section.add_widget(self._verify_status)
 
         self._notes_container = QWidget()
         self._notes_layout = QVBoxLayout(self._notes_container)
@@ -404,6 +415,23 @@ class HealthCard(ContentSizedCard):
 
     def set_summary(self, text: str) -> None:
         self._summary_label.setText(text)
+
+    def set_verify_state(self, *, enabled: bool, testing: bool, tooltip: str = "") -> None:
+        """Gate "Test fan control" with the page's sweep gate.
+
+        The button runs the same sweep as Advanced actions' "Verify All
+        Writable", so it takes that button's gate (report running, a verify in
+        flight) rather than staying live through both.
+        """
+        self._verify_btn.setEnabled(enabled)
+        self._verify_btn.setText("Testing..." if testing else "Test fan control")
+        self._verify_btn.setToolTip(tooltip)
+
+    def set_verify_status(self, text: str, chip_class: str = "CardMeta") -> None:
+        """Show the sweep's progress, result or refusal under the button."""
+        set_chip_class(self._verify_status, chip_class or "CardMeta", skip_if_unchanged=True)
+        self._verify_status.setText(text)
+        self._verify_status.setVisible(bool(text))
 
     def render(self, vm) -> None:
         self._issue_pill.set_text(vm.issue_count_label)

@@ -55,6 +55,10 @@ class CoolingDeviceCard(ContentSizedCard):
         #: Non-empty while a PWM Test Report run holds the daemon's diagnostic
         #: slot (`PTA-b`); see :meth:`set_diagnostics_blocked`.
         self._blocked_reason = ""
+        #: (allowed, reason) for each diagnostic, from the page: the same gates
+        #: their other entry points use. See :meth:`set_diagnostic_availability`.
+        self._char_gate: tuple[bool, str] = (True, "")
+        self._validate_gate: tuple[bool, str] = (True, "")
         slug = _slug(view.device_id)
         self.setObjectName(f"CoolingDeviceCard_{slug}")
 
@@ -145,11 +149,37 @@ class CoolingDeviceCard(ContentSizedCard):
     def device_id(self) -> str:
         return self._device_id
 
-    def set_diagnostics_blocked(self, reason: str) -> None:
-        """Stand the two diagnostics down while a PWM Test Report runs (`PTA-b`).
+    def set_diagnostic_availability(
+        self,
+        *,
+        characterize_ok: bool,
+        characterize_reason: str,
+        validate_ok: bool,
+        validate_reason: str,
+    ) -> None:
+        """Whether each diagnostic can run at all, and why not (GUI audit 2026-10-14).
 
-        *Characterise Pump* and *Start Validation* share the report's diagnostic
-        slot; the other actions run nothing and stay live. ``""`` releases them.
+        The page derives these from the gates the same diagnostics use elsewhere:
+        *Characterise Pump* from the pump header's own header-card verdict
+        (writable, capability), *Start Validation* from `validation_sessions`.
+        The card used to enable the first on any pump member and the second
+        always, so a click could open nothing, or a dialog whose Start the
+        daemon could only refuse.
+        """
+        char_gate = (characterize_ok, characterize_reason)
+        validate_gate = (validate_ok, validate_reason)
+        if (char_gate, validate_gate) == (self._char_gate, self._validate_gate):
+            return
+        self._char_gate = char_gate
+        self._validate_gate = validate_gate
+        self._apply_enablement()
+
+    def set_diagnostics_blocked(self, reason: str) -> None:
+        """Stand the two diagnostics down while the diagnostic slot is busy (`PTA-b`).
+
+        *Characterise Pump* and *Start Validation* share the daemon's diagnostic
+        slot with a PWM Test Report and with the page's own verify; the other
+        actions run nothing and stay live. ``""`` releases them.
         The header card's shape: the ONE gating rule is :meth:`_apply_enablement`,
         so a re-render from :meth:`set_view` cannot re-enable a button mid-run.
         """
@@ -160,13 +190,13 @@ class CoolingDeviceCard(ContentSizedCard):
 
     def _apply_enablement(self) -> None:
         blocked = self._blocked_reason
+        char_ok, char_why = self._char_gate
+        if not self._pump_member:
+            char_ok, char_why = False, "This device has no pump member assigned."
+        validate_ok, validate_why = self._validate_gate
         for button, allowed, why in (
-            (
-                self._btn_charPump,
-                bool(self._pump_member),
-                "This device has no pump member assigned.",
-            ),
-            (self._btn_validate, True, ""),
+            (self._btn_charPump, char_ok, char_why),
+            (self._btn_validate, validate_ok, validate_why),
         ):
             button.setEnabled(allowed and not blocked)
             button.setToolTip(blocked if (allowed and blocked) else ("" if allowed else why))

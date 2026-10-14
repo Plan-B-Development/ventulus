@@ -40,6 +40,8 @@ from ventulus.services.health_ack import clear_key, prune, silence_key
 from ventulus.services.pump_protection import header_is_pump_protected
 from ventulus.services.pwm_report.runner import RUN_ACTIVE_REASON
 from ventulus.services.pwm_verification import pwm_verification_tristate
+from ventulus.services.run_contact_view import stop_on_close_failed_text
+from ventulus.services.run_reply_ledger import ReplyRoute, RunReplyLedger
 from ventulus.services.system_state_view import (
     THERMAL_STATE_NO_CONNECTION,
     SilenceState,
@@ -210,10 +212,17 @@ class SystemStatePage(QWidget):
         #: `ACK-n`); see `_on_verify_ok`.
         self._verify_all_pending: str | None = None
         self._gpu_verify_bdf: str | None = None
+        #: A restore was sent and has not been answered. Read by the gate, so a
+        #: re-render mid-restore cannot re-enable the button (GUI audit
+        #: 2026-10-14; the `ACK-z` shape on another button).
+        self._gpu_restore_in_flight = False
         self._report_dialog: ReadinessReportDialog | None = None
         self._char_worker: _CharacterizationWorker | None = None
         self._char_thread: QThread | None = None
         self._char_dialog: PwmCharacterizationDialog | None = None
+        #: Which window the characterisation worker's in-order replies belong
+        #: to, and which one answers a "Stop" chosen on closing (#17).
+        self._char_replies = RunReplyLedger()
         self._hw_diag_fetched = False
         self._hw_diag_in_flight = False  # guards the header Refresh (DEC-358)
         self._pruned_for = None  # payload identity the silences were last pruned against
@@ -865,10 +874,16 @@ class SystemStatePage(QWidget):
         queue one hardware probe more than the user asked for. `ACK-z`'s trap
         applies here too: every caller clears `_verify_active_header` first.
         """
-        self._verify_all_btn.setEnabled(
-            not self._verify_in_flight() and not self._pwm_report_active
+        enabled = not self._verify_in_flight() and not self._pwm_report_active
+        tooltip = RUN_ACTIVE_REASON if self._pwm_report_active else ""
+        self._verify_all_btn.setEnabled(enabled)
+        self._verify_all_btn.setToolTip(tooltip)
+        # The Health card's "Test fan control" is the same sweep, so the same
+        # gate (GUI audit 2026-10-14, #6): it used to stay live through a report
+        # run and a verify in flight alike.
+        self._health_card.set_verify_state(
+            enabled=enabled, testing=self._verify_all_total > 0, tooltip=tooltip
         )
-        self._verify_all_btn.setToolTip(RUN_ACTIVE_REASON if self._pwm_report_active else "")
 
     def _sync_verify_buttons(self) -> None:
         """All three hwmon test buttons from the page's current state.
@@ -1125,6 +1140,14 @@ class SystemStatePage(QWidget):
             self._char_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
             self._char_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
             self._char_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
+            # Each answers once, in order: the ledger routes the answers.
+            self._char_replies = RunReplyLedger()  # a new worker owes nothing yet
+            for request in (
+                self._char_start_request,
+                self._char_poll_request,
+                self._char_cancel_request,
+            ):
+                request.connect(self._char_replies.sent)
             self._char_preflight_request.connect(w.do_preflight, Qt.ConnectionType.QueuedConnection)
             w.run_updated.connect(self._on_char_update, Qt.ConnectionType.QueuedConnection)
             w.run_error.connect(self._on_char_error, Qt.ConnectionType.QueuedConnection)
@@ -1159,6 +1182,7 @@ class SystemStatePage(QWidget):
             is_pump=header_is_pump_protected(header, getattr(self._state, "capabilities", None)),
             header=header,
             capabilities=getattr(self._state, "capabilities", None),
+            name_for=resolve,
             parent=self,
         )
         dialog.start_requested.connect(self._char_start_request.emit)
@@ -1166,15 +1190,19 @@ class SystemStatePage(QWidget):
         dialog.cancel_requested.connect(self._char_cancel_request.emit)
         dialog.preflight_requested.connect(self._char_preflight_request.emit)
         self._char_dialog = dialog
+        self._char_replies.window_opened()
         # BEFORE `exec()`, so the daemon's safety statement is the first thing
         # rendered rather than something that arrives after the user has reached
-        # for Start (Batch 1 §6.1).
+        # for Start (Batch 1 §6.1). Then one status read, so a sweep still
+        # running daemon-side is shown and can be cancelled (#17).
         dialog.request_preflight()
+        dialog.request_attach()
         try:
             dialog.exec()
         finally:
             dialog.stop_polling()
             self._char_dialog = None
+            self._char_replies.window_closed(stop_sent=dialog.cancel_sent_on_close)
 
     @Slot(object)
     def _on_char_preflight_ready(self, report: object) -> None:
@@ -1190,13 +1218,21 @@ class SystemStatePage(QWidget):
 
     @Slot(object)
     def _on_char_update(self, run: object) -> None:
-        if self._char_dialog is not None:
+        route = self._char_replies.received()
+        if route is ReplyRoute.WINDOW and self._char_dialog is not None:
             self._char_dialog.apply_run(run)
 
     @Slot(str, str)
     def _on_char_error(self, category: str, message: str) -> None:
-        if self._char_dialog is not None:
+        route = self._char_replies.received()
+        if route is ReplyRoute.WINDOW and self._char_dialog is not None:
             self._char_dialog.apply_error(category, message)
+        elif route is ReplyRoute.STOP_ANSWER:
+            self._show_verify_message(
+                self._verify_result_label,
+                stop_on_close_failed_text("characterisation", message),
+                "WarningChip",
+            )
 
     def cleanup(self) -> None:
         if self._char_dialog is not None:
@@ -1339,29 +1375,43 @@ class SystemStatePage(QWidget):
         self._verify_result_label.setVisible(True)
         self._verify_evidence.set_evidence(view.evidence)
 
+    def _show_sweep_message(self, text: str, chip_class: str = "") -> None:
+        """Show a sweep message under Advanced actions AND on the Health card.
+
+        The sweep has two entry points, and Advanced actions starts collapsed,
+        so a message shown only there is invisible to a click on the Health
+        card's "Test fan control" (GUI audit 2026-10-14, #7).
+        """
+        self._show_verify_message(self._verify_all_progress_label, text, chip_class)
+        self._health_card.set_verify_status(text, chip_class)
+
     def _run_pwm_verify_all(self) -> None:
         if not self._state:
-            self._show_verify_message(
-                self._verify_all_progress_label, "Cannot verify: no app state"
-            )
+            self._show_sweep_message("Cannot verify: no app state")
             return
         if not self._client:
-            self._show_verify_message(
-                self._verify_all_progress_label, "Cannot verify: no daemon connection"
-            )
+            self._show_sweep_message("Cannot verify: no daemon connection")
             return
         if self._verify_all_total > 0:
             return  # already running
-        writable = [h.id for h in self._state.hwmon_headers if h.is_writable]
-        if not writable:
-            self._show_verify_message(
-                self._verify_all_progress_label, "No writable headers to test."
+        # The gate `_sync_verify_all_enabled` greys both buttons with, enforced
+        # where the sweep starts too (#6): a sweep in a report run's hand-back
+        # gap writes between its measurements (S4-13), and one over a single
+        # verify queues an extra probe (`ACK-ab`).
+        if self._pwm_report_active:
+            self._show_sweep_message(RUN_ACTIVE_REASON)
+            return
+        if self._verify_in_flight():
+            self._show_sweep_message(
+                "A fan-control test is already running. Try again when it ends."
             )
             return
+        writable = [h.id for h in self._state.hwmon_headers if h.is_writable]
+        if not writable:
+            self._show_sweep_message("No writable headers to test.")
+            return
         if not self._ensure_verify_worker():
-            self._show_verify_message(
-                self._verify_all_progress_label, "Verify unavailable: no socket path"
-            )
+            self._show_sweep_message("Verify unavailable: no socket path")
             return
         self._verify_all_queue = list(writable)
         self._verify_all_results = []
@@ -1372,8 +1422,6 @@ class SystemStatePage(QWidget):
         # three read "in flight" and grey (one gating shape per button, `ACK-z`).
         self._sync_verify_buttons()
         self._verify_all_btn.setText("Testing...")
-        set_chip_class(self._verify_all_progress_label, "CardMeta")
-        self._verify_all_progress_label.setVisible(True)
         self._step_pwm_verify_all()
 
     def _finish_verify_all(self) -> None:
@@ -1389,8 +1437,8 @@ class SystemStatePage(QWidget):
             return
         header_id = self._verify_all_queue.pop(0)
         index = self._verify_all_total - len(self._verify_all_queue)
-        self._verify_all_progress_label.setText(
-            f"Testing {index}/{self._verify_all_total}: {header_id}"
+        self._show_sweep_message(
+            f"Testing {index}/{self._verify_all_total}: {header_id}", "CardMeta"
         )
         self._verify_active_header = header_id
         self._verify_all_pending = header_id
@@ -1398,7 +1446,7 @@ class SystemStatePage(QWidget):
 
     def _show_verify_all_summary(self) -> None:
         if not self._verify_all_results:
-            self._show_verify_message(self._verify_all_progress_label, "Verify all: no results.")
+            self._show_sweep_message("Verify all: no results.")
             return
         self._record_verify_outcome(self._verify_all_results)
         # Chip class and per-header wording both come from `verify_view`, which
@@ -1416,9 +1464,8 @@ class SystemStatePage(QWidget):
         note = sweep_restore_failed_note(len(not_restored))
         if note:
             lines.extend(("", note))
-        self._verify_all_progress_label.setText("\n".join(lines))
-        set_chip_class(
-            self._verify_all_progress_label,
+        self._show_sweep_message(
+            "\n".join(lines),
             verify_sweep_chip_class(results, restore_failed=bool(not_restored)),
         )
 
@@ -1525,7 +1572,7 @@ class SystemStatePage(QWidget):
 
     def _update_gpu_restore_gate(self, _profile_name: str | None = None) -> None:
         managed = self._active_profile_controls_gpu()
-        self._gpu_restore_btn.setEnabled(not managed)
+        self._gpu_restore_btn.setEnabled(not managed and not self._gpu_restore_in_flight)
         self._gpu_restore_btn.setToolTip(
             _GPU_RESTORE_TOOLTIP_GATED if managed else _GPU_RESTORE_TOOLTIP_READY
         )
@@ -1542,7 +1589,8 @@ class SystemStatePage(QWidget):
             self._update_gpu_restore_gate()
             self._show_gpu_restore_message(f"Not restored: {_GPU_RESTORE_TOOLTIP_GATED}")
             return
-        self._gpu_restore_btn.setEnabled(False)
+        self._gpu_restore_in_flight = True
+        self._update_gpu_restore_gate()
         self._gpu_restore_btn.setText("Restoring...")
         self._gpu_restore_result_label.setVisible(False)
         if not self._ensure_gpu_verify_worker():
@@ -1557,7 +1605,7 @@ class SystemStatePage(QWidget):
         self._gpu_restore_result_label.setVisible(True)
 
     def _finish_gpu_restore(self) -> None:
-        self._gpu_restore_btn.setEnabled(True)
+        self._gpu_restore_in_flight = False  # before the gate reads it
         self._gpu_restore_btn.setText("Restore GPU Fan to Automatic")
         self._update_gpu_restore_gate()
 

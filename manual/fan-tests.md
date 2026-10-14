@@ -30,7 +30,8 @@ never writes a fan speed itself, so these rules hold whatever the app does:
 - **One test at a time.** The daemon runs one hardware test at a time. While a test
   started from a header card is running, every header card's tests are unavailable,
   and while a PWM Test Report runs, every other test on the **Hardware** and
-  **System State** pages is unavailable too.
+  **System State** pages is unavailable too. A cooling-device card's **Characterise
+  Pump** and **Start Validation** follow the same rule.
 - **Heat stops a test.** No test starts while any temperature sensor reads above the
   daemon's diagnostic limit (85 °C), or while its thermal protection is forcing the
   fans. The motherboard-header tests also refuse when the temperature readings have
@@ -57,6 +58,14 @@ never writes a fan speed itself, so these rules hold whatever the app does:
   test duty, activate your profile again.
 - **Curves pause.** While a test runs, curve control is paused and each fan holds its
   last speed.
+
+**Closing a test's window.** Characterise, Discover Control Path and Calibrate OpenFan
+Channel run in the daemon, so their window is only a view of the run. Closing one
+mid-run asks whether to **stop** the test or **keep it running**. Reopening the window
+shows a test that is still running, with **Cancel run**, or the result of the most
+recent one; the daemon keeps only that one, and only until it restarts. While another
+header's test of the same kind is running, **Start** waits and names that header. If a
+stop you chose on closing fails, the page that opened the window says so.
 
 **Fan mode names.** Wherever Ventulus shows a header's `pwm_enable`, it uses the
 kernel's meanings: **0** is *Full speed (no control)*, **1** is *Manual* (what the
@@ -320,7 +329,8 @@ stopped, the daemon runs it at 100 % until it is seen spinning, then restores it
 original speed. If the daemon is shutting down before it could confirm the fan had
 restarted, it leaves the channel at 100 %. Closing the window while the walk runs
 asks whether to **stop the calibration** or **keep it running**; either way the
-daemon restores the channel when the run ends.
+daemon restores the channel when the run ends, and reopening the window shows the
+run on its channel.
 
 ## Test GPU Fan Control
 

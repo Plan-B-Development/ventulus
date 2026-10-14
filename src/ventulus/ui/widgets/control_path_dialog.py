@@ -17,6 +17,8 @@ that keeps hardware safe.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -37,7 +39,7 @@ from ventulus.services.control_path_view import (
 from ventulus.services.preflight_view import PreflightView, build_preflight_view
 from ventulus.services.run_contact_view import live_run_error_text
 from ventulus.ui.components.badges import StatusPill
-from ventulus.ui.components.dialog import ModalDialog
+from ventulus.ui.components.dialog import CLOSE_STAY, CLOSE_STOP, ModalDialog, ask_close_mid_run
 from ventulus.ui.components.tables import apply_dense_table
 from ventulus.ui.widgets.collapsible_section import CollapsibleSection
 
@@ -62,6 +64,7 @@ class ControlPathDiscoveryDialog(ModalDialog):
         header_label: str,
         *,
         is_pump: bool,
+        name_for: Callable[[str], str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__("Discover Control Path", parent)
@@ -77,6 +80,16 @@ class ControlPathDiscoveryDialog(ModalDialog):
         self._run_live = False
         self._failures = 0
         self._preflight = build_preflight_view(None)
+        #: Resolves another header's id to its display name, for the busy note.
+        self._name_for = name_for
+        #: The next reply answers :meth:`request_attach`, not a run we started.
+        self._attaching = False
+        #: Why Start waits: another header's discovery holds the daemon's one
+        #: slot for it. ``""`` when nothing else is running.
+        self._busy_elsewhere = ""
+        #: The user closed mid-run with "Stop discovery": the page reports a
+        #: failed stop, because this dialog is gone when the reply lands.
+        self.cancel_sent_on_close = False
 
         body = self.body_layout()
 
@@ -201,6 +214,8 @@ class ControlPathDiscoveryDialog(ModalDialog):
 
     @Slot()
     def _on_start(self) -> None:
+        if self._busy_elsewhere:
+            return  # the button is disabled; the rule lives where the request is made too
         self._started = True
         self._poll_in_flight = False
         self._run_live = False
@@ -223,6 +238,17 @@ class ControlPathDiscoveryDialog(ModalDialog):
     def request_preflight(self) -> None:
         """Ask for the safety preflight. Called by the page before ``exec()``."""
         self.preflight_requested.emit(self._header_id, DIAGNOSTIC_CONTROL_PATH)
+
+    def request_attach(self) -> None:
+        """Ask once for the daemon's current run. Call BEFORE ``exec()``, after the preflight.
+
+        The run is daemon-side and outlives this window. Without this a reopened
+        dialog read "Ready to start." while the header was still being nudged,
+        with no Cancel and no result to show.
+        """
+        self._attaching = True
+        self._poll_in_flight = True
+        self.poll_requested.emit()
 
     # ── rendering ────────────────────────────────────────────────────
 
@@ -292,11 +318,22 @@ class ControlPathDiscoveryDialog(ModalDialog):
         self._blocked_lbl.setText(blocked_text)
         self._blocked_lbl.setVisible(bool(blocked_text))
 
-        # `can_start` is the view-model's, which reads the daemon's verdict — the
-        # dialog never re-derives it from the rows.
-        if not self._started:
-            self._start_btn.setEnabled(view.can_start)
-            self._start_btn.setToolTip("" if view.can_start else "\n".join(view.blocking_reasons))
+        self._sync_start()
+
+    def _sync_start(self) -> None:
+        """Start's one gate before a run: the daemon's preflight verdict and the slot.
+
+        `can_start` is the view-model's, which reads the daemon's verdict — the
+        dialog never re-derives it from the rows.
+        """
+        if self._run_tracked():
+            return
+        view: PreflightView = self._preflight
+        reasons = list(view.blocking_reasons)
+        if self._busy_elsewhere:
+            reasons.append(self._busy_elsewhere)
+        self._start_btn.setEnabled(view.can_start and not self._busy_elsewhere)
+        self._start_btn.setToolTip("\n".join(reasons))
 
     def _is_ours(self, run) -> bool:
         """Is this snapshot about the header this dialog was opened for?
@@ -335,6 +372,24 @@ class ControlPathDiscoveryDialog(ModalDialog):
         self._poll_in_flight = False
         self._failures = 0
         run = getattr(status, "run", None) if status is not None else None
+        if self._attaching:
+            # The answer to `request_attach`. Replies arrive in request order, so
+            # it is always the first. If Start was pressed before it landed it
+            # describes an earlier run and must not be read as the new one's.
+            self._attaching = False
+            if not self._started:
+                self._attach(run)
+            return
+        if self._busy_elsewhere and not self._started:
+            # Watching another header's run for its end (see `_attach`).
+            self._set_busy_elsewhere("")
+            self._timer.stop()
+            self._attach(run)
+            if not self._busy_elsewhere:
+                # The verdict fetched at open was given while the other run held
+                # the slot, so it may still say "blocked" (`ownership`).
+                self.request_preflight()
+            return
         if run is not None and not self._is_ours(run):
             return
         if run is None and self._started:
@@ -350,6 +405,7 @@ class ControlPathDiscoveryDialog(ModalDialog):
                 "restores the header whenever it ends a run itself, and a "
                 "restarted daemon takes control back on its next tick."
             )
+            self.request_preflight()  # see the terminal branch below
             return
         view = build_control_path_view(run, header_label=self._header_label)
         self._render(view)
@@ -359,6 +415,9 @@ class ControlPathDiscoveryDialog(ModalDialog):
             self._cancel_btn.setEnabled(False)
             self._start_btn.setEnabled(True)
             self._start_btn.setText("Run again")
+            # The verdict on screen may be from while a run held the slot (an
+            # adopted run's, at open); "Run again" deserves a current one.
+            self.request_preflight()
 
     @Slot(str, str)
     def apply_error(self, category: str, message: str) -> None:
@@ -371,6 +430,13 @@ class ControlPathDiscoveryDialog(ModalDialog):
         ``None`` (the run is gone), decides. A refused start ends here as before.
         """
         self._poll_in_flight = False
+        if self._attaching:
+            # `request_attach` could not be answered. Best effort: the dialog
+            # stays as it opened, and a refused start ends nothing.
+            self._attaching = False
+            return
+        if self._busy_elsewhere and not self._started:
+            return  # a failed watch poll; the next one decides
         # A safety refusal is protection, not failure — show the daemon's own
         # words rather than dressing them as an error.
         detail = (
@@ -385,6 +451,50 @@ class ControlPathDiscoveryDialog(ModalDialog):
         self._cancel_btn.setEnabled(False)
         self._start_btn.setEnabled(True)
         self._status_lbl.setText(detail)
+
+    def _attach(self, run) -> None:
+        """Show the daemon's current or most recent run on open.
+
+        The slot is process-global (see :meth:`_is_ours`), so the run may be
+        another header's. Here the match must be explicit: an empty
+        ``header_id`` could be anyone's, and adopting it would offer Cancel on
+        a run this window cannot vouch for.
+
+        * This header, running: adopted — polling resumes and Cancel works.
+        * This header, finished: shown as the most recent result.
+        * Another header (or an unnamed one), running: Start waits, saying why,
+          and polling watches for its end, because the daemon would refuse it.
+        * Anything else: the dialog stays as it opened.
+        """
+        if run is None:
+            return
+        theirs = getattr(run, "header_id", "") or ""
+        view = build_control_path_view(run, header_label=self._header_label)
+        if theirs == self._header_id:
+            self._render(view)
+            if view.running:
+                self._started = True
+                self._run_live = True
+                self._start_btn.setEnabled(False)
+                self._cancel_btn.setEnabled(True)
+                self._timer.start()
+            else:
+                self._status_lbl.setText(f"Most recent run — {self._status_lbl.text()}")
+                self._start_btn.setText("Run again")
+            return
+        if view.running:
+            name = (self._name_for(theirs) if self._name_for else "") or theirs
+            where = f" on {name}" if name else ""
+            self._set_busy_elsewhere(
+                f"Another control-path discovery is running{where}. "
+                "Start is available when it ends."
+            )
+            self._timer.start()
+
+    def _set_busy_elsewhere(self, text: str) -> None:
+        self._busy_elsewhere = text
+        self._status_lbl.setText(text or "Ready to start.")
+        self._sync_start()
 
     def _render(self, view: ControlPathView) -> None:
         rows = len(view.candidates) + len(view.quiet)
@@ -476,6 +586,43 @@ class ControlPathDiscoveryDialog(ModalDialog):
     def stop_polling(self) -> None:
         self._timer.stop()
 
-    def reject(self) -> None:  # Qt override
+    def _run_tracked(self) -> bool:
+        """A run of ours is being followed: started, and not yet ended or refused."""
+        return self._started and self._timer.isActive()
+
+    def _stoppable(self) -> bool:
+        """A stop can still be asked for: Cancel is live exactly then."""
+        return self._run_tracked() and self._cancel_btn.isEnabled()
+
+    def _ask_close_mid_run(self) -> str:
+        """Stop the run, keep it running daemon-side, or stay (the DEC-453 question)."""
+        return ask_close_mid_run(
+            self,
+            object_name="ControlPath_Msg_closeMidRun",
+            title="Discovery still running",
+            text=(
+                "The control-path discovery is still running. The daemon keeps "
+                "nudging this header's duty until it ends."
+            ),
+            informative=(
+                "Stop it now, or keep it running and close this window? The daemon "
+                "restores the header itself either way, and reopening this window "
+                "shows the run."
+            ),
+            stop_label="Stop discovery",
+        )
+
+    def reject(self) -> None:  # Qt override — Close, Escape and the title-bar X
+        # Only while a stop can still be asked for: Cancel is live exactly then.
+        # After Cancel, or once the run has ended, there is nothing to decide.
+        if self._stoppable():
+            answer = self._ask_close_mid_run()
+            if answer == CLOSE_STAY:
+                return
+            # Polling carries on behind the question, so the run may have ended
+            # meanwhile; a stop sent then would only be refused.
+            if answer == CLOSE_STOP and self._stoppable():
+                self.cancel_sent_on_close = True
+                self.cancel_requested.emit()
         self._timer.stop()
         super().reject()

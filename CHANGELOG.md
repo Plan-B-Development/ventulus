@@ -46,6 +46,23 @@ rename. Version numbers carry on from Control-OFC.
   disabled the card until the app restarted. It is now read on each visit and when the daemon
   restarts or reconnects. **Exit minimum** and **Coolant limit** no longer stay greyed out as
   "daemon too old" when Settings opened before the daemon's capabilities arrived.
+- **System State's "Test fan control" now waits its turn and shows what it is doing.** The button
+  under **Board notes** could start a test of every writable header in the middle of a PWM Test
+  Report, or on top of a test already running, and everything it reported went to the collapsed
+  **Advanced actions** section, so a click seemed to do nothing. It is now unavailable while another
+  test or a report runs, like **Verify All Writable**, and shows its progress and result below it.
+- **A test's window shows a test that is still running.** Closing **Calibrate OpenFan Channel** with
+  **Keep running** and reopening it showed "Ready to start." with no way to cancel the walk or see its
+  result. **Characterise** and **Discover Control Path** behaved the same, and closed mid-run without
+  asking. All three now show a running test (with **Cancel run**) or the most recent result when
+  they open, and wait, naming the header, while another header's test of the same kind runs.
+  Characterise and Discover ask before closing mid-run, and a stop chosen on closing that fails is
+  reported instead of lost.
+- **Restore GPU Fan to Automatic** no longer becomes clickable again while a restore is running.
+- **A cooling-device card's Characterise Pump and Start Validation** are disabled, with the reason,
+  when the pump's header is missing or read-only, when the daemon has no validation sessions, and
+  while a header test runs. Before, they opened nothing or a window whose **Start** could only be
+  refused.
 
 ## [5.0.0] — 2026-10-10
 

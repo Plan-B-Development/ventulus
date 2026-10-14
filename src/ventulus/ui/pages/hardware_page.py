@@ -99,6 +99,8 @@ from ventulus.services.pump_protection import (
 )
 from ventulus.services.pwm_report.runner import VERIFY_PAGE_HARDWARE, VERIFY_PAGE_SYSTEM_STATE
 from ventulus.services.pwm_verification import verification_signature
+from ventulus.services.run_contact_view import stop_on_close_failed_text
+from ventulus.services.run_reply_ledger import ReplyRoute, RunReplyLedger
 from ventulus.services.verify_evidence import VerifyEvidence
 from ventulus.services.verify_view import build_verify_result_view
 from ventulus.ui.components.badges import StatusPill
@@ -314,6 +316,11 @@ class HardwarePage(QWidget):
         self._char_thread: QThread | None = None
         self._char_worker: _CharacterizationWorker | None = None
         self._char_dialog: PwmCharacterizationDialog | None = None
+        #: Which window each run worker's in-order replies belong to, and which
+        #: one answers a "Stop" chosen on closing (GUI audit 2026-10-14, #17).
+        self._char_replies = RunReplyLedger()
+        self._discover_replies = RunReplyLedger()
+        self._ofancal_replies = RunReplyLedger()
         # AIO Phase 8 Batch 1.
         self._discover_thread: QThread | None = None
         self._discover_worker: _ControlPathWorker | None = None
@@ -840,6 +847,7 @@ class HardwarePage(QWidget):
             stalled_ids=state.stalled_fan_ids if state else frozenset(),
         )
         self._sync_header_cards(header_views)
+        self._gate_device_cards(device_views, header_views)
         self._refresh_label_prompt(headers)
         self._refresh_openfan_roles()
 
@@ -1016,7 +1024,7 @@ class HardwarePage(QWidget):
                 card.edit_requested.connect(lambda _id: self.open_controls.emit())
                 card.forget_requested.connect(self._forget_device)
                 # A device that appears mid-run stands down like the others (`PTA-b`).
-                card.set_diagnostics_blocked(RUN_ACTIVE_REASON if self._report_active else "")
+                card.set_diagnostics_blocked(self._header_block_reason())
                 self._device_cards[view.device_id] = card
                 self._device_layout.insertWidget(index, card)
             else:
@@ -1026,6 +1034,42 @@ class HardwarePage(QWidget):
                 card = self._device_cards.pop(device_id)
                 card.setParent(None)
                 card.deleteLater()
+
+    def _gate_device_cards(self, device_views, header_views) -> None:
+        """Give each device card's diagnostics the gates their other entry points use.
+
+        *Characterise Pump* takes the pump header's own card verdict, so the two
+        buttons that open one dialog for one header cannot disagree. *Start
+        Validation* takes `validation_sessions`, as the toolbar buttons do.
+        """
+        by_header = {view.header_id: view for view in header_views}
+        supported = daemon_supports("validation_sessions", self._capabilities()) is True
+        validate_reason = "" if supported else unsupported_feature_message("validation_sessions")
+        for view in device_views:
+            card = self._device_cards.get(view.device_id)
+            if card is None:
+                continue
+            pump = view.pump
+            header_view = by_header.get(pump.member_id) if pump is not None else None
+            if pump is None:
+                char_ok, char_why = False, "This device has no pump member assigned."
+            elif header_view is None:
+                char_ok = False
+                char_why = (
+                    "The pump's header was not found on this system."
+                    if pump.member_id.startswith("hwmon:")
+                    else "Characterisation measures a motherboard PWM header, and this "
+                    "pump is not connected to one."
+                )
+            else:
+                char_ok = header_view.can_characterize
+                char_why = header_view.characterize_disabled_reason
+            card.set_diagnostic_availability(
+                characterize_ok=char_ok,
+                characterize_reason=char_why,
+                validate_ok=supported,
+                validate_reason=validate_reason,
+            )
 
     def _sync_header_cards(self, views) -> None:
         seen = set()
@@ -1780,6 +1824,10 @@ class HardwarePage(QWidget):
         reason = self._header_block_reason()
         for card in self._header_cards.values():
             card.set_diagnostics_blocked(reason)
+        # The device cards' two diagnostics need the same slot (GUI audit
+        # 2026-10-14): during this page's verify they would only be refused.
+        for device_card in self._device_cards.values():
+            device_card.set_diagnostics_blocked(reason)
 
     # `requested_header_id` is the header the worker was asked about (row
     # `ACK-n`). This page has no sweep to attribute a result to (each result
@@ -1816,6 +1864,11 @@ class HardwarePage(QWidget):
             return
         header = next((h for h in self._state.hwmon_headers if h.id == header_id), None)
         if header is None:
+            # A device card's pump member can name a header that has gone, or
+            # one that is not an hwmon header at all; the card says so first.
+            self._show_diag_message(
+                "Cannot characterise: that header is not among this machine's PWM headers."
+            )
             return
         if not self._ensure_char_worker():
             self._show_diag_message("Cannot characterise: no daemon connection.")
@@ -1831,6 +1884,7 @@ class HardwarePage(QWidget):
             is_pump=header_is_pump_protected(header, self._capabilities()),
             header=header,
             capabilities=self._capabilities(),
+            name_for=self._state.member_display_name,
             parent=self,
         )
         dialog.start_requested.connect(self._char_start_request.emit)
@@ -1838,26 +1892,36 @@ class HardwarePage(QWidget):
         dialog.cancel_requested.connect(self._char_cancel_request.emit)
         dialog.preflight_requested.connect(self._char_preflight_request.emit)
         self._char_dialog = dialog
+        self._char_replies.window_opened()
         # BEFORE `exec()`, so the daemon's safety statement is the dialog's first
         # rendered state rather than something that appears after the user has
         # already reached for Start (Batch 1 §6.1). Same ordering as the
-        # control-path dialog.
+        # control-path dialog. Then one status read, so a sweep still running
+        # daemon-side is shown and can be cancelled (GUI audit 2026-10-14, #17).
         dialog.request_preflight()
+        dialog.request_attach()
         try:
             dialog.exec()
         finally:
             dialog.stop_polling()
             self._char_dialog = None
+            self._char_replies.window_closed(stop_sent=dialog.cancel_sent_on_close)
 
     @Slot(object)
     def _on_char_update(self, run) -> None:
-        if self._char_dialog is not None:
+        route = self._char_replies.received()
+        if route is ReplyRoute.WINDOW and self._char_dialog is not None:
             self._char_dialog.apply_run(run)
 
     @Slot(str, str)
     def _on_char_error(self, category: str, message: str) -> None:
-        if self._char_dialog is not None:
+        route = self._char_replies.received()
+        if route is ReplyRoute.WINDOW and self._char_dialog is not None:
             self._char_dialog.apply_error(category, message)
+        elif route is ReplyRoute.STOP_ANSWER:
+            self._show_diag_message(
+                stop_on_close_failed_text("characterisation", message), chip_class="WarningChip"
+            )
 
     @Slot(object)
     def _on_char_preflight_ready(self, report) -> None:
@@ -1910,14 +1974,18 @@ class HardwarePage(QWidget):
         dialog.poll_requested.connect(self._ofancal_poll_request.emit)
         dialog.cancel_requested.connect(self._ofancal_cancel_request.emit)
         self._ofancal_dialog = dialog
+        self._ofancal_replies.window_opened()
         # The picker shows each channel's live RPM, so it follows the 1 Hz poll.
         self._state.fans_updated.connect(self._on_ofancal_fans)
+        # A walk left running ("Keep running") is shown and can be cancelled (#17).
+        dialog.request_attach()
         try:
             dialog.exec()
         finally:
             self._state.fans_updated.disconnect(self._on_ofancal_fans)
             dialog.stop_polling()
             self._ofancal_dialog = None
+            self._ofancal_replies.window_closed(stop_sent=dialog.cancel_sent_on_close)
 
     @Slot(list)
     def _on_ofancal_fans(self, _fans) -> None:
@@ -1926,13 +1994,19 @@ class HardwarePage(QWidget):
 
     @Slot(object)
     def _on_ofancal_update(self, run) -> None:
-        if self._ofancal_dialog is not None:
+        route = self._ofancal_replies.received()
+        if route is ReplyRoute.WINDOW and self._ofancal_dialog is not None:
             self._ofancal_dialog.apply_run(run)
 
     @Slot(str, str)
     def _on_ofancal_error(self, category: str, message: str) -> None:
-        if self._ofancal_dialog is not None:
+        route = self._ofancal_replies.received()
+        if route is ReplyRoute.WINDOW and self._ofancal_dialog is not None:
             self._ofancal_dialog.apply_error(category, message)
+        elif route is ReplyRoute.STOP_ANSWER:
+            self._show_diag_message(
+                stop_on_close_failed_text("calibration", message), chip_class="WarningChip"
+            )
 
     # ── OpenFAN firmware update (DEC-481) ────────────────────────────
 
@@ -2085,6 +2159,7 @@ class HardwarePage(QWidget):
             # still pump-protected daemon-side, and the dialog's warnings must
             # say so or they promise something the daemon will not do.
             is_pump=header_is_pump_protected(header, self._capabilities()),
+            name_for=self._state.member_display_name,
             parent=self,
         )
         dialog.preflight_requested.connect(self._discover_preflight_request.emit)
@@ -2092,14 +2167,18 @@ class HardwarePage(QWidget):
         dialog.poll_requested.connect(self._discover_poll_request.emit)
         dialog.cancel_requested.connect(self._discover_cancel_request.emit)
         self._discover_dialog = dialog
+        self._discover_replies.window_opened()
         # §6.1: the preflight is the dialog's FIRST state, so ask for it before
         # the modal blocks rather than after the user has already read "Ready".
+        # Then one status read, so a run still going daemon-side is shown (#17).
         dialog.request_preflight()
+        dialog.request_attach()
         try:
             dialog.exec()
         finally:
             dialog.stop_polling()
             self._discover_dialog = None
+            self._discover_replies.window_closed(stop_sent=dialog.cancel_sent_on_close)
         # A completed run may have changed the persisted relationship, so
         # re-render the cards from the daemon's own store rather than leaving a
         # stale "Last validated" behind.
@@ -2107,7 +2186,8 @@ class HardwarePage(QWidget):
 
     @Slot(object)
     def _on_discover_update(self, status) -> None:
-        if self._discover_dialog is not None:
+        route = self._discover_replies.received()
+        if route is ReplyRoute.WINDOW and self._discover_dialog is not None:
             self._discover_dialog.apply_run(status)
         # `records` only arrives on the GET; a POST/DELETE reply carries none.
         # `from_status_endpoint` is what tells the two apart — an empty GET is a
@@ -2130,8 +2210,14 @@ class HardwarePage(QWidget):
 
     @Slot(str, str)
     def _on_discover_error(self, category: str, message: str) -> None:
-        if self._discover_dialog is not None:
+        route = self._discover_replies.received()
+        if route is ReplyRoute.WINDOW and self._discover_dialog is not None:
             self._discover_dialog.apply_error(category, message)
+        elif route is ReplyRoute.STOP_ANSWER:
+            self._show_diag_message(
+                stop_on_close_failed_text("control-path discovery", message),
+                chip_class="WarningChip",
+            )
 
     @Slot(object)
     def _on_preflight_ready(self, report) -> None:
@@ -2207,6 +2293,11 @@ class HardwarePage(QWidget):
             # `PTA-b`: every session kind, a passive recording included — the
             # same rule the three toolbar buttons follow.
             self._show_diag_message(RUN_ACTIVE_REASON)
+            return
+        if daemon_supports("validation_sessions", self._capabilities()) is not True:
+            # The device card's entry point used to skip the gate the toolbar
+            # buttons have; the rule lives here too, where every one arrives.
+            self._show_diag_message(unsupported_feature_message("validation_sessions"))
             return
         # REENTRANCY (`P8-bi`). `exec()` used to make this structurally
         # impossible: one blocking call, one dialog. `show()` does not, and all
@@ -2691,6 +2782,14 @@ class HardwarePage(QWidget):
             self._char_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
             self._char_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
             self._char_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
+            # Each answers once, in order: the ledger routes the answers.
+            self._char_replies = RunReplyLedger()  # a new worker owes nothing yet
+            for request in (
+                self._char_start_request,
+                self._char_poll_request,
+                self._char_cancel_request,
+            ):
+                request.connect(self._char_replies.sent)
             self._char_preflight_request.connect(w.do_preflight, Qt.ConnectionType.QueuedConnection)
             w.run_updated.connect(self._on_char_update, Qt.ConnectionType.QueuedConnection)
             w.run_error.connect(self._on_char_error, Qt.ConnectionType.QueuedConnection)
@@ -2711,6 +2810,13 @@ class HardwarePage(QWidget):
             self._ofancal_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
             self._ofancal_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
             self._ofancal_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
+            self._ofancal_replies = RunReplyLedger()  # a new worker owes nothing yet
+            for request in (
+                self._ofancal_start_request,
+                self._ofancal_poll_request,
+                self._ofancal_cancel_request,
+            ):
+                request.connect(self._ofancal_replies.sent)
             w.run_updated.connect(self._on_ofancal_update, Qt.ConnectionType.QueuedConnection)
             w.run_error.connect(self._on_ofancal_error, Qt.ConnectionType.QueuedConnection)
 
@@ -2752,6 +2858,15 @@ class HardwarePage(QWidget):
             self._discover_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
             self._discover_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
             self._discover_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
+            # The background status refresh shares the poll signal, so it is
+            # counted too: its answer precedes a window opened after it.
+            self._discover_replies = RunReplyLedger()  # a new worker owes nothing yet
+            for request in (
+                self._discover_start_request,
+                self._discover_poll_request,
+                self._discover_cancel_request,
+            ):
+                request.connect(self._discover_replies.sent)
             w.run_updated.connect(self._on_discover_update, Qt.ConnectionType.QueuedConnection)
             w.run_error.connect(self._on_discover_error, Qt.ConnectionType.QueuedConnection)
             w.preflight_ready.connect(self._on_preflight_ready, Qt.ConnectionType.QueuedConnection)
@@ -2873,9 +2988,7 @@ class HardwarePage(QWidget):
         """Stand this page's diagnostics down while a run holds the slot."""
         self._report_active = active
         reason = RUN_ACTIVE_REASON if active else ""
-        self._apply_header_block()
-        for device_card in self._device_cards.values():
-            device_card.set_diagnostics_blocked(reason)
+        self._apply_header_block()  # the header and device cards
         self._sync_diagnostic_enablement()
         if self._ofw_dialog is not None:
             self._ofw_dialog.set_external_block(reason)

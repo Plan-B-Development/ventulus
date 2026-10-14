@@ -34,3 +34,19 @@ def live_run_error_text(failures: int, detail: str) -> str:
             f"Last error: {detail}"
         )
     return f"Connection problem — still watching the run. {detail}"
+
+
+def stop_on_close_failed_text(what: str, detail: str) -> str:
+    """What the page says when "Stop" on closing a run's window was refused or lost.
+
+    The window has closed by the time the reply lands, so the page that opened
+    it shows this instead. ``what`` names the diagnostic ("characterisation");
+    ``detail`` is the request's error.
+    """
+    detail = detail.strip()
+    if detail and detail[-1] not in ".!?":
+        detail += "."
+    return (
+        f"Could not stop the {what}: {detail} It may still be running; "
+        "reopen its window to see it or stop it."
+    )

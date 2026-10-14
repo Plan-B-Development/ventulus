@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -206,3 +207,44 @@ class ModalDialog(QDialog):
     def hideEvent(self, event) -> None:
         self._remove_scrim()
         super().hideEvent(event)
+
+
+#: What :func:`ask_close_mid_run` answers.
+CLOSE_STOP = "stop"
+CLOSE_KEEP = "keep"
+CLOSE_STAY = "stay"
+
+
+def ask_close_mid_run(
+    parent: QWidget,
+    *,
+    object_name: str,
+    title: str,
+    text: str,
+    informative: str,
+    stop_label: str,
+) -> str:
+    """Ask whether closing a diagnostic window should stop its daemon-side run.
+
+    Stop, keep it running, or stay (DEC-453). One prompt for every run dialog,
+    so the three diagnostics that hold a header or a channel ask the same
+    question in the same shape. Each caller supplies its own wording, because
+    what the run holds differs.
+    """
+    box = QMessageBox(parent)
+    box.setObjectName(object_name)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(title)
+    box.setText(text)
+    box.setInformativeText(informative)
+    stop = box.addButton(stop_label, QMessageBox.ButtonRole.DestructiveRole)
+    keep = box.addButton("Keep running", QMessageBox.ButtonRole.AcceptRole)
+    box.addButton("Stay here", QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    clicked = box.clickedButton()
+    box.deleteLater()
+    if clicked is stop:
+        return CLOSE_STOP
+    if clicked is keep:
+        return CLOSE_KEEP
+    return CLOSE_STAY

@@ -746,6 +746,10 @@ class TestSystemStatePageCharacterizationCallSite:
         # `exec()` returned, so the page cleared its handle; re-attach the dialog
         # the page itself built to exercise the routing slots against it.
         page._char_dialog = built[0]
+        # The first reply answers the dialog's open-time status read (#17); a
+        # daemon with no run answers None, which leaves the dialog as it opened.
+        page._on_char_update(None)
+        assert built[0]._attaching is False
         built[0]._started = True
 
         page._on_char_update(

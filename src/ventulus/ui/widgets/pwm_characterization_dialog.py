@@ -14,6 +14,8 @@ daemon shutdown — the run reports which, and the header is left high, never lo
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -37,7 +39,7 @@ from ventulus.services.daemon_features import daemon_supports
 from ventulus.services.preflight_view import PreflightView, build_preflight_view
 from ventulus.services.run_contact_view import live_run_error_text
 from ventulus.ui.components.badges import StatusPill
-from ventulus.ui.components.dialog import ModalDialog
+from ventulus.ui.components.dialog import CLOSE_STAY, CLOSE_STOP, ModalDialog, ask_close_mid_run
 from ventulus.ui.components.tables import apply_dense_table
 from ventulus.ui.widgets.collapsible_section import CollapsibleSection
 from ventulus.ui.widgets.pwm_response_chart import PwmResponseChart
@@ -136,6 +138,7 @@ class PwmCharacterizationDialog(ModalDialog):
         is_pump: bool,
         header=None,
         capabilities=None,
+        name_for: Callable[[str], str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__("Characterise PWM Response", parent)
@@ -154,6 +157,16 @@ class PwmCharacterizationDialog(ModalDialog):
         # then does a failed request leave polling and Cancel alone.
         self._run_live = False
         self._failures = 0
+        #: Resolves another header's id to its display name, for the busy note.
+        self._name_for = name_for
+        #: The next reply answers :meth:`request_attach`, not a run we started.
+        self._attaching = False
+        #: Why Start waits: another header's run holds the daemon's one
+        #: characterisation slot. ``""`` when nothing else is running.
+        self._busy_elsewhere = ""
+        #: The user closed mid-run with "Stop characterisation": the page reports
+        #: a failed stop, because this dialog is gone when the reply lands.
+        self.cancel_sent_on_close = False
         # Through the registry, never a raw `getattr` chain: one capability flag
         # gets ONE gating shape. The two shapes that used to coexist here and in
         # `hardware_page._supported_session_diagnostics` are what let DEC-334
@@ -315,6 +328,8 @@ class PwmCharacterizationDialog(ModalDialog):
 
     @Slot()
     def _on_start(self) -> None:
+        if self._busy_elsewhere:
+            return  # the button is disabled; the rule lives where the request is made too
         self._started = True
         self._finished = False
         self._start_btn.setEnabled(False)
@@ -371,6 +386,17 @@ class PwmCharacterizationDialog(ModalDialog):
         """
         self.preflight_requested.emit(self._header_id, DIAGNOSTIC_CHARACTERIZATION)
 
+    def request_attach(self) -> None:
+        """Ask once for the daemon's current run. Call BEFORE ``exec()``, after the preflight.
+
+        The sweep runs daemon-side and outlives this window. Without this a
+        reopened dialog read "Ready to start." while the header was still held,
+        with no Cancel and no result to show.
+        """
+        self._attaching = True
+        self._poll_in_flight = True
+        self.poll_requested.emit()
+
     @Slot(object)
     def apply_preflight(self, report) -> None:
         self._preflight = build_preflight_view(report)
@@ -416,13 +442,24 @@ class PwmCharacterizationDialog(ModalDialog):
         self._blocked_lbl.setText(blocked_text)
         self._blocked_lbl.setVisible(bool(blocked_text))
 
-        # `can_start` is the view-model's, which reads the DAEMON's verdict. The
-        # dialog never rolls the rows up itself — a second copy of that rule is
-        # one that can disagree, and the copy the user is looking at would be
-        # the wrong one.
-        if not self._started:
-            self._start_btn.setEnabled(view.can_start)
-            self._start_btn.setToolTip("" if view.can_start else "\n".join(view.blocking_reasons))
+        self._sync_start()
+
+    def _sync_start(self) -> None:
+        """Start's one gate before a run: the daemon's preflight verdict and the slot.
+
+        `can_start` is the view-model's, which reads the DAEMON's verdict. The
+        dialog never rolls the rows up itself — a second copy of that rule is
+        one that can disagree, and the copy the user is looking at would be
+        the wrong one.
+        """
+        if self._run_tracked():
+            return
+        view: PreflightView = self._preflight
+        reasons = list(view.blocking_reasons)
+        if self._busy_elsewhere:
+            reasons.append(self._busy_elsewhere)
+        self._start_btn.setEnabled(view.can_start and not self._busy_elsewhere)
+        self._start_btn.setToolTip("\n".join(reasons))
 
     def _is_ours(self, run) -> bool:
         """Is this snapshot about the header this dialog was opened for?
@@ -446,6 +483,24 @@ class PwmCharacterizationDialog(ModalDialog):
         """Render a run snapshot. Safe to call with ``None`` (nothing started)."""
         self._poll_in_flight = False
         self._failures = 0
+        if self._attaching:
+            # The answer to `request_attach`. Replies arrive in request order, so
+            # it is always the first. If Start was pressed before it landed it
+            # describes an earlier run and must not be read as the new one's.
+            self._attaching = False
+            if not self._started:
+                self._attach(run)
+            return
+        if self._busy_elsewhere and not self._started:
+            # Watching another header's run for its end (see `_attach`).
+            self._set_busy_elsewhere("")
+            self._timer.stop()
+            self._attach(run)
+            if not self._busy_elsewhere:
+                # The verdict fetched at open was given while the other run held
+                # the slot, so it may still say "blocked" (`ownership`).
+                self.request_preflight()
+            return
         if run is not None and not self._is_ours(run):
             return
         # A run we started that the daemon no longer knows about (it restarted
@@ -457,6 +512,7 @@ class PwmCharacterizationDialog(ModalDialog):
             self._timer.stop()
             self._cancel_btn.setEnabled(False)
             self._start_btn.setEnabled(True)
+            self.request_preflight()  # see the terminal branch below
             self._status_lbl.setText(
                 "The daemon no longer has this run — it may have restarted. "
                 "It restores the header whenever it ends a sweep itself, and a "
@@ -472,6 +528,9 @@ class PwmCharacterizationDialog(ModalDialog):
             self._cancel_btn.setEnabled(False)
             self._start_btn.setEnabled(True)
             self._start_btn.setText("Run again")
+            # The verdict on screen may be from while a run held the slot (an
+            # adopted run's, at open); "Run again" deserves a current one.
+            self.request_preflight()
 
     @Slot(str, str)
     def apply_error(self, category: str, message: str) -> None:
@@ -483,6 +542,13 @@ class PwmCharacterizationDialog(ModalDialog):
         wording escalates. A refused start ends here as before.
         """
         self._poll_in_flight = False
+        if self._attaching:
+            # `request_attach` could not be answered. Best effort: the dialog
+            # stays as it opened, and a refused start ends nothing.
+            self._attaching = False
+            return
+        if self._busy_elsewhere and not self._started:
+            return  # a failed watch poll; the next one decides
         # A refusal is protection or a busy controller, not failure — show the
         # daemon's own words rather than dressing them as an error (the shared
         # taxonomy in `diagnostics_workers._is_soft_refusal`).
@@ -496,6 +562,50 @@ class PwmCharacterizationDialog(ModalDialog):
         self._cancel_btn.setEnabled(False)
         self._start_btn.setEnabled(True)
         self._status_lbl.setText(detail)
+
+    def _attach(self, run) -> None:
+        """Show the daemon's current or most recent run on open.
+
+        The slot is process-global (see :meth:`_is_ours`), so the run may be
+        another header's. Here the match must be explicit: an empty
+        ``header_id`` could be anyone's, and adopting it would offer Cancel on
+        a run this window cannot vouch for.
+
+        * This header, running: adopted — polling resumes and Cancel works.
+        * This header, finished: shown as the most recent result.
+        * Another header (or an unnamed one), running: Start waits, saying why,
+          and polling watches for its end, because the daemon would refuse it.
+        * Anything else: the dialog stays as it opened.
+        """
+        if run is None:
+            return
+        theirs = getattr(run, "header_id", "") or ""
+        view = build_characterization_view(run, header_label=self._header_label)
+        if theirs == self._header_id:
+            self._render(view)
+            if view.running:
+                self._started = True
+                self._finished = False
+                self._run_live = True
+                self._start_btn.setEnabled(False)
+                self._cancel_btn.setEnabled(True)
+                self._timer.start()
+            else:
+                self._status_lbl.setText(f"Most recent run — {self._status_lbl.text()}")
+                self._start_btn.setText("Run again")
+            return
+        if view.running:
+            name = (self._name_for(theirs) if self._name_for else "") or theirs
+            where = f" on {name}" if name else ""
+            self._set_busy_elsewhere(
+                f"Another characterisation is running{where}. Start is available when it ends."
+            )
+            self._timer.start()
+
+    def _set_busy_elsewhere(self, text: str) -> None:
+        self._busy_elsewhere = text
+        self._status_lbl.setText(text or "Ready to start.")
+        self._sync_start()
 
     def _render(self, view: CharacterizationView) -> None:
         self._table.setRowCount(len(view.rows))
@@ -593,6 +703,43 @@ class PwmCharacterizationDialog(ModalDialog):
     def stop_polling(self) -> None:
         self._timer.stop()
 
-    def reject(self) -> None:  # Qt override
+    def _run_tracked(self) -> bool:
+        """A run of ours is being followed: started, and not yet ended or refused."""
+        return self._started and self._timer.isActive()
+
+    def _stoppable(self) -> bool:
+        """A stop can still be asked for: Cancel is live exactly then."""
+        return self._run_tracked() and self._cancel_btn.isEnabled()
+
+    def _ask_close_mid_run(self) -> str:
+        """Stop the sweep, keep it running daemon-side, or stay (the DEC-453 question)."""
+        return ask_close_mid_run(
+            self,
+            object_name="Char_Msg_closeMidRun",
+            title="Characterisation still running",
+            text=(
+                "The characterisation is still running. The daemon holds this header "
+                "at its test duties until it ends."
+            ),
+            informative=(
+                "Stop it now, or keep it running and close this window? The daemon "
+                "restores the header itself either way, and reopening this window "
+                "shows the run."
+            ),
+            stop_label="Stop characterisation",
+        )
+
+    def reject(self) -> None:  # Qt override — Close, Escape and the title-bar X
+        # Only while a stop can still be asked for: Cancel is live exactly then.
+        # After Cancel, or once the run has ended, there is nothing to decide.
+        if self._stoppable():
+            answer = self._ask_close_mid_run()
+            if answer == CLOSE_STAY:
+                return
+            # Polling carries on behind the question, so the run may have ended
+            # meanwhile; a stop sent then would only be refused.
+            if answer == CLOSE_STOP and self._stoppable():
+                self.cancel_sent_on_close = True
+                self.cancel_requested.emit()
         self._timer.stop()
         super().reject()
