@@ -387,15 +387,23 @@ _AGE_NOTE = "Age = how long ago this subsystem's data was last refreshed"
 
 
 def build_daemon_health_vm(
-    caps: Capabilities | None, status: DaemonStatus | None
+    caps: Capabilities | None, status: DaemonStatus | None, *, connected: bool = True
 ) -> DaemonHealthVM:
+    """The Overview's daemon health card.
+
+    ``connected=False`` renders the no-data form whatever ``status`` holds: the
+    last status is all a disconnected GUI has, and showing its "ok", uptime and
+    override countdown as current is what froze this card looking healthy (GUI
+    audit 2026-10-14, batch B). The version stays, labelled as the last one seen
+    only by the "disconnected" beside it.
+    """
     version_text = (
         f"Daemon: v{caps.daemon_version} (API v{caps.api_version})" if caps else "Daemon: —"
     )
-    if status is None:
+    if status is None or not connected:
         return DaemonHealthVM(
             version_text=version_text,
-            status_text="Status: —",
+            status_text="Status: —" if connected else "Status: disconnected",
             status_state="neutral",
             uptime_text="Uptime: —",
             subsystems_text="Subsystems: —",

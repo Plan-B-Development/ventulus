@@ -31,6 +31,21 @@ rename. Version numbers carry on from Control-OFC.
 - A Sync curve can no longer be saved without a fan role to mirror, which the daemon refuses.
 - Demo mode: a card's **Manual** pin no longer keeps driving the simulated fans after the card is
   rebuilt by a save or a profile change.
+- **Starting with no daemon no longer shows "Thermal OK".** The footer showed a green thermal chip
+  built from no data, and the "Daemon disconnected — retrying..." banner never appeared, for as
+  long as the daemon stayed down. The thermal chips now stay hidden until a poll succeeds, and the
+  banner appears as soon as one fails.
+- **Disconnects no longer leave stale health on screen.** The Overview's **Daemon Health** card
+  kept its green status, uptime and override countdown, and the top ribbon kept the daemon's last
+  uptime. Both now go blank, and the card reads **disconnected**.
+- **The System Health full report shows the live thermal state.** It read the state fetched when
+  the page loaded, so it could say "thermal safety normal" beside a Safety card showing an
+  emergency or a disconnect.
+- **Settings re-reads the daemon's configuration.** It was read once per session, so the
+  "restart required" note stayed after you restarted the daemon, and one failed read after a change
+  disabled the card until the app restarted. It is now read on each visit and when the daemon
+  restarts or reconnects. **Exit minimum** and **Coolant limit** no longer stay greyed out as
+  "daemon too old" when Settings opened before the daemon's capabilities arrived.
 
 ## [5.0.0] — 2026-10-10
 

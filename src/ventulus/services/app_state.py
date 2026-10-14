@@ -146,6 +146,9 @@ class AppState(QObject):
 
         # Current state
         self.connection = ConnectionState.DISCONNECTED
+        #: Whether ``connection`` has been reported yet, or is still the
+        #: constructor's placeholder: see :meth:`set_connection`.
+        self._connection_reported = False
         self.mode = OperationMode.READ_ONLY
         self.capabilities: Capabilities | None = None
         self.daemon_status: DaemonStatus | None = None
@@ -246,7 +249,17 @@ class AppState(QObject):
         self.last_poll_monotonic = now if now is not None else time.monotonic()
 
     def set_connection(self, state: ConnectionState) -> None:
-        if state != self.connection:
+        """Record the connection state; ``connection_changed`` fires on a change.
+
+        The first report always fires, even when it repeats the constructor's
+        DISCONNECTED. Before it did not, so a GUI started with no daemon heard
+        nothing from its first failed poll: the "Daemon disconnected" banner never
+        appeared and the footer kept a green "Thermal OK" built from no data
+        (GUI audit 2026-10-14, batch B). Subscribers see one DISCONNECTED they
+        would otherwise have assumed, which every one already renders.
+        """
+        if state != self.connection or not self._connection_reported:
+            self._connection_reported = True
             self.connection = state
             self.connection_changed.emit(state)
             # DEC-459: the thermal alert describes the daemon's state now, so it

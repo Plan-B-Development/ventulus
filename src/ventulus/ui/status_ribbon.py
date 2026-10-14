@@ -153,9 +153,13 @@ class StatusRibbon(QWidget):
         which is also what reconnects, so there is nothing for ``True`` to
         restore — and re-showing the last pill there would re-assert the very
         value this hides.
+
+        The uptime goes back to its no-data form for the same reason (G-17): the
+        daemon's last uptime, frozen, reads as a daemon still running.
         """
         if not live:
             self._thermal_pill.hide()
+            self._uptime_label.setText(format_uptime(None))
 
     def set_thermal_state(self, thermal_state: str | None) -> None:
         if not thermal_state:

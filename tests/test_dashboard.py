@@ -17,8 +17,17 @@ from ventulus.api.models import (
     SubsystemStatus,
     parse_status,
 )
+from ventulus.services.app_state import AppState
 from ventulus.services.profile_service import ControlMember, LogicalControl
 from ventulus.ui.main_window import MainWindow
+
+
+@pytest.fixture()
+def app_state():
+    """A live-mode window's state as `main.py` builds it: no poll has reported a
+    connection yet. The shared fixture's is already CONNECTED, which the window
+    used to reset silently; it no longer reports a connection itself."""
+    return AppState()
 
 
 @pytest.fixture()

@@ -510,7 +510,12 @@ class MainWindow(QWidget):
         if demo_mode:
             self._start_demo_mode()
         else:
-            self._state.set_connection(ConnectionState.DISCONNECTED)
+            # No connection is reported here: the first poll reports it, so the
+            # "Daemon disconnected" banner waits for a poll that actually failed
+            # rather than flashing on every healthy start. The thermal chips are
+            # still pushed dark now, because a signal only carries changes and
+            # until a poll succeeds there is no thermal state to show.
+            self._on_connection_for_live_indicators(self._state.connection)
             self._state.set_mode(OperationMode.READ_ONLY)
 
         # DEC-098: surface daemon-emitted kernel-version warnings (since DEC-422

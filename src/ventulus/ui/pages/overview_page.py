@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ventulus.api.models import default_reading_freshness
+from ventulus.api.models import ConnectionState, default_reading_freshness
 from ventulus.knowledge.sensor_knowledge import classify_reading, sensor_display_name
 from ventulus.services.diagnostics_service import DiagnosticsService
 from ventulus.services.overview_view import (
@@ -366,11 +366,13 @@ class OverviewPage(QWidget):
         return self._state.display_freshness if self._state else default_reading_freshness
 
     def _on_connection_changed(self, _conn) -> None:
-        """Repaint what carries a freshness judgement on a connection edge."""
+        """Repaint what carries a freshness judgement on a connection edge, and
+        the health card, which reads the last status as current otherwise."""
         if self._state is None:
             return
         self._on_fans(self._state.fans)
         self._refresh_summary()
+        self._render_cards()
 
     def _on_fans(self, fans: list) -> None:
         headers = self._state.hwmon_headers if self._state else []
@@ -401,7 +403,8 @@ class OverviewPage(QWidget):
         if self._diag.last_hw_diagnostics is not None:
             writable = self._diag.last_hw_diagnostics.hwmon.writable_headers
 
-        dh = build_daemon_health_vm(self._caps, self._status)
+        connected = self._state is None or self._state.connection != ConnectionState.DISCONNECTED
+        dh = build_daemon_health_vm(self._caps, self._status, connected=connected)
         self._daemon_version_label.setText(dh.version_text)
         self._daemon_status_label.setText(dh.status_text)
         status_word = dh.status_text.removeprefix("Status: ")

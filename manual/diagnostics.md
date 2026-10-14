@@ -27,7 +27,7 @@ window has spare; drag the handle between them to give one more room.
 | Field | Meaning |
 |-------|---------|
 | **Daemon version** | Version of the running daemon and its API |
-| **Status** | Overall health: "healthy", "warning", or "critical" |
+| **Status** | Overall health: "healthy", "warning", or "critical"; **disconnected** while the daemon cannot be reached, with uptime, subsystems and overrides blank until it is back |
 | **Uptime** | How long the daemon has been running since it last started |
 | **Subsystems** | The subsystems the daemon reports (`openfan`, `hwmon`, `engine` and `controls`), each with its status and age. With no OpenFAN controller the `openfan` line is left out; it reappears if that subsystem reports a fault, so a controller that drops off mid-session still shows |
 
@@ -150,7 +150,9 @@ a problem you have just fixed is still reported.
 **Refresh** and **Open Full Report ↗** sit on the System Health Overview header. *Open
 Full Report* opens the whole report, *System Health — Full Report*, in its own
 resizable window with every link clickable. It always contains every condition and
-note, including ones you dismissed, so it is the complete record for support.
+note, including ones you dismissed, so it is the complete record for support. Its
+thermal state is the live one the **Safety & GPU Limits** card shows, and it follows
+that card while the window is open.
 
 ### Conditions
 

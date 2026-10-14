@@ -57,6 +57,32 @@ from ventulus.ui.theme import active_theme
 if TYPE_CHECKING:
     from ventulus.api.models import GpuVerifyResult, HardwareDiagnosticsResult
 
+#: What a page passes as ``live_thermal_state`` while the daemon is unreachable
+#: (`TS-g`). GUI-only, and deliberately not a wire token: the daemon's are bare
+#: snake_case words, so angle brackets cannot collide with one. It is NOT the
+#: empty string, which means "no poll yet" and falls back to the
+#: `/diagnostics/hardware` snapshot — after a disconnect exactly the stale value
+#: this exists to stop presenting as current.
+THERMAL_STATE_NO_CONNECTION = "<no connection>"
+
+
+def current_thermal_state(ts, live_thermal_state: str | None) -> str | None:
+    """The thermal state to present as current, or ``None`` when there is none.
+
+    One rule for the System State Safety row and the readiness report (DEC-358,
+    `SSN-i`): the live 1 Hz ``DaemonStatus.thermal_state`` wins over the copy in
+    ``/diagnostics/hardware``, which is fetched once and can be hours old; with
+    no poll yet (``""``/``None``) the snapshot is all there is; and
+    :data:`THERMAL_STATE_NO_CONNECTION` means neither copy is current. ``""``
+    when even the snapshot has no state.
+    """
+    if live_thermal_state == THERMAL_STATE_NO_CONNECTION:
+        return None
+    if live_thermal_state:
+        return live_thermal_state
+    return ts.state if ts is not None and ts.state else ""
+
+
 _HW_COMPAT_URL = (
     "https://github.com/Plan-B-Development/ventulus/blob/main/docs/19_Hardware_Compatibility.md"
 )
@@ -694,6 +720,7 @@ def readiness_verdict(
     *,
     pwm_control_verified: bool | None = None,
     duty_drift: DutyDriftState,
+    live_thermal_state: str | None = None,
 ) -> tuple[str, str]:
     """Return ``(verdict_text, css_class)`` for the readiness banner.
 
@@ -710,14 +737,24 @@ def readiness_verdict(
     problems = detect_readiness_problems(
         diag, pwm_control_verified=pwm_control_verified, duty_drift=duty_drift
     )
-    ts = diag.thermal_safety
-    thermal = f"thermal safety {ts.state}" if ts and ts.state else "thermal safety unknown"
+    # The page's live thermal state, by the Safety row's rule (DEC-358): the
+    # snapshot's state alone made this read "thermal safety normal" beside a
+    # Safety row showing Emergency or "disconnected".
+    state = current_thermal_state(diag.thermal_safety, live_thermal_state)
+    if state is None:
+        thermal = "thermal safety unknown — disconnected"
+    else:
+        thermal = f"thermal safety {state}" if state else "thermal safety unknown"
     if not problems:
-        return (
-            f"✓ System ready — {hw.total_headers} PWM header(s), "
-            f"{hw.writable_headers} writable · {thermal}",
-            "SuccessChip",
-        )
+        headers = f"{hw.total_headers} PWM header(s), {hw.writable_headers} writable · {thermal}"
+        # A live state can be anything now, and a green "✓ System ready" over
+        # "thermal safety emergency" or "disconnected" contradicts itself. The
+        # snapshot's own "" keeps the success arm it always had.
+        if state == "emergency":
+            return (f"Hardware ready — {headers}", "CriticalChip")
+        if state is None or state not in ("", "normal"):
+            return (f"Hardware ready — {headers}", "WarningChip")
+        return (f"✓ System ready — {headers}", "SuccessChip")
     n = len(problems)
     phrase = "issue needs" if n == 1 else "issues need"
     critical = any(p["severity"] == "critical" for p in problems)
@@ -881,11 +918,16 @@ def advisory_rows(diag: HardwareDiagnosticsResult) -> list[VendorQuirk]:
     return quirks
 
 
-def thermal_line(ts) -> str | None:
+def thermal_line(ts, live_thermal_state: str | None = None) -> str | None:
     """Return the one-line thermal-safety summary, or ``None`` when no thermal
-    info is present. Only ``state`` is daemon-supplied (escape in HTML)."""
+    info is present. Only ``state`` is daemon-supplied (escape in HTML).
+
+    The state follows :func:`current_thermal_state`; the limits and the sensor
+    note stay on the snapshot, which is where the daemon reports them."""
     if ts is None:
         return None
+    state = current_thermal_state(ts, live_thermal_state)
+    state_text = "unknown — disconnected" if state is None else (state or "unknown")
     # DEC-269: the daemon changed what this field answers. It used to mean "is a
     # CpuTemp sensor present?"; since the freshness filter it means "is there a
     # CURRENT reading?" — false for a sensor that is still listed but has
@@ -897,7 +939,7 @@ def thermal_line(ts) -> str | None:
     # which rung an emergency came from — so each limit is named for its rung
     # rather than one unqualified "emergency" figure beside "State: emergency".
     line = (
-        f"State: {ts.state} · CPU sensor: {found} · "
+        f"State: {state_text} · CPU sensor: {found} · "
         f"CPU emergency {ts.emergency_threshold_c:.0f}°C · "
         f"release {ts.release_threshold_c:.0f}°C"
     )
@@ -913,6 +955,7 @@ def build_readiness_report_html(
     *,
     pwm_control_verified: bool | None = None,
     duty_drift: DutyDriftState,
+    live_thermal_state: str | None = None,
 ) -> str:
     """Build the full, self-contained HTML report for the pop-out window.
 
@@ -925,7 +968,10 @@ def build_readiness_report_html(
     t = active_theme()
     hw = diag.hwmon
     verdict_text, verdict_cls = readiness_verdict(
-        diag, pwm_control_verified=pwm_control_verified, duty_drift=duty_drift
+        diag,
+        pwm_control_verified=pwm_control_verified,
+        duty_drift=duty_drift,
+        live_thermal_state=live_thermal_state,
     )
     sev_color = severity_hex(verdict_cls, t)
 
@@ -998,7 +1044,7 @@ def build_readiness_report_html(
         out.append(f'<table cellpadding="4">{"".join(rows)}</table>')
 
     # Thermal + GPU
-    thermal = thermal_line(diag.thermal_safety)
+    thermal = thermal_line(diag.thermal_safety, live_thermal_state)
     if thermal:
         out.append(h("Thermal safety"))
         out.append(f"<div>{escape(thermal)}</div>")

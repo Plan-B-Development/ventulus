@@ -666,11 +666,7 @@ class SystemStatePage(QWidget):
         self._update_gpu_verify_availability(diag)
         self._open_report_btn.setEnabled(True)
         if self._report_dialog is not None and self._report_dialog.isVisible():
-            self._report_dialog.set_html(
-                build_readiness_report_html(
-                    diag, pwm_control_verified=self._pwm_verified(), duty_drift=self._duty_drift()
-                )
-            )
+            self._report_dialog.set_html(self._readiness_report_html(diag))
 
     @Slot(str, bool)
     def _on_note_acknowledged(self, token: str, acknowledged: bool) -> None:
@@ -1659,13 +1655,27 @@ class SystemStatePage(QWidget):
         self._duty_drift_state = state
         self._rerender_last_diagnostics()
 
+    def _readiness_report_html(self, diag) -> str:
+        """The full report, from the same inputs the page renders from.
+
+        The one place both render sites (open, and the re-render on a change)
+        build it, so neither can drop an input the page uses. The live thermal
+        state is the one the Safety row shows (DEC-358, `SSN-i`); without it the
+        report said "thermal safety normal" from the fetched snapshot while the
+        row beside it said Emergency or "disconnected".
+        """
+        return build_readiness_report_html(
+            diag,
+            pwm_control_verified=self._pwm_verified(),
+            duty_drift=self._duty_drift(),
+            live_thermal_state=self._live_thermal_state,
+        )
+
     def _open_readiness_report(self) -> None:
         diag = self._diag.last_hw_diagnostics
         if diag is None:
             return
-        html = build_readiness_report_html(
-            diag, pwm_control_verified=self._pwm_verified(), duty_drift=self._duty_drift()
-        )
+        html = self._readiness_report_html(diag)
         if self._report_dialog is None:
             self._report_dialog = ReadinessReportDialog(html, self)
         else:

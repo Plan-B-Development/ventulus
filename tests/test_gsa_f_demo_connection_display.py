@@ -37,9 +37,12 @@ def _window(qtbot, app_state, profile_service, settings_service, *, demo: bool) 
 
 
 def test_live_connect_still_toasts_and_paints_the_ribbon_green(
-    qtbot, app_state, profile_service, settings_service
+    qtbot, profile_service, settings_service
 ):
     """The presence half: a real connection keeps its toast and green ribbon."""
+    # A fresh state, as `main.py` builds it: the shared fixture's is already
+    # CONNECTED, so connecting it again would change nothing.
+    app_state = AppState()
     win = _window(qtbot, app_state, profile_service, settings_service, demo=False)
     app_state.set_connection(ConnectionState.CONNECTED)
     assert win.error_banner.isVisibleTo(win)

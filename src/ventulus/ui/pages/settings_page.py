@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ventulus.services.series_selection import SeriesSelectionModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -266,6 +267,13 @@ class SettingsPage(QWidget):
         self._daemon_config_unsupported = False
         self._populating_daemon_cfg = False
         self._daemon_cfg_loaded = False
+        #: Whether the card's result line holds a failed read's message, which a
+        #: later successful read takes down (a write's message it leaves).
+        self._daemon_cfg_read_error_shown = False
+        #: The key whose write result is on the result line while that key was
+        #: still restart-pending: a read that finds it in effect takes the line
+        #: down, or it would say "takes effect on next restart" after one.
+        self._daemon_cfg_result_pending_key: str | None = None
         # Last values the daemon reported, keyed by config key. The write
         # guard compares against these so a focus-out cannot re-POST an
         # untouched field (see _write_daemon_key).
@@ -988,11 +996,7 @@ class SettingsPage(QWidget):
             SectionHeader("Daemon Configuration", object_name="Settings_SectionHeader_daemonConfig")
         )
 
-        self._daemon_cfg_note = QLabel(
-            "Settings owned by the daemon, written to its runtime configuration. "
-            "Most take effect when the daemon restarts; the exit minimum and the "
-            "profile search directories apply at once."
-        )
+        self._daemon_cfg_note = QLabel(self._DAEMON_CFG_NOTE)
         self._daemon_cfg_note.setWordWrap(True)
         self._daemon_cfg_note.setProperty("class", "CardMeta")
         v.addWidget(self._daemon_cfg_note)
@@ -1281,8 +1285,24 @@ class SettingsPage(QWidget):
             self._remove_search_dir_btn,
         ]
 
+    #: The Daemon Configuration card's lead text, put back by a successful read
+    #: after a failure replaced it.
+    _DAEMON_CFG_NOTE = (
+        "Settings owned by the daemon, written to its runtime configuration. "
+        "Most take effect when the daemon restarts; the exit minimum and the "
+        "profile search directories apply at once."
+    )
+
     def _refresh_daemon_config(self) -> None:
-        """Fetch GET /config and render it. 404-tolerant (pre-2.16.0 daemon)."""
+        """Fetch GET /config and render it. 404-tolerant (pre-2.16.0 daemon).
+
+        Runs on every arrival at the page, after each write, and when
+        capabilities refresh while the page is on screen (reconnect, daemon
+        restart, the 300 s refresh; `_follow_daemon_config`). It used to run once
+        per session, so a daemon restart left the "restart required" banner up
+        and a failed read after a write left the card disabled for good (GUI
+        audit 2026-10-14, batch B).
+        """
         # `WIRE-k`: latch on the daemon's own answer BEFORE the request, instead
         # of only on a 404 coming back. `daemon_supports` is `None` on any daemon
         # predating the flag, which falls through to the unchanged 404 arm below.
@@ -1315,6 +1335,7 @@ class SettingsPage(QWidget):
                 self._set_daemon_cfg_result(
                     f"Could not read daemon configuration: {e.message}", "CriticalChip"
                 )
+                self._daemon_cfg_read_error_shown = True
             self._set_daemon_config_available(False)
             return
 
@@ -1326,7 +1347,16 @@ class SettingsPage(QWidget):
         # 404 branch above latches separately and permanently, which is correct
         # — a daemon does not gain the endpoint without restarting.
         self._daemon_cfg_loaded = True
-        self._set_daemon_config_available(True)
+        # A read that worked takes down what an earlier failed one put up; a
+        # write's own result is left alone.
+        self._daemon_cfg_note.setText(self._DAEMON_CFG_NOTE)
+        if self._daemon_cfg_read_error_shown:
+            self._set_daemon_cfg_result("", "")
+        pending_key = self._daemon_cfg_result_pending_key
+        if pending_key is not None:
+            entry = cfg.get(pending_key)
+            if entry is None or not entry.restart_pending:
+                self._set_daemon_cfg_result("", "")
         self._render_daemon_config(cfg)
 
     def _set_daemon_config_available(self, available: bool) -> None:
@@ -1381,18 +1411,7 @@ class SettingsPage(QWidget):
         finally:
             self._populating_daemon_cfg = False
 
-        self._apply_daemon_key_mutability(cfg)
-
-        divergence = {
-            "profiles.search_dirs": self._search_dir_divergence,
-            "shutdown.exit_floor_pct": self._exit_floor_divergence,
-            "safety.coolant_limit_c": self._coolant_limit_divergence,
-        }
-        for key, label in self._daemon_row_notes.items():
-            note = divergence.get(key)
-            self._render_daemon_row_note(cfg.get(key), label, extra=note(cfg) if note else "")
-        self._apply_live_key_support(cfg, "exit_floor", "shutdown.exit_floor_pct")
-        self._apply_live_key_support(cfg, "cooling_failure_detection", "safety.coolant_limit_c")
+        self._apply_daemon_config_gating(cfg)
 
         if cfg.restart_pending:
             # Name the keys rather than showing a bare count: a count alone reads
@@ -1412,6 +1431,78 @@ class SettingsPage(QWidget):
             f"Socket: {self._daemon_value(cfg, 'ipc.socket_path')} · "
             f"State directory: {self._daemon_value(cfg, 'state.state_dir')}"
         )
+
+    def _apply_daemon_config_gating(self, cfg) -> None:
+        """Enable the card's editors as far as this daemon and its capabilities allow.
+
+        Part of every render, and run on its own when capabilities refresh while
+        a daemon field is being edited (`_follow_daemon_config`), so the exit
+        minimum and the coolant limit follow capabilities that land after the
+        config. Before, they were gated once, at the render: a config read before
+        the first `/capabilities` greyed both out as "daemon too old" for the
+        whole session (GUI audit 2026-10-14, batch B).
+        """
+        self._set_daemon_config_available(True)
+        self._refresh_search_dir_buttons()
+        self._apply_daemon_key_mutability(cfg)
+
+        divergence = {
+            "profiles.search_dirs": self._search_dir_divergence,
+            "shutdown.exit_floor_pct": self._exit_floor_divergence,
+            "safety.coolant_limit_c": self._coolant_limit_divergence,
+        }
+        for key, label in self._daemon_row_notes.items():
+            note = divergence.get(key)
+            self._render_daemon_row_note(cfg.get(key), label, extra=note(cfg) if note else "")
+        self._apply_live_key_support(cfg, "exit_floor", "shutdown.exit_floor_pct")
+        self._apply_live_key_support(cfg, "cooling_failure_detection", "safety.coolant_limit_c")
+
+    def _follow_daemon_config(self) -> None:
+        """Re-read the daemon's configuration when capabilities refresh on screen.
+
+        A capabilities refresh is what follows a reconnect or a daemon restart,
+        which is when a restart-pending key stops being pending. Off screen
+        nothing is read: the next arrival reads anyway. While one of the card's
+        editors has focus the read is skipped, because a render would replace
+        the value being typed; only the gating is re-applied. Focus alone is not
+        editing: a value committed with Enter keeps focus, and a read skipped
+        there would leave "restart required" up after the restart.
+        """
+        if self._client is None or not self.isVisible():
+            return
+        if self._daemon_config is not None and self._daemon_cfg_editing():
+            if self._daemon_cfg_loaded and not self._daemon_config_unsupported:
+                self._apply_daemon_config_gating(self._daemon_config)
+            return
+        self._refresh_port_probe_availability()
+        self._refresh_daemon_config()
+
+    def _daemon_cfg_editing(self) -> bool:
+        """Whether a daemon-config editor has focus and holds an uncommitted value.
+
+        Uncommitted means it differs from what the daemon last reported (the
+        write guard's own baseline). A key the daemon did not report has no
+        baseline, so focus alone counts there.
+        """
+        focus = QApplication.focusWidget()
+        if focus is None:
+            return False
+        for key, widget in self._daemon_key_widgets.items():
+            if widget is focus or widget.isAncestorOf(focus):
+                if key not in self._daemon_cfg_rendered:
+                    return True
+                return self._daemon_editor_value(widget) != self._daemon_cfg_rendered[key]
+        return False
+
+    def _daemon_editor_value(self, widget: QWidget) -> object:
+        """What a daemon-config editor would write, in the write path's terms."""
+        if widget is self._serial_port_edit:
+            return self._serial_port_edit.text().strip() or None
+        if isinstance(widget, QSpinBox):
+            return widget.value()
+        if isinstance(widget, ToggleSwitch):
+            return widget.isChecked()
+        return None
 
     def _apply_live_key_support(self, cfg, feature_id: str, key: str) -> None:
         """Stand a capability-gated control down on a daemon that cannot honour it.
@@ -1496,6 +1587,10 @@ class SettingsPage(QWidget):
         answer to "where does the daemon look?" — and the daemon reports it from
         its in-process lock precisely so a client can show that.
         """
+        # A re-read can land while the page is open (`_follow_daemon_config`), so
+        # keep the selection: clearing it disabled Remove under the user.
+        selected = self._search_dirs_list.currentItem()
+        selected_text = selected.text() if selected is not None else None
         self._search_dirs_list.clear()
         if entry is None:
             self._refresh_search_dir_buttons()
@@ -1504,6 +1599,10 @@ class SettingsPage(QWidget):
         dirs = running if isinstance(running, list) else entry.value
         if isinstance(dirs, list):
             self._search_dirs_list.addItems([str(d) for d in dirs])
+        if selected_text is not None:
+            matches = self._search_dirs_list.findItems(selected_text, Qt.MatchFlag.MatchExactly)
+            if matches:
+                self._search_dirs_list.setCurrentItem(matches[0])
         self._refresh_search_dir_buttons()
 
     @staticmethod
@@ -1841,12 +1940,17 @@ class SettingsPage(QWidget):
         # Re-read rather than trusting the local control: this is what makes the
         # restart-pending annotation the daemon's verdict instead of our memory.
         self._refresh_daemon_config()
+        entry = self._daemon_config.get(key) if self._daemon_config is not None else None
+        if entry is not None and entry.restart_pending:
+            self._daemon_cfg_result_pending_key = key
         if key == "safety.coolant_limit_c" and self._state is not None:
             # System State shows the limit from `/diagnostics/hardware`; without a
             # re-read a later coolant emergency named the limit from before.
             self._state.request_hw_diagnostics_refresh()
 
     def _set_daemon_cfg_result(self, text: str, css: str) -> None:
+        self._daemon_cfg_read_error_shown = False
+        self._daemon_cfg_result_pending_key = None
         self._daemon_cfg_result.setText(text)
         self._daemon_cfg_result.setVisible(bool(text))
         if css:
@@ -2360,6 +2464,7 @@ class SettingsPage(QWidget):
         del caps
         self._apply_openfan_presence_annotation()
         self._refresh_reset_buttons()
+        self._follow_daemon_config()
 
     def _load_current_settings(self) -> None:
         s = self._settings_svc.settings
@@ -2572,10 +2677,10 @@ class SettingsPage(QWidget):
         # is shown — a light, cache-backed GET kept off the startup path.
         if not self._prefs_loaded and self._client is not None:
             self._refresh_preferred_sensors()
-        # Daemon config is likewise fetched on first arrival, not at startup.
-        # `_refresh_daemon_config` owns the latch and sets it only on success,
-        # so a transient failure retries on the next visit.
-        if not self._daemon_cfg_loaded and self._client is not None:
+        # Daemon config is read on every arrival, not at startup: the daemon
+        # may have restarted, or a key stopped being restart-pending, since the
+        # last visit, and a failed read must not stand for the session.
+        if self._client is not None:
             self._refresh_port_probe_availability()
             self._refresh_daemon_config()
         # The mirrored surfaces reflect state owned elsewhere (fans arrive by

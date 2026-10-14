@@ -73,13 +73,11 @@ _STATE_BY_CSS: dict[str, str] = {
 }
 
 #: What :func:`build_safety_gpu_vm` receives as ``live_thermal_state`` while the
-#: daemon is unreachable (`TS-g`). GUI-only, and deliberately not a wire token:
-#: the daemon's are bare snake_case words, so angle brackets cannot collide with
-#: one — which is also why it is absent from ``_THERMAL_STATE`` below. It is NOT
-#: the empty string, which means "no poll yet" and falls back to the
-#: `/diagnostics/hardware` snapshot — after a disconnect exactly the stale value
-#: this exists to stop presenting as current.
-THERMAL_STATE_NO_CONNECTION = "<no connection>"
+#: daemon is unreachable (`TS-g`). Defined beside the readiness report's
+#: :func:`~ventulus.ui.widgets.readiness_report.current_thermal_state`, the one
+#: rule both surfaces read; absent from ``_THERMAL_STATE`` below because it is
+#: not a wire token.
+THERMAL_STATE_NO_CONNECTION = readiness.THERMAL_STATE_NO_CONNECTION
 
 # Daemon `thermal_state` → pill state.
 #
@@ -1096,8 +1094,8 @@ def build_safety_gpu_vm(
     ack_index, dismiss_index = silence.index(state_rank, known_state)
 
     ts = diag.thermal_safety
-    snapshot_state = ts.state if ts else ""
-    wire_state = live_thermal_state if live_thermal_state else snapshot_state
+    current_state = readiness.current_thermal_state(ts, live_thermal_state)
+    wire_state = current_state or ""
     state_key = wire_state.strip().lower()
     thermal_text = wire_state.capitalize() if wire_state else "Unknown"
     thermal_limit_text = _thermal_limit_text(ts, state_key, live_emergency_causes)
@@ -1140,7 +1138,7 @@ def build_safety_gpu_vm(
     )
     if thermal_silence.quiet:
         thermal_state = "neutral"
-    if live_thermal_state == THERMAL_STATE_NO_CONNECTION:
+    if current_state is None:
         # `TS-g`: say that the state is unknown and why, in no alarm colour, and
         # offer no silence — there is nothing current to acknowledge, and a
         # dismissal taken here would be stored against a state nobody saw.

@@ -52,7 +52,7 @@ When you change the Profiles directory, the GUI registers the new path with the 
 
 ## Daemon Configuration
 
-Settings that belong to the daemon rather than to this application. Every value shown here is read from the daemon, never guessed locally, and each row says where its value came from (`set in daemon.toml`, or `set here` when a change made from this card is shadowing the admin file) and whether a daemon restart is still owed. Changes save as you make them: there is no separate Save step for this card, and moving through the card without editing anything writes nothing.
+Settings that belong to the daemon rather than to this application. Every value shown here is read from the daemon, never guessed locally. It is read each time you open the page, after each change, and when the daemon restarts or reconnects while the page is open. Each row says where its value came from (`set in daemon.toml`, or `set here` when a change made from this card is shadowing the admin file) and whether a daemon restart is still owed. Changes save as you make them: there is no separate Save step for this card, and moving through the card without editing anything writes nothing.
 
 The defaults below are the daemon's own, used when neither `daemon.toml` nor this card sets a value.
 
