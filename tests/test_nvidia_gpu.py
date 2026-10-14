@@ -511,6 +511,9 @@ class TestControlsMemberPickerExcludesNvidia:
             def exec(self):
                 return 0  # Cancel — the picker must not mutate state.
 
+            def deleteLater(self):
+                return None
+
             def get_members(self):
                 return []
 

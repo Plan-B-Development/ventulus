@@ -340,6 +340,9 @@ def test_configure_aio_creates_pump_control(qtbot, app_state, profile_service, m
         def exec(self):
             return True
 
+        def deleteLater(self):
+            return None
+
         def get_result(self):
             return {
                 "pump_pct": 80,
@@ -379,6 +382,9 @@ def test_member_picker_tags_aio_pump(qtbot, app_state, profile_service, monkeypa
 
         def exec(self):
             return False
+
+        def deleteLater(self):
+            return None
 
     monkeypatch.setattr("ventulus.ui.widgets.member_editor.MemberEditorDialog", _FakeMemberDialog)
     page._on_edit_members(control_id)

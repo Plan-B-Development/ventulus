@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 )
 
 from ventulus.ui.components.buttons import make_button
+from ventulus.ui.components.transient import exec_dialog
 
 
 class _ScrimOverlay(QWidget):
@@ -240,9 +241,8 @@ def ask_close_mid_run(
     stop = box.addButton(stop_label, QMessageBox.ButtonRole.DestructiveRole)
     keep = box.addButton("Keep running", QMessageBox.ButtonRole.AcceptRole)
     box.addButton("Stay here", QMessageBox.ButtonRole.RejectRole)
-    box.exec()
+    exec_dialog(box)
     clicked = box.clickedButton()
-    box.deleteLater()
     if clicked is stop:
         return CLOSE_STOP
     if clicked is keep:

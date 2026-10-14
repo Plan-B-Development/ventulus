@@ -60,6 +60,7 @@ from ventulus.services.verify_view import (
 )
 from ventulus.ui.components.a11y import name_value_control
 from ventulus.ui.components.buttons import make_button
+from ventulus.ui.components.transient import exec_dialog
 from ventulus.ui.pages.diagnostics_workers import (
     _CharacterizationWorker,
     _GpuVerifyWorker,
@@ -1198,7 +1199,7 @@ class SystemStatePage(QWidget):
         dialog.request_preflight()
         dialog.request_attach()
         try:
-            dialog.exec()
+            exec_dialog(dialog)
         finally:
             dialog.stop_polling()
             self._char_dialog = None

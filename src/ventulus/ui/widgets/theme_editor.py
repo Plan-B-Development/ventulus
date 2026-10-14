@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from ventulus.colors import is_valid_color
 from ventulus.ui.components.a11y import name_value_control
 from ventulus.ui.components.cards import SectionHeader
+from ventulus.ui.components.transient import exec_dialog
 from ventulus.ui.qt_util import repolish
 from ventulus.ui.theme import (
     ThemeTokens,
@@ -205,7 +206,7 @@ class ColorSwatch(QPushButton):
         dlg = QColorDialog(initial, self.window())
         dlg.setWindowTitle(f"Choose {self._token_name}")
         dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog)
-        result = dlg.exec()
+        result = exec_dialog(dlg)
 
         if app:
             app.setStyleSheet(saved_stylesheet)

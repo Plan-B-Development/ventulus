@@ -480,9 +480,11 @@ These surfaces consume this knowledge base:
    The note list is capped at 3 entries for readability.
 2. **Sensor Detail dialog** (`Diagnostics_SensorDetail_Dialog`): opens by
    double-clicking a row, pressing Enter on it, or right-click → **Open detail…**.
-   Shows the full classification description **and every classification note** (not
-   truncated), the matching board override if one exists, board context, the
-   Thresholds section, and a clickable kernel.org driver doc link. On a daemon that
+   A live strip at the top follows the poll (value, age, freshness, trend, session
+   range, headroom to crit). The report below it shows the full classification
+   description **and every classification note** (not truncated), the matching board
+   override if one exists, board context, the Thresholds section, and a clickable
+   kernel.org driver doc link. On a daemon that
    publishes its own classification it adds a **Daemon classification** section, whose
    confidence is the daemon's own scale and is not comparable one-for-one with the
    GUI's levels below. This is the canonical surface when a user wants the full story

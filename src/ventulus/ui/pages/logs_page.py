@@ -91,6 +91,7 @@ from ventulus.ui.components.a11y import name_value_control
 from ventulus.ui.components.badges import StatusPill
 from ventulus.ui.components.buttons import make_button
 from ventulus.ui.components.tables import apply_dense_table
+from ventulus.ui.components.transient import exec_dialog
 from ventulus.ui.qt_util import block_signals, style_splitter
 from ventulus.ui.widgets.activity_histogram import ActivityHistogram
 from ventulus.ui.widgets.alert_center_dialog import AlertCenterDialog
@@ -1074,7 +1075,7 @@ class LogsPage(QWidget):
             return
         dialog = AlertCenterDialog(self._state, self)
         dialog.show_related_logs.connect(self.show_related_logs)
-        dialog.exec()
+        exec_dialog(dialog)
 
     def show_related_logs(self, source: str, component: str) -> None:
         """Narrow the list to an alert's context — the Alert Centre's entry point.

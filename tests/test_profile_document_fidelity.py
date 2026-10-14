@@ -386,6 +386,9 @@ class TestReviewRemediation:
             def exec(self):
                 return 1
 
+            def deleteLater(self):
+                return None
+
             def get_result(self):
                 return result
 

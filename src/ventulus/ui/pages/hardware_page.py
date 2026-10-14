@@ -107,6 +107,7 @@ from ventulus.ui.components.badges import StatusPill
 from ventulus.ui.components.buttons import make_button
 from ventulus.ui.components.cards import Card, SectionHeader
 from ventulus.ui.components.tables import apply_dense_table
+from ventulus.ui.components.transient import exec_dialog
 from ventulus.ui.cooling_readiness import build_readiness_items
 from ventulus.ui.pages.diagnostics_workers import (
     _CharacterizationWorker,
@@ -961,7 +962,7 @@ class HardwarePage(QWidget):
             intro_text=OPENFAN_ROLE_INTRO.format(name=name),
             parent=parent,
         )
-        if not dialog.exec():
+        if not exec_dialog(dialog):
             return None
         new_role = dialog.chosen_role()
         plan = plan_role_change(role, new_role)
@@ -1901,7 +1902,7 @@ class HardwarePage(QWidget):
         dialog.request_preflight()
         dialog.request_attach()
         try:
-            dialog.exec()
+            exec_dialog(dialog)
         finally:
             dialog.stop_polling()
             self._char_dialog = None
@@ -1980,7 +1981,7 @@ class HardwarePage(QWidget):
         # A walk left running ("Keep running") is shown and can be cancelled (#17).
         dialog.request_attach()
         try:
-            dialog.exec()
+            exec_dialog(dialog)
         finally:
             self._state.fans_updated.disconnect(self._on_ofancal_fans)
             dialog.stop_polling()
@@ -2174,7 +2175,7 @@ class HardwarePage(QWidget):
         dialog.request_preflight()
         dialog.request_attach()
         try:
-            dialog.exec()
+            exec_dialog(dialog)
         finally:
             dialog.stop_polling()
             self._discover_dialog = None
@@ -2632,7 +2633,7 @@ class HardwarePage(QWidget):
             choices=role_choices(caps),
             parent=parent,
         )
-        if not dialog.exec():
+        if not exec_dialog(dialog):
             return None
         role = dialog.chosen_role()
         outcome = apply_role_writes(

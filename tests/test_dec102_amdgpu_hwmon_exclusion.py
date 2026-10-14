@@ -102,6 +102,9 @@ class TestEditMembersPickerFiltersUnwritableHeaders:
             def exec(self):
                 return 0  # Cancel — _on_edit_members must not mutate state.
 
+            def deleteLater(self):
+                return None
+
             def get_members(self):
                 return []
 

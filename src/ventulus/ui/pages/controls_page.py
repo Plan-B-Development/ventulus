@@ -97,6 +97,7 @@ from ventulus.services.profile_service import (
 from ventulus.services.shared_fan_switch import SharedSwitchRuleError
 from ventulus.ui.components.buttons import make_button
 from ventulus.ui.components.cards import SectionHeader
+from ventulus.ui.components.transient import exec_dialog, exec_menu
 from ventulus.ui.qt_util import set_chip_class, style_splitter
 from ventulus.ui.widgets.card_metrics import DEFAULT_CARD_SIZE, card_pane_min_width
 from ventulus.ui.widgets.control_card import ControlCard
@@ -1116,7 +1117,7 @@ class ControlsPage(QWidget):
         menu.addAction("Delete Profile", self._on_delete_profile)
         btn = self.findChild(QPushButton, "Controls_Btn_manageProfiles")
         if btn:
-            menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+            exec_menu(menu, btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _on_new_profile(self, name: str | None = None) -> None:
         # The page moves to the new profile, so an edited one is left behind:
@@ -1596,7 +1597,7 @@ class ControlsPage(QWidget):
             parent=self,
         )
         # Alias persistence is handled by MainWindow via AppState.fan_alias_changed
-        wizard.exec()
+        exec_dialog(wizard)
 
     def _supports_header_roles(self) -> bool:
         """Whether the daemon accepts ``POST /config/header-role`` (DEC-311)."""
@@ -1704,7 +1705,7 @@ class ControlsPage(QWidget):
             has_coolant=det.has_coolant,
             parent=self,
         )
-        if not dlg.exec():
+        if not exec_dialog(dlg):
             return
         res = dlg.get_result()
         if not self._apply_header_roles(res["role_assignments"]):
@@ -1933,7 +1934,7 @@ class ControlsPage(QWidget):
             default_zero_rpm=True,
             parent=self,
         )
-        if not dlg.exec():
+        if not exec_dialog(dlg):
             return
         res = dlg.get_result()
         if not res["sensor_id"]:
@@ -1958,7 +1959,7 @@ class ControlsPage(QWidget):
         menu.addAction("Single Output Fan Role", lambda: self._on_new_control(single=True))
         menu.addAction("Group Fan Role (Multi-Fan)", lambda: self._on_new_control(single=False))
         btn = self._add_control_btn
-        menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+        exec_menu(menu, btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _on_new_control(self, single: bool = False, name: str | None = None) -> None:
         profile = self._get_current_profile()
@@ -2002,7 +2003,7 @@ class ControlsPage(QWidget):
         # (it is where the role floor is reapplied), so Discard has to undo it.
         before = copy.deepcopy(control)
         was_unsaved = self._has_unsaved
-        if not dlg.exec():
+        if not exec_dialog(dlg):
             if control != before:
                 for f in dataclasses.fields(control):
                     setattr(control, f.name, getattr(before, f.name))
@@ -2130,7 +2131,7 @@ class ControlsPage(QWidget):
             reserved=self._cooling_reservations(exempt_ids=[m.member_id for m in control.members]),
             missing_ids=missing_header_member_ids(control.members, self._detected_hwmon_ids()),
         )
-        if dlg.exec():
+        if exec_dialog(dlg):
             new_members = dlg.get_members()
             # Check if any NEW GPU fans were added — show zero-RPM info popup
             old_gpu_ids = {m.member_id for m in control.members if m.source == "amd_gpu"}
@@ -2222,8 +2223,7 @@ class ControlsPage(QWidget):
     def _on_add_curve_menu(self) -> None:
         menu = self._build_add_curve_menu()
         btn = self._add_curve_btn
-        menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
-        menu.deleteLater()
+        exec_menu(menu, btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _build_add_curve_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -2385,7 +2385,7 @@ class ControlsPage(QWidget):
                 demo=self._is_demo(),
                 parent=self,
             )
-            if dlg.exec():
+            if exec_dialog(dlg):
                 dlg.apply_to_curve()
                 band = dlg.hysteresis_apply_all()
                 if band is not None:
@@ -2569,7 +2569,7 @@ class ControlsPage(QWidget):
 
         dont_show = QCheckBox("Don\u2019t show this again")
         msg.setCheckBox(dont_show)
-        msg.exec()
+        exec_dialog(msg)
 
         if dont_show.isChecked() and self._settings_service:
             self._settings_service.update(show_gpu_zero_rpm_warning=False)
@@ -2594,7 +2594,7 @@ class ControlsPage(QWidget):
         )
         dont_show = QCheckBox("Don't show this again")
         msg.setCheckBox(dont_show)
-        msg.exec()
+        exec_dialog(msg)
         if dont_show.isChecked() and self._settings_service:
             self._settings_service.update(show_aio_pump_info=False)
 
@@ -3462,7 +3462,7 @@ class ControlsPage(QWidget):
         menu = self._build_unassigned_menu()
         if menu is None:
             return
-        menu.exec(self._unassigned_btn.mapToGlobal(self._unassigned_btn.rect().topLeft()))
+        exec_menu(menu, self._unassigned_btn.mapToGlobal(self._unassigned_btn.rect().topLeft()))
 
     def _build_unassigned_menu(self) -> QMenu | None:
         """Build the "Unassigned Fans" menu: list the fans no role controls,

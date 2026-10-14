@@ -491,6 +491,9 @@ class TestPersistedLabelKeepsItsRole:
             def exec(self):
                 return False
 
+            def deleteLater(self):
+                return None
+
         monkeypatch.setattr(
             "ventulus.ui.widgets.member_editor.MemberEditorDialog", _FakeMemberDialog
         )
@@ -664,6 +667,9 @@ class TestPersistedLabelKeepsItsRole:
 
             def exec(self):
                 return True
+
+            def deleteLater(self):
+                return None
 
             def get_result(self):
                 rad = next(c for c in captured["candidates"] if c["id"] == rad_id)

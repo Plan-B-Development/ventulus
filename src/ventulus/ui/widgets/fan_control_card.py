@@ -49,6 +49,7 @@ from ventulus.ui.components.buttons import make_button
 from ventulus.ui.components.cards import Card
 from ventulus.ui.components.labels import ElidedLabel
 from ventulus.ui.components.labels import safe_tooltip as _safe_tooltip
+from ventulus.ui.components.transient import exec_menu
 from ventulus.ui.qt_util import set_chip_class
 from ventulus.ui.theme import active_theme
 from ventulus.ui.widgets.card_metrics import fan_tile_width
@@ -318,7 +319,7 @@ class FanControlCard(Card):
     def _on_context_menu(self, pos: QPoint) -> None:
         menu = self.build_rename_menu()
         if menu is not None:
-            menu.exec(self.mapToGlobal(pos))
+            exec_menu(menu, self.mapToGlobal(pos))
 
     def update_vm(self, vm: FanCardVM) -> None:
         """Re-render from a fresh VM. Cheap and idempotent (called each poll)."""

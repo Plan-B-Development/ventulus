@@ -657,6 +657,9 @@ class TestConfigureAioSavesTopology:
             def exec(self):
                 return True
 
+            def deleteLater(self):
+                return None
+
             def get_result(self):
                 res = {
                     "pump_pct": 80,

@@ -451,6 +451,9 @@ class _StubDialog:
     def exec(self):
         return self.accept
 
+    def deleteLater(self):
+        return None
+
     def chosen_role(self):
         return type(self).choice
 

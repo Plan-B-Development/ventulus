@@ -45,6 +45,7 @@ from ventulus.constants import (
 )
 from ventulus.ui.components.a11y import name_value_control
 from ventulus.ui.components.buttons import make_button
+from ventulus.ui.components.transient import exec_dialog
 
 
 @dataclass(frozen=True)
@@ -196,7 +197,7 @@ class Sidebar(QWidget):
     def _show_about(self) -> None:
         from ventulus.ui.about_dialog import AboutDialog
 
-        AboutDialog(self).exec()
+        exec_dialog(AboutDialog(self))
 
     def activate_nav(self, nav_id: int) -> None:
         """Select a nav entry AND guarantee ``nav_activated`` fires, even if the

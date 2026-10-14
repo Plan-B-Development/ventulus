@@ -50,6 +50,9 @@ def _install_fake_member_editor(monkeypatch, *, accepted, new_members):
         def exec(self):
             return 1 if accepted else 0
 
+        def deleteLater(self):
+            return None
+
         def get_members(self):
             return new_members
 
@@ -66,6 +69,9 @@ def _install_fake_role_dialog(monkeypatch, *, accepted, result):
 
         def exec(self):
             return 1 if accepted else 0
+
+        def deleteLater(self):
+            return None
 
         def get_result(self):
             return result

@@ -33,6 +33,7 @@ from ventulus.knowledge.sensor_knowledge import (
 from ventulus.services.app_state import AIO_SUFFIX
 from ventulus.services.series_selection import SeriesSelectionModel
 from ventulus.ui.components.a11y import name_value_control
+from ventulus.ui.components.transient import exec_dialog, exec_menu
 from ventulus.ui.fan_display import filter_displayable_fans
 from ventulus.ui.qt_util import block_signals
 
@@ -287,7 +288,7 @@ class SensorSeriesPanel(QFrame):
         dlg = QColorDialog(current, self.window())
         dlg.setWindowTitle("Pick series colour")
         dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog)
-        result = dlg.exec()
+        result = exec_dialog(dlg)
 
         if app:
             app.setStyleSheet(saved_stylesheet)
@@ -583,7 +584,7 @@ class SensorSeriesPanel(QFrame):
         """
         menu = self.build_fan_menu(self._tree.itemAt(pos))
         if menu is not None:
-            menu.exec(self._tree.viewport().mapToGlobal(pos))
+            exec_menu(menu, self._tree.viewport().mapToGlobal(pos))
 
     # ── Fan rebuild/update ───────────────────────────────────────────
 

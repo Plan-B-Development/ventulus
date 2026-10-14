@@ -862,6 +862,9 @@ class TestDiscoveryCallSite:
             def exec(self):
                 return 0
 
+            def deleteLater(self):
+                return None
+
             def stop_polling(self):
                 pass
 
@@ -908,6 +911,9 @@ class TestDiscoveryCallSite:
             def exec(self):
                 order.append("exec")
                 return 0
+
+            def deleteLater(self):
+                return None
 
             def stop_polling(self):
                 pass

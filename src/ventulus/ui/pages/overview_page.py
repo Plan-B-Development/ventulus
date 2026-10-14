@@ -45,6 +45,7 @@ from ventulus.ui.components.badges import StatusPill
 from ventulus.ui.components.buttons import make_button
 from ventulus.ui.components.cards import Card, SectionHeader
 from ventulus.ui.components.tables import apply_dense_table
+from ventulus.ui.components.transient import exec_menu
 from ventulus.ui.qt_util import set_chip_class, style_splitter
 from ventulus.ui.theme import active_theme
 from ventulus.ui.widgets.sensor_detail_dialog import SensorDetailDialog
@@ -359,6 +360,7 @@ class OverviewPage(QWidget):
     def _on_sensors(self, sensors: list) -> None:
         self._all_sensors = list(sensors)
         self._render_sensors_table()
+        self._refresh_sensor_detail_live()
 
     def _freshness_judge(self):
         """What the Freshness pills and the stale count are judged by: the
@@ -373,6 +375,7 @@ class OverviewPage(QWidget):
         self._on_fans(self._state.fans)
         self._refresh_summary()
         self._render_cards()
+        self._refresh_sensor_detail_live()
 
     def _on_fans(self, fans: list) -> None:
         headers = self._state.hwmon_headers if self._state else []
@@ -639,7 +642,7 @@ class OverviewPage(QWidget):
         """
         menu = self.build_fan_menu(self._row_to_fan_id(self._fan_table.indexAt(pos).row()))
         if menu is not None:
-            menu.exec(self._fan_table.viewport().mapToGlobal(pos))
+            exec_menu(menu, self._fan_table.viewport().mapToGlobal(pos))
 
     def _prompt_fan_rename(self, fan_id: str) -> None:
         """Ask for a new fan name. The rule itself lives on AppState."""
@@ -691,7 +694,7 @@ class OverviewPage(QWidget):
             )
             toggle_action.triggered.connect(self._toggle_hidden_group)
             menu.addAction(toggle_action)
-            menu.exec(self._sensor_table.viewport().mapToGlobal(pos))
+            exec_menu(menu, self._sensor_table.viewport().mapToGlobal(pos))
             return
 
         sensor = self._row_to_sensor(row)
@@ -737,7 +740,7 @@ class OverviewPage(QWidget):
             pref_mb.triggered.connect(lambda: self._set_preferred_sensor(sensor.id, "mb"))
             menu.addAction(pref_mb)
 
-        menu.exec(self._sensor_table.viewport().mapToGlobal(pos))
+        exec_menu(menu, self._sensor_table.viewport().mapToGlobal(pos))
 
     def _set_preferred_sensor(self, sensor_id: str, role: str) -> None:
         if self._client is None:
@@ -844,9 +847,24 @@ class OverviewPage(QWidget):
         self._sensor_detail_dialog.raise_()
         self._sensor_detail_dialog.activateWindow()
 
+    def _refresh_sensor_detail_live(self) -> None:
+        """Follow the poll in an open Sensor Detail, so its current value,
+        freshness and headroom are this poll's rather than the opening one's."""
+        dialog = self._sensor_detail_dialog
+        if dialog is None:
+            return
+        sensor = next((s for s in self._all_sensors if s.id == dialog.sensor_id), None)
+        freshness = self._state.display_freshness(sensor) if self._state and sensor else None
+        dialog.set_live(sensor, freshness)
+
     @Slot(int)
     def _on_sensor_detail_closed(self, _result: int) -> None:
+        # Closing hides a dialog; it is the page's child, so without the delete
+        # every open-and-close left another one behind.
+        dialog = self._sensor_detail_dialog
         self._sensor_detail_dialog = None
+        if dialog is not None:
+            dialog.deleteLater()
 
     # ── Theme + teardown ─────────────────────────────────────────────
 

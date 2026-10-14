@@ -335,6 +335,9 @@ def _install_fake_menu(monkeypatch):
         def exec(self, *_a):
             return None
 
+        def deleteLater(self):
+            return None
+
     monkeypatch.setattr(overview_page, "QMenu", _FakeMenu)
     return created
 

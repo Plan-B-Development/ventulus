@@ -98,6 +98,14 @@ rename. Version numbers carry on from Control-OFC.
   the next status line straight away, and the finished report could say "Saved to" a file from an
   earlier run, or an earlier checkpoint of this one. The run status now keeps the error until a save
   succeeds, and the report says it was not saved (and where an earlier copy is, if there is one).
+- **The Sensor detail dialog stays current.** Its value, age, freshness, trend, session range and
+  headroom to critical showed the reading from when the dialog opened. They now sit in a strip at
+  the top that updates every second and says when the daemon stops reporting the sensor; the
+  report below it no longer re-renders, so scrolling and selected text are left alone.
+- Dialogs and right-click menus no longer pile up in memory. Every one-shot dialog (About, the
+  Alert Centre, the Fan Wizard, role pickers, colour pickers, message boxes and the Hardware page's
+  run dialogs) and every right-click menu was kept, hidden, until Ventulus quit. A kept Alert
+  Centre also kept rebuilding itself on every alert change.
 
 ## [5.0.0] — 2026-10-10
 

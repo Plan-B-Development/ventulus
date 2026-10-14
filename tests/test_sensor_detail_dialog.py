@@ -23,6 +23,7 @@ from ventulus.knowledge.sensor_knowledge import (
 from ventulus.ui.widgets.sensor_detail_dialog import (
     SensorDetailDialog,
     build_sensor_detail_html,
+    build_sensor_live_html,
 )
 
 
@@ -150,9 +151,10 @@ class TestBuildSensorDetailHtml:
 
     def test_headroom_to_crit_rendered(self):
         sensor = _reading(value_c=80.0, thresholds=SensorThresholds(crit_c=105.0))
-        html = _html(sensor, None)
-        # 25 °C headroom: should report "below crit"
-        assert "below crit" in html.lower()
+        # 25 °C headroom: the live strip reports "below crit"; it moves with the
+        # reading, so the static report does not carry it.
+        assert "below crit" in build_sensor_live_html(sensor).lower()
+        assert "below crit" not in _html(sensor, None).lower()
 
     def test_driver_doc_link_rendered(self):
         html = _html(_reading(chip_name="k10temp"), None)

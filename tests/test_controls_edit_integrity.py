@@ -456,6 +456,9 @@ class TestMemberEdits:
             def exec(self):
                 return 1
 
+            def deleteLater(self):
+                return None
+
             def get_members(self):
                 return [*before_members, pump]
 
@@ -499,6 +502,9 @@ class TestMemberEdits:
 
             def exec(self):
                 return 1
+
+            def deleteLater(self):
+                return None
 
             def get_members(self):
                 return [ControlMember(source="openfan", member_id="openfan:ch00", member_label="F")]
@@ -561,6 +567,9 @@ class TestMemberEdits:
 
             def exec(self):
                 return 1
+
+            def deleteLater(self):
+                return None
 
             def get_members(self):
                 return [added]

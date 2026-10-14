@@ -40,6 +40,7 @@ from ventulus.services.series_selection import SeriesSelectionModel
 from ventulus.services.shared_fan_switch import SharedSwitchRuleError
 from ventulus.services.system_state_view import gui_meets_daemon_floor
 from ventulus.ui.components.footer import StatusFooter
+from ventulus.ui.components.transient import exec_dialog
 from ventulus.ui.pages.controls_page import ControlsPage
 from ventulus.ui.pages.dashboard_page import DashboardPage
 from ventulus.ui.pages.hardware_page import HardwarePage
@@ -668,7 +669,7 @@ class MainWindow(QWidget):
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("Thermal safety")
         box.setText(self._safety_detail_text())
-        box.exec()
+        exec_dialog(box)
 
     def _populate_sidebar_profiles(self, select_id: str | None = None) -> None:
         """(Re)build the sidebar profile combo from ProfileService (DEC-208).
@@ -1519,7 +1520,7 @@ class MainWindow(QWidget):
             )
             box.addButton(QMessageBox.StandardButton.Ok)
             dismiss = box.addButton("Don't show again", QMessageBox.ButtonRole.DestructiveRole)
-            box.exec()
+            exec_dialog(box)
             if box.clickedButton() is dismiss:
                 acknowledged.add(warning.id)
                 # The persisted set now suppresses it. Dropping it from the

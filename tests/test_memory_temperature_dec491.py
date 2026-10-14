@@ -34,7 +34,10 @@ from ventulus.services.overview_view import (
     is_alarm_active,
 )
 from ventulus.services.series_selection import SeriesSelectionModel, default_series_keys
-from ventulus.ui.widgets.sensor_detail_dialog import build_sensor_detail_html
+from ventulus.ui.widgets.sensor_detail_dialog import (
+    build_sensor_detail_html,
+    build_sensor_live_html,
+)
 from ventulus.ui.widgets.sensor_series_panel import SensorSeriesPanel
 
 DIMM_A = "hwmon:spd5118:21-0051:temp1"
@@ -280,7 +283,7 @@ class TestCritGuard:
         html = build_sensor_detail_html(
             s, None, classification=AppState().classify_sensor(s), peers=[s.id]
         )
-        assert "exceeds crit" not in html
+        assert "exceeds crit" not in build_sensor_live_html(s)
         assert "not a plausible module limit" in html
 
     def test_the_same_limit_on_a_board_chip_is_used_as_reported(self):
@@ -293,10 +296,7 @@ class TestCritGuard:
         s = _dimm(value_c=90.0, thresholds=SensorThresholds(max_c=55.0, crit_c=85.0))
         assert trusted_crit_c(s) == 85.0
         assert is_alarm_active(s)
-        html = build_sensor_detail_html(
-            s, None, classification=AppState().classify_sensor(s), peers=[s.id]
-        )
-        assert "exceeds crit" in html
+        assert "exceeds crit" in build_sensor_live_html(s)
 
 
 # ─── demo mode ──────────────────────────────────────────────────────────

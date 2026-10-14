@@ -65,6 +65,7 @@ from ventulus.ui.components.buttons import make_button
 from ventulus.ui.components.cards import Card, SectionHeader
 from ventulus.ui.components.tables import apply_dense_table
 from ventulus.ui.components.toggle_switch import ToggleSwitch
+from ventulus.ui.components.transient import exec_dialog
 from ventulus.ui.qt_util import set_chip_class
 from ventulus.ui.theme import ThemeTokens
 
@@ -3072,7 +3073,7 @@ class SettingsPage(QWidget):
                     f"Import {len(report.skipped)} skipped as copies",
                     QMessageBox.ButtonRole.ActionRole,
                 )
-            box.exec()
+            exec_dialog(box)
 
             if rename_btn is None or box.clickedButton() is not rename_btn:
                 break

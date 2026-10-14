@@ -278,6 +278,9 @@ def _install_fake_dialog(monkeypatch, *, result, accept=True, captured=None):
         def exec(self):
             return accept
 
+        def deleteLater(self):
+            return None
+
         def get_result(self):
             return result
 

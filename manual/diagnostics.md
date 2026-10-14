@@ -82,11 +82,12 @@ reappears in the table by itself once it can be read again.
 
 #### Sensor detail dialog
 
-Double-click a row, press **Enter** on it, or right-click → **Open detail…**. It shows
-the full classification description and every note, board context, a **Thresholds**
-section with the headroom to critical, a link to the kernel driver's documentation,
-and the daemon's own classification (class, confidence and reasoning) beside
-Ventulus's.
+Double-click a row, press **Enter** on it, or right-click → **Open detail…**. A strip
+at the top shows the current value, age, freshness, trend, session range and headroom
+to critical, and updates every second while the dialog is open. Below it are the full
+classification description and every note, board context, a **Thresholds** section, a
+link to the kernel driver's documentation, and the daemon's own classification (class,
+confidence and reasoning) beside Ventulus's.
 
 #### Hiding sensors and changing their classification
 

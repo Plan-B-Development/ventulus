@@ -1,8 +1,9 @@
 """Per-sensor detail dialog for Diagnostics > Sensors (DEC-117).
 
-Pop-out modal that mirrors :class:`ReadinessReportDialog`'s structure — a
+Modeless pop-out that mirrors :class:`ReadinessReportDialog`'s structure — a
 :class:`QTextBrowser` that scrolls for arbitrary volume, with external
-links enabled (kernel.org driver docs, etc.).
+links enabled (kernel.org driver docs, etc.) — under a live strip that follows
+the poll.
 
 Every daemon-supplied string is HTML-escaped before interpolation (DEC-106
 discipline). GUI-authored static labels are trusted.
@@ -19,9 +20,11 @@ from collections.abc import Iterable
 from html import escape
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QTextBrowser,
     QVBoxLayout,
@@ -142,6 +145,56 @@ def _headroom_html(value_c: float, crit_c: float | None) -> str | None:
     return f'<span style="color:{colour}">{verb}</span>'
 
 
+def build_sensor_live_html(sensor: SensorReading | None, freshness: Freshness | None = None) -> str:
+    """The part of the detail that moves with each reading: value, age,
+    freshness, trend, session range and headroom to crit.
+
+    The dialog re-renders it on every poll, apart from the static report below
+    it, so it never shows the reading from when the dialog opened. ``None`` means
+    the daemon no longer reports the sensor.
+
+    ``freshness`` is the caller's judgement (``AppState.display_freshness``,
+    which follows the daemon's cadence and the connection); without one the
+    daemon's default cadence is assumed.
+
+    Every value is formatted here from numbers or an enum, so nothing
+    daemon-supplied reaches the markup.
+    """
+    t = active_theme()
+    if sensor is None:
+        return (
+            f'<div style="color:{t.status_warn}">No current reading: the daemon no '
+            "longer reports this sensor.</div>"
+        )
+    rows: list[tuple[str, str]] = [
+        ("Value", f"{sensor.value_c:.1f} °C"),
+        ("Age", f"{sensor.age_ms} ms"),
+        ("Freshness", (freshness or default_reading_freshness(sensor)).value),
+    ]
+    trend = _trend_arrow(sensor.rate_c_per_s)
+    if trend is not None:
+        rows.append(("Trend", trend))
+    if sensor.session_min_c is not None and sensor.session_max_c is not None:
+        session = f"{sensor.session_min_c:.1f} °C - {sensor.session_max_c:.1f} °C"
+        rng = sensor.session_max_c - sensor.session_min_c
+        if rng > 0.05:
+            pct = (sensor.value_c - sensor.session_min_c) / rng * 100.0
+            pct = max(0.0, min(100.0, pct))
+            session += f" (currently at {pct:.0f}%)"
+        rows.append(("Session range", session))
+    parts = ['<table cellpadding="2">']
+    for label, value in rows:
+        parts.append(
+            f'<tr><td style="color:{t.text_secondary}">{escape(label)}</td>'
+            f"<td>{escape(value)}</td></tr>"
+        )
+    parts.append("</table>")
+    head = _headroom_html(sensor.value_c, trusted_crit_c(sensor))
+    if head is not None:
+        parts.append(f"<div>{head}</div>")
+    return "".join(parts)
+
+
 def build_sensor_detail_html(
     sensor: SensorReading,
     board: BoardInfo | None,
@@ -149,16 +202,13 @@ def build_sensor_detail_html(
     *,
     classification: SensorClassification,
     peers: Iterable[str],
-    freshness: Freshness | None = None,
 ) -> str:
-    """Build the full self-contained HTML document for the detail dialog.
+    """Build the static report for the detail dialog: identity, classification,
+    board context, thresholds and driver docs. What moves with each reading is
+    in :func:`build_sensor_live_html`.
 
     ``peers`` are the sensor ids the dialog's sensor is shown among, for its name
     (``sensor_display_name``, DEC-492).
-
-    ``freshness`` is the caller's judgement (``AppState.display_freshness``,
-    which follows the daemon's cadence and the connection); without one the
-    daemon's default cadence is assumed.
 
     ``classification`` is the caller's — in the app, ``AppState.classify_sensor``,
     so the board vendor and the user's "Treat as coolant" override reach this
@@ -203,38 +253,6 @@ def build_sensor_detail_html(
             f"<td>{escape(value)}</td></tr>"
         )
     parts.append("</table>")
-
-    # ── Current state ──────────────────────────────────────────────
-    parts.append(h("Current state"))
-    state_rows: list[tuple[str, str]] = [
-        ("Value", f"{sensor.value_c:.1f} °C"),
-        ("Age", f"{sensor.age_ms} ms"),
-        ("Freshness", (freshness or default_reading_freshness(sensor)).value),
-    ]
-    trend = _trend_arrow(sensor.rate_c_per_s)
-    if trend is not None:
-        state_rows.append(("Trend", trend))
-    parts.append('<table cellpadding="4">')
-    for label, value in state_rows:
-        parts.append(
-            f'<tr><td style="color:{t.text_secondary}">{escape(label)}</td>'
-            f"<td>{escape(value)}</td></tr>"
-        )
-    parts.append("</table>")
-
-    # ── Session history ────────────────────────────────────────────
-    if sensor.session_min_c is not None and sensor.session_max_c is not None:
-        parts.append(h("Session range"))
-        rng = sensor.session_max_c - sensor.session_min_c
-        position = ""
-        if rng > 0.05:
-            pct = (sensor.value_c - sensor.session_min_c) / rng * 100.0
-            pct = max(0.0, min(100.0, pct))
-            position = f" — currently at {pct:.0f}% of session range"
-        parts.append(
-            f"<div>{sensor.session_min_c:.1f} °C - {sensor.session_max_c:.1f} °C"
-            f"{escape(position)}</div>"
-        )
 
     # ── Classification + every note ────────────────────────────────
     parts.append(h("Classification"))
@@ -326,11 +344,9 @@ def build_sensor_detail_html(
                 f"<td>{escape(value)}</td></tr>"
             )
         parts.append("</table>")
-        crit = trusted_crit_c(sensor)
-        head = _headroom_html(sensor.value_c, crit)
-        if head is not None:
-            parts.append(f'<div style="margin-top:4px">{head}</div>')
-        elif sensor.thresholds is not None and sensor.thresholds.crit_c is not None:
+        # The headroom to crit moves with the reading, so it is in the live
+        # strip above the report (`build_sensor_live_html`).
+        if trusted_crit_c(sensor) is None and sensor.thresholds.crit_c is not None:
             parts.append(
                 f'<div style="margin-top:4px;color:{t.text_secondary}">'
                 "The critical limit read at startup is not a plausible module "
@@ -365,9 +381,12 @@ def _has_override_for(vendor: str, model: str) -> bool:
 class SensorDetailDialog(QDialog):
     """Themed, resizable window showing one sensor's full diagnostic detail.
 
-    Uses a :class:`QTextBrowser` so the report scrolls for arbitrarily long
-    content (some chips have many notes) and so kernel.org driver doc links
-    open in the user's browser with a single click.
+    A live strip at the top (:func:`build_sensor_live_html`) follows each poll
+    through :meth:`set_live`. The report below it uses a :class:`QTextBrowser`
+    so it scrolls for arbitrarily long content (some chips have many notes) and
+    so kernel.org driver doc links open in the user's browser with a single
+    click. Only the strip is re-rendered per poll, so the report's scroll
+    position and any selected text are left alone.
     """
 
     def __init__(
@@ -383,26 +402,20 @@ class SensorDetailDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("Diagnostics_SensorDetail_Dialog")
-        peers = list(peers)
-        title = sensor_display_name(sensor.id, sensor.label, peers=peers) or "Sensor"
-        self.setWindowTitle(f"Sensor Detail — {title}")
         self.resize(640, 600)
+        self._sensor_id = sensor.id
 
         layout = QVBoxLayout(self)
+
+        self._live = QLabel()
+        self._live.setObjectName("Diagnostics_SensorDetail_Label_live")
+        self._live.setTextFormat(Qt.TextFormat.RichText)
+        self._live.setWordWrap(True)
+        layout.addWidget(self._live)
 
         self._browser = QTextBrowser()
         self._browser.setObjectName("Diagnostics_SensorDetail_Browser")
         self._browser.setOpenExternalLinks(True)
-        self._browser.setHtml(
-            build_sensor_detail_html(
-                sensor,
-                board,
-                daemon_classification,
-                classification=classification,
-                peers=peers,
-                freshness=freshness,
-            )
-        )
         layout.addWidget(self._browser, 1)
 
         btn_row = QHBoxLayout()
@@ -412,6 +425,20 @@ class SensorDetailDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
+
+        self.set_sensor(
+            sensor,
+            board,
+            daemon_classification,
+            classification=classification,
+            peers=peers,
+            freshness=freshness,
+        )
+
+    @property
+    def sensor_id(self) -> str:
+        """The id of the sensor shown, for the caller's per-poll lookup."""
+        return self._sensor_id
 
     def set_sensor(
         self,
@@ -426,6 +453,7 @@ class SensorDetailDialog(QDialog):
         """Replace contents in place — used when the dialog is reopened on a
         different row of the table without rebuilding the widget."""
         peers = list(peers)
+        self._sensor_id = sensor.id
         title = sensor_display_name(sensor.id, sensor.label, peers=peers) or "Sensor"
         self.setWindowTitle(f"Sensor Detail — {title}")
         self._browser.setHtml(
@@ -435,6 +463,10 @@ class SensorDetailDialog(QDialog):
                 daemon_classification,
                 classification=classification,
                 peers=peers,
-                freshness=freshness,
             )
         )
+        self.set_live(sensor, freshness)
+
+    def set_live(self, sensor: SensorReading | None, freshness: Freshness | None = None) -> None:
+        """Re-render the live strip from this poll's reading (``None``: gone)."""
+        self._live.setText(build_sensor_live_html(sensor, freshness))
