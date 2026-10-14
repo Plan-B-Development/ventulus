@@ -93,7 +93,7 @@ confidence and reasoning) beside Ventulus's.
 
 Right-click a row → **Hide sensor** to remove one you do not care about (a duplicate,
 or a chip that always reads garbage). Hidden sensors collapse into a `▸ N hidden
-sensors` row at the bottom that you can expand again. The hide-list belongs to this
+sensors` row at the bottom; click it, or select it and press **Enter**, to expand it again. The hide-list belongs to this
 page; **Mirror hidden to dashboard** copies it to the Dashboard's chart selection once.
 
 **Treat as coolant** forces a sensor to count as a liquid-cooling coolant temperature
@@ -386,7 +386,8 @@ Only your assignment changes. A role that comes from the hardware label stays
 underneath it, so **Not set** returns the header to that role, and a header the daemon
 protects as a pump (from its label, or because the active profile names it a pump)
 stays protected whatever you choose. Removing a pump you assigned asks first and names
-the protection being removed. The message afterwards appears on the card and reports
+the protection being removed, unless the header's own label or cooler channel keeps it
+protected anyway, in which case nothing is lost and nothing is asked. The message afterwards appears on the card and reports
 the daemon's answer, not what was asked for. The button is disabled on a read-only
 header, and stays available while a PWM Test Report runs, because the daemon checks
 roles again at every step.
@@ -572,7 +573,7 @@ happening again later always raises a fresh alert.
 | **INFO / WARN / ERR chips** | Independent severity filters, each showing how many rows it holds. Turn all three off and the list is empty, which is a real state rather than a reset. The counts stay put when you turn a chip off, so you can see what turning it back on would bring |
 | **Source dropdown** | One source at a time: `gui`, `polling`, `profile`, `kernel` and so on. New sources appear the first time they fire |
 | **Search** | Case-insensitive match against the message text and source |
-| **Follow** | Follows new entries as they arrive at the top. Scroll away and it pauses, showing `N new events ↑`; click that to jump back and resume. You are never pulled back while reading older rows |
+| **Follow** | Follows new entries as they arrive at the top. Scroll away and it pauses (the button turns off), showing `N new events ↑`; click either, or scroll back to the top, to resume. A pause you made with the button stays until you turn it back on. You are never pulled back while reading older rows |
 
 Keyboard shortcuts while the list has focus: <kbd>↑</kbd>/<kbd>↓</kbd> to move,
 <kbd>/</kbd> to jump to the search box, <kbd>f</kbd> to toggle Follow, <kbd>Esc</kbd> to
@@ -634,6 +635,9 @@ file (`ventulus_support_bundle.json` by default) containing:
 - the last 100 lines of the daemon's journal, with any OpenFAN board serial number
   replaced by *(redacted)*, and any `amdgpu` kernel messages from this boot (with the
   boot command line cut the same way).
+
+The export runs in the background, so the window stays responsive while the journal is
+read; a banner then says where the file was saved, or why it could not be.
 
 Review it before sharing: it names your hardware and may name your folders.
 

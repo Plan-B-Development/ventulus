@@ -251,6 +251,18 @@ class TimelineChart(QWidget):
         # Plot widget — antialiasing disabled for real-time performance (R48)
         pg.setConfigOptions(antialias=False)
         self._plot_widget = pg.PlotWidget()
+        self._plot_widget.setObjectName("TimelineChart_Plot")
+        # G-20: pyqtgraph makes the plot a Tab stop (WheelFocus) with no name and
+        # nothing to do from the keyboard. Out of the Tab order (wheel zoom and
+        # hover need no focus); named for screen readers. The readings it draws
+        # are reachable as text in the series list beside it, whose context menu
+        # (Menu key) also sets each series' colour.
+        self._plot_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._plot_widget.setAccessibleName("Sensor and fan history chart")
+        self._plot_widget.setAccessibleDescription(
+            "Recent history of the sensors and fans ticked in the series list, "
+            "which shows their current values."
+        )
         self._rpm_vb: pg.ViewBox | None = None
         self._setup_plot()
         layout.addWidget(self._plot_widget, 1)

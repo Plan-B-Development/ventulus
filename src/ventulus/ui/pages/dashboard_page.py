@@ -149,6 +149,12 @@ class DashboardPage(QWidget):
         self._has_data = False
         # Chart first-run seeding + poll-diff annotation state (DEC-181).
         self._seen_sensors = False
+        # DEC-165: set by the main window while the daemon is too old to control.
+        self._control_blocked_reason: str | None = None
+        # The message each capabilities banner last showed, so a Dismiss holds
+        # until the message changes (capabilities re-arrive every 300 s).
+        self._hwmon_banner_msg: str | None = None
+        self._api_skew_msg: str | None = None
         self._seen_fans = False
         # Session-local mirror of settings.chart_series_seeded (DEC-244). A demo
         # session seals that key, so the persisted flag never flips and the
@@ -796,8 +802,8 @@ class DashboardPage(QWidget):
         """Add a poll-diff event line to the chart at the current chart time."""
         self._chart.add_annotation(self._history.now(), label)
 
-    def _on_capabilities_updated(self, caps: Capabilities) -> None:
-        vm = build_capabilities_vm(caps)
+    def _paint_subsystem_chips(self, vm) -> None:
+        """The OpenFan and hwmon chips as the capabilities say they are."""
         # `OFN-g`: None hides the chip entirely, the same way `hwmon_banner` does.
         self._sub_openfan_label.setVisible(vm.openfan is not None)
         if vm.openfan is not None:
@@ -808,30 +814,44 @@ class DashboardPage(QWidget):
         self._sub_hwmon_label.setProperty("class", vm.hwmon.css_class)
         repolish(self._sub_hwmon_label)
 
-        # Hwmon info/warning banner on the live page (None \u2192 hide).
+    def _on_capabilities_updated(self, caps: Capabilities) -> None:
+        vm = build_capabilities_vm(caps)
+        self._paint_subsystem_chips(vm)
+
+        # Hwmon info/warning banner on the live page (None \u2192 hide). Capabilities
+        # are re-read every 300 s; re-showing the same message each time undid the
+        # user's Dismiss, so it is shown again only when its message changes.
+        hwmon_msg = vm.hwmon_banner.message if vm.hwmon_banner is not None else None
         if vm.hwmon_banner is None:
             self._hwmon_banner.hide_banner()
+        elif hwmon_msg == self._hwmon_banner_msg:
+            pass
         elif vm.hwmon_banner.kind == "info":
             self._hwmon_banner.show_info(vm.hwmon_banner.message, auto_dismiss_ms=0)
         else:
             self._hwmon_banner.show_warning(vm.hwmon_banner.message, auto_dismiss_ms=0)
+        self._hwmon_banner_msg = hwmon_msg
 
         # API-version-skew guard (the warning-store + log side effects stay here).
+        # The warning entry stays for the footer and Alerts; the banner and the
+        # log line follow the message, as the hwmon banner does.
         if vm.api_skew_message is None:
             self._api_version_banner.hide_banner()
             self._state.remove_warning("api_version_skew")
         else:
             import logging
 
-            self._api_version_banner.show_warning(vm.api_skew_message, auto_dismiss_ms=0)
             self._state.add_warning(
                 level="warning", source="api", message=vm.api_skew_message, key="api_version_skew"
             )
-            logging.getLogger(__name__).warning(
-                "API version skew: daemon reports api_version=%d, GUI expects %d",
-                caps.api_version,
-                EXPECTED_API_VERSION,
-            )
+            if vm.api_skew_message != self._api_skew_msg:
+                self._api_version_banner.show_warning(vm.api_skew_message, auto_dismiss_ms=0)
+                logging.getLogger(__name__).warning(
+                    "API version skew: daemon reports api_version=%d, GUI expects %d",
+                    caps.api_version,
+                    EXPECTED_API_VERSION,
+                )
+        self._api_skew_msg = vm.api_skew_message
 
     def _on_status_updated(self, status: DaemonStatus) -> None:
         # Thermal-protection transition (poll-diff): the daemon's thermal
@@ -971,15 +991,19 @@ class DashboardPage(QWidget):
                 self._annotate(f"Override end: {cid}")
             self._last_override_ids = override_ids
 
-        # 279-a: hide first, then let the loop below re-raise it. Its two
-        # siblings are repainted from the capabilities VM on every refresh, so a
-        # poll that finds them healthy can leave them alone — nothing else ever
-        # writes THIS label, so it needs both an `ok` path and an ABSENT path.
-        # Absent matters on a reconnect to a pre-2.22.0 daemon, which sends three
-        # subsystems: without this the chip would pin the last warning for the
-        # rest of the session, long after the control was fixed or the daemon
-        # that reported it was replaced.
+        # 279-a: hide first, then let the loop below re-raise it. Nothing else
+        # ever writes THIS label, so it needs both an `ok` path and an ABSENT
+        # path. Absent matters on a reconnect to a pre-2.22.0 daemon, which sends
+        # three subsystems: without this the chip would pin the last warning for
+        # the rest of the session, long after the control was fixed or the
+        # daemon that reported it was replaced.
         self._sub_controls_label.setVisible(False)
+        # Its two siblings get the same reset from the capabilities view: those
+        # are re-read only every 300 s, so a fault this poll no longer reports
+        # stayed amber that long. The loop below re-raises a current one.
+        caps = self._state.capabilities if self._state is not None else None
+        if caps is not None:
+            self._paint_subsystem_chips(build_capabilities_vm(caps))
         for sub in status.subsystems:
             if sub.name == "openfan" and sub.status != "ok":
                 reason = f" ({sub.reason})" if sub.reason else ""
@@ -1309,7 +1333,18 @@ class DashboardPage(QWidget):
 
     def _reset_apply_btn(self) -> None:
         self._apply_btn.setText("Apply")
-        self._apply_btn.setEnabled(True)
+        self._apply_btn.setEnabled(self._control_blocked_reason is None)
+
+    def set_control_blocked(self, reason: str | None) -> None:
+        """Grey Apply while the GUI has stood down (DEC-165), with the reason.
+
+        ProfileService refuses the activation anyway; this keeps the button
+        from offering what it cannot do.
+        """
+        self._control_blocked_reason = reason
+        self._apply_btn.setToolTip(reason or "")
+        if not self._reset_apply_timer.isActive():
+            self._reset_apply_btn()
 
     def populate_profiles(self) -> None:
         """(Re)build the profile combo from ProfileService, tagging each item with

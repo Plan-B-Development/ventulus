@@ -20,6 +20,10 @@ Every requested write is sorted into one of three kinds by
    the only role write that can lower protection. Reached only once every
    assign has landed, and only after ``confirm`` agrees. A failure is
    tolerated: a stale pump role over-protects, never under-protects.
+   ``confirm`` is asked only about the removals that lose protection: a header
+   whose own label or cooler channel makes the daemon infer a pump stays
+   protected whatever its role, so asking "remove pump protection?" there was
+   untrue. Those removals still run last.
 
 A write that would change nothing daemon-side is skipped, never sent. The
 headers are re-read once after any write was attempted — a timeout proves
@@ -34,8 +38,9 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from ..api.errors import DaemonError
-from ..api.models import HeaderRoleResult, HwmonHeader
+from ..api.models import Capabilities, HeaderRoleResult, HwmonHeader
 from .header_role_view import plan_role_change
+from .pump_protection import header_infers_pump
 
 log = logging.getLogger(__name__)
 
@@ -138,16 +143,21 @@ def apply_role_writes(
     requested: Sequence[tuple[str, str | None]],
     *,
     confirm: Callable[[list[str]], bool],
+    capabilities: Capabilities | None,
     publish_headers: Callable[[list[HwmonHeader]], None] | None = None,
 ) -> RoleWriteOutcome:
     """Run ``requested`` in the module's order; see the module docstring.
 
-    ``confirm`` receives the header ids of the pump removals and is called at
-    most once, only when there are some and every assign landed.
+    ``confirm`` receives the header ids of the pump removals that lose
+    protection and is called at most once, only when there are some and every
+    assign landed. ``capabilities`` decides which those are; ``None`` treats
+    every removal as a loss, the safe reading.
     ``publish_headers`` receives the re-read headers (usually
     ``AppState.set_hwmon_headers``), so every page shows the new roles rather
     than waiting for the ~300 s refresh.
     """
+    headers = list(headers)
+    by_id = {h.id: h for h in headers}
     writes, skipped = plan_role_writes(headers, requested)
     landed: list[LandedWrite] = []
     failed: list[FailedWrite] = []
@@ -171,7 +181,12 @@ def apply_role_writes(
             if (failure := send(write)) is not None:
                 failed.append(failure)
         removals = [w for w in writes if w.kind == KIND_REMOVE_PUMP]
-        if removals and confirm([w.header_id for w in removals]):
+        losing = [
+            w.header_id
+            for w in removals
+            if not header_infers_pump(by_id.get(w.header_id), capabilities)
+        ]
+        if removals and (not losing or confirm(losing)):
             for write in removals:
                 if (failure := send(write)) is not None:
                     failed.append(failure)

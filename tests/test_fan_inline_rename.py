@@ -346,7 +346,7 @@ class TestPanelDelegate:
 
 
 class TestPanelContextMenu:
-    """Menu *contents* per row state. build_fan_menu is split from showing the
+    """Menu *contents* per row state. build_row_menu is split from showing the
     popup precisely so this needs no laid-out viewport and no real event grab."""
 
     @staticmethod
@@ -354,40 +354,40 @@ class TestPanelContextMenu:
         return [] if menu is None else [a.objectName() for a in menu.actions()]
 
     def test_rename_offered_for_a_fan_row(self, panel):
-        names = self._names(panel.build_fan_menu(panel._fan_items[OPENFAN]))
+        names = self._names(panel.build_row_menu(panel._fan_items[OPENFAN]))
         assert "SensorSeriesPanel_Action_renameFan" in names
         # Nothing to reset until an alias exists.
         assert "SensorSeriesPanel_Action_resetFanName" not in names
 
     def test_reset_offered_once_aliased(self, panel):
         panel.rename_fan(OPENFAN, "Front Intake")
-        names = self._names(panel.build_fan_menu(panel._fan_items[OPENFAN]))
+        names = self._names(panel.build_row_menu(panel._fan_items[OPENFAN]))
         assert "SensorSeriesPanel_Action_resetFanName" in names
 
     def test_no_menu_on_a_group_row(self, panel):
-        assert panel.build_fan_menu(panel._group_items["fans_openfan"]) is None
+        assert panel.build_row_menu(panel._group_items["fans_openfan"]) is None
 
     def test_no_menu_on_empty_space(self, panel):
-        assert panel.build_fan_menu(None) is None
+        assert panel.build_row_menu(None) is None
 
     def test_no_menu_on_a_sensor_row(self, panel):
         from ventulus.api.models import SensorReading
 
         panel.update_sensors([SensorReading(id="s1", kind="cpu_temp", label="Tctl", value_c=50.0)])
-        assert panel.build_fan_menu(panel._sensor_items["s1"]) is None
+        assert panel.build_row_menu(panel._sensor_items["s1"]) is None
 
     def test_rename_action_opens_the_editor(self, panel, monkeypatch):
         opened: list[int] = []
         monkeypatch.setattr(
             type(panel._tree), "editItem", lambda _s, _i, col: opened.append(col), raising=False
         )
-        menu = panel.build_fan_menu(panel._fan_items[OPENFAN])
+        menu = panel.build_row_menu(panel._fan_items[OPENFAN])
         menu.actions()[0].trigger()
         assert opened == [0]
 
     def test_reset_action_clears_the_alias(self, panel):
         panel.rename_fan(OPENFAN, "Front Intake")
-        menu = panel.build_fan_menu(panel._fan_items[OPENFAN])
+        menu = panel.build_row_menu(panel._fan_items[OPENFAN])
         next(a for a in menu.actions() if "reset" in a.objectName().lower()).trigger()
         assert OPENFAN not in panel._state.fan_aliases
         assert panel._fan_items[OPENFAN].text(0) == "OpenFan CH0"

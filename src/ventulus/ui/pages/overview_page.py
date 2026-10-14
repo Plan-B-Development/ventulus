@@ -250,6 +250,8 @@ class OverviewPage(QWidget):
         self._sensor_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._sensor_table.customContextMenuRequested.connect(self._on_sensor_context_menu)
         self._sensor_table.cellDoubleClicked.connect(self._on_sensor_cell_double_clicked)
+        # The hidden-sensors row says "click to expand": one click toggles it.
+        self._sensor_table.cellClicked.connect(self._on_sensor_cell_clicked)
         self._sensor_table.return_pressed.connect(self._on_sensor_return)
         self._sensor_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Interactive
@@ -670,17 +672,23 @@ class OverviewPage(QWidget):
         return self._sensor_table.columnSpan(row, 0) == len(_SENSOR_COLS)
 
     def _on_sensor_return(self, row: int) -> None:
+        if self._is_hidden_toggle_row(row):
+            self._toggle_hidden_group()
+            return
         sensor = self._row_to_sensor(row)
         if sensor is not None:
             self._open_sensor_detail(sensor.id)
 
+    def _on_sensor_cell_clicked(self, row: int, _column: int) -> None:
+        if self._is_hidden_toggle_row(row):
+            self._toggle_hidden_group()
+
     def _on_sensor_cell_double_clicked(self, row: int, _column: int) -> None:
+        # The toggle row acts on the click; a double-click's first click already
+        # toggled it, and toggling again here would undo that.
         sensor = self._row_to_sensor(row)
-        if sensor is None:
-            if self._is_hidden_toggle_row(row):
-                self._toggle_hidden_group()
-            return
-        self._open_sensor_detail(sensor.id)
+        if sensor is not None:
+            self._open_sensor_detail(sensor.id)
 
     def _on_sensor_context_menu(self, pos: QPoint) -> None:
         row = self._sensor_table.indexAt(pos).row()

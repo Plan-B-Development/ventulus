@@ -61,11 +61,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ventulus.constants import PAGE_CONTROLS, PAGE_SYSTEM_STATE
+from ventulus.constants import PAGE_CONTROLS, PAGE_HARDWARE
 from ventulus.services.diagnostics_service import (
-    JOURNAL_TIMEOUT_S,
+    BUNDLE_SUBPROCESS_BUDGET_S,
     MAX_EVENTS,
     DiagnosticsService,
+    SupportBundleDraft,
 )
 from ventulus.services.logs_view import (
     LEVEL_ORDER,
@@ -120,9 +121,9 @@ _TAB_JOURNAL = 3
 # small explicit map keyed on the emitter tag, not a heuristic over message text — the
 # brief rules out building a parser to make buttons resemble the mock-up.
 _CONTEXT_ACTIONS: dict[str, tuple[str, int]] = {
-    "hwmon": ("Open Hardware", PAGE_SYSTEM_STATE),
-    "openfan": ("Open Hardware", PAGE_SYSTEM_STATE),
-    "gpu": ("Open Hardware", PAGE_SYSTEM_STATE),
+    "hwmon": ("Open Hardware", PAGE_HARDWARE),
+    "openfan": ("Open Hardware", PAGE_HARDWARE),
+    "gpu": ("Open Hardware", PAGE_HARDWARE),
     "profile": ("Open Controls", PAGE_CONTROLS),
 }
 
@@ -146,14 +147,42 @@ class _JournalWorker(QObject):
         self.fetched.emit(self._diag.fetch_journal_entries())
 
 
+class _BundleWorker(QObject):
+    """Finishes a support bundle off the UI thread, on the journal worker's thread.
+
+    The page takes the GUI-state snapshot on the UI thread first; what runs here
+    (lsmod, journalctl twice, the file write) touches no Qt object or GUI state.
+    Exactly one ``finished`` per request: ``(True, path)`` or ``(False, reason)``.
+    """
+
+    finished = Signal(bool, str)
+
+    def __init__(self, diag: DiagnosticsService) -> None:
+        super().__init__()
+        self._diag = diag
+
+    @Slot(object, str)
+    def do_export(self, draft: SupportBundleDraft, path: str) -> None:
+        try:
+            self._diag.finish_support_bundle(draft, Path(path))
+        except Exception as e:  # reported on the page, never raised into the thread
+            self.finished.emit(False, str(e)[:120])
+            return
+        self.finished.emit(True, path)
+
+
 class LogsPage(QWidget):
     """Activity strip, event list, and a tabbed inspector."""
 
     # Main-thread → worker-thread request (queued). Class attribute so PySide6
     # binds it as a bound signal per instance.
     _journal_request = Signal()
+    _bundle_request = Signal(object, str)
     #: A contextual action asked to leave the page; MainWindow owns the stack.
     navigate_requested = Signal(int)
+    #: A support-bundle export ended: ``(ok, message)``. The export is started
+    #: from the footer on any page, so MainWindow shows it on the window banner.
+    bundle_export_finished = Signal(bool, str)
 
     def __init__(
         self,
@@ -189,9 +218,14 @@ class LogsPage(QWidget):
         self._diag_loaded = False
         self._journal_loaded = False
 
-        # Journal worker (lazy).
+        # Journal worker (lazy). The bundle worker shares its thread.
         self._journal_thread: QThread | None = None
         self._journal_worker: _JournalWorker | None = None
+        self._bundle_worker: _BundleWorker | None = None
+        self._bundle_in_flight = False
+        # "Follow" was switched off by scrolling away from the tail, not by the
+        # user, so scrolling back to the tail switches it on again.
+        self._follow_paused_by_scroll = False
 
         # DEC-245: coalesce a typed search phrase into one settings write.
         self._filter_write_timer = QTimer(self)
@@ -859,9 +893,8 @@ class LogsPage(QWidget):
         self._selected_event_id = None
         self._selected_row = None
         self._pending_new = 0
-        self._window = None
-        self._histogram.set_selected_index(None)
-        self._refresh_view()
+        # Clearing the feed drops the time window, so the strip must stop naming it.
+        self._on_bucket_clicked(-1)
 
     # ── The single derivation path ───────────────────────────────────
 
@@ -1041,21 +1074,38 @@ class LogsPage(QWidget):
         return row.event_id if row is not None else None
 
     def _on_follow_toggled(self, checked: bool) -> None:
+        self._follow_paused_by_scroll = False
         if checked:
             self._resume_following()
         else:
             self._refresh_follow_indicator()
 
     def _resume_following(self) -> None:
+        self._follow_paused_by_scroll = False
         self._follow_btn.setChecked(True)
         self._pending_new = 0
         self._table.scrollToTop()
         self._refresh_follow_indicator()
 
     def _on_table_scrolled(self, _value: int) -> None:
-        """Scrolling away pauses following; scrolling back to the tail resumes it."""
-        if self._is_at_top():
+        """Scrolling away pauses following; scrolling back to the tail resumes it.
+
+        The button's checked state follows, so it never reads "paused" while
+        checked: a click on a paused Follow then resumes it, as its text says.
+        Only a pause made by scrolling is undone by scrolling back; one the user
+        made with the button stays.
+        """
+        at_top = self._is_at_top()
+        if at_top:
             self._pending_new = 0
+            if self._follow_paused_by_scroll:
+                self._follow_paused_by_scroll = False
+                with block_signals(self._follow_btn):
+                    self._follow_btn.setChecked(True)
+        elif self._follow_btn.isChecked():
+            self._follow_paused_by_scroll = True
+            with block_signals(self._follow_btn):
+                self._follow_btn.setChecked(False)
         self._refresh_follow_indicator()
 
     def _refresh_follow_indicator(self) -> None:
@@ -1247,10 +1297,29 @@ class LogsPage(QWidget):
         )
         if not path:
             return
+        if self._bundle_in_flight:
+            self.bundle_export_finished.emit(False, "A support bundle export is already running.")
+            return
         try:
-            self._diag.export_support_bundle(Path(path))
-        except Exception as e:  # surface any failure into the visible event feed
-            self._diag.log_event("error", "gui", f"Support bundle export failed: {str(e)[:80]}")
+            draft = self._diag.snapshot_support_bundle()
+        except Exception as e:
+            self._on_bundle_finished(False, str(e)[:120])
+            return
+        # lsmod and two journalctl runs can take seconds; the GUI must not freeze.
+        self._bundle_in_flight = True
+        self._ensure_journal_worker()
+        self._bundle_request.emit(draft, path)
+
+    @Slot(bool, str)
+    def _on_bundle_finished(self, ok: bool, detail: str) -> None:
+        self._bundle_in_flight = False
+        if ok:
+            message = f"Support bundle saved to {detail}"
+            self._diag.log_event("info", "gui", message)
+        else:
+            message = f"Support bundle export failed: {detail}"
+            self._diag.log_event("error", "gui", message)
+        self.bundle_export_finished.emit(ok, message)
 
     # ── Diagnostics + Journal tabs (lazy) ────────────────────────────
 
@@ -1308,6 +1377,14 @@ class LogsPage(QWidget):
         self._journal_worker.fetched.connect(
             self._on_journal_fetched, Qt.ConnectionType.QueuedConnection
         )
+        self._bundle_worker = _BundleWorker(self._diag)
+        self._bundle_worker.moveToThread(self._journal_thread)
+        self._bundle_request.connect(
+            self._bundle_worker.do_export, Qt.ConnectionType.QueuedConnection
+        )
+        self._bundle_worker.finished.connect(
+            self._on_bundle_finished, Qt.ConnectionType.QueuedConnection
+        )
         self._journal_thread.start()
 
     @Slot(str)
@@ -1346,16 +1423,20 @@ class LogsPage(QWidget):
 
         if self._journal_worker is not None:
             QObject.disconnect(self._journal_worker, None, None, None)
+        if self._bundle_worker is not None:
+            QObject.disconnect(self._bundle_worker, None, None, None)
         if self._journal_thread is not None:
             self._journal_thread.quit()
             # A fetch in flight blocks in subprocess.run for up to
-            # JOURNAL_TIMEOUT_S (which then kills the journalctl child); the
-            # queued quit() is only processed once do_fetch returns. Waiting the
-            # full subprocess budget + margin lets the worker join cleanly on the
+            # JOURNAL_TIMEOUT_S (which then kills the journalctl child), and a
+            # bundle export runs three subprocesses in turn; the queued quit() is
+            # only processed once the running slot returns. Waiting the full
+            # subprocess budget + margin lets the worker join cleanly on the
             # normal path — the old 2 s wait fell short of the 5 s timeout and
             # forced terminate(), orphaning the child. terminate() stays only as
-            # a last-resort backstop.
-            join_ms = int(JOURNAL_TIMEOUT_S * 1000) + 1500
+            # a last-resort backstop. wait() returns as soon as the thread ends,
+            # so the larger budget costs nothing when nothing is running.
+            join_ms = int(BUNDLE_SUBPROCESS_BUDGET_S * 1000) + 1500
             if not self._journal_thread.wait(join_ms):
                 log.warning(
                     "Logs journal thread did not stop within %.1fs, terminating",
@@ -1364,6 +1445,7 @@ class LogsPage(QWidget):
                 self._journal_thread.terminate()
                 self._journal_thread.wait(1000)
         self._journal_worker = None
+        self._bundle_worker = None
         self._journal_thread = None
 
 

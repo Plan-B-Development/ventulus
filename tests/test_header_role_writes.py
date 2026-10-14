@@ -132,6 +132,7 @@ class TestApply:
             HEADERS,
             [(OLD_PUMP, None), (USER_RAD, None), (NEW, "pump")],
             confirm=confirm,
+            capabilities=None,
             publish_headers=published.append,
         )
         assert client.log == [
@@ -153,6 +154,7 @@ class TestApply:
             HEADERS,
             [(OLD_PUMP, None), (USER_RAD, None), (LABEL_PUMP, "chassis_fan"), (NEW, "pump")],
             confirm=confirm,
+            capabilities=None,
         )
         assert client.log == [
             ("set", LABEL_PUMP, "chassis_fan"),
@@ -166,7 +168,11 @@ class TestApply:
     def test_declining_keeps_the_pump_and_still_rereads_what_landed(self):
         client = _Client()
         outcome = apply_role_writes(
-            client, HEADERS, [(NEW, "pump"), (OLD_PUMP, None)], confirm=_Confirm(False)
+            client,
+            HEADERS,
+            [(NEW, "pump"), (OLD_PUMP, None)],
+            confirm=_Confirm(False),
+            capabilities=None,
         )
         assert ("set", OLD_PUMP, None) not in client.log
         assert [w.header_id for w in outcome.declined] == [OLD_PUMP]
@@ -179,6 +185,7 @@ class TestApply:
             HEADERS,
             [(USER_RAD, None), (OLD_PUMP, None), (NEW, "pump")],
             confirm=_Confirm(True),
+            capabilities=None,
         )
         assert outcome.failed_assign is None
         assert [(f.write.header_id, f.write.kind) for f in outcome.failed] == [
@@ -192,14 +199,20 @@ class TestApply:
         headers = [*HEADERS, _hdr(second, "pump", "user_assigned")]
         confirm = _Confirm(True)
         apply_role_writes(
-            _Client(), headers, [(OLD_PUMP, None), (second, "chassis_fan")], confirm=confirm
+            _Client(),
+            headers,
+            [(OLD_PUMP, None), (second, "chassis_fan")],
+            confirm=confirm,
+            capabilities=None,
         )
         assert confirm.asked == [[OLD_PUMP, second]]
 
     def test_nothing_to_send_sends_nothing_and_rereads_nothing(self):
         client = _Client()
         confirm = _Confirm(True)
-        outcome = apply_role_writes(client, HEADERS, [(OLD_PUMP, "pump")], confirm=confirm)
+        outcome = apply_role_writes(
+            client, HEADERS, [(OLD_PUMP, "pump")], confirm=confirm, capabilities=None
+        )
         assert client.log == [] and confirm.asked == []
         assert outcome.skipped == (OLD_PUMP,) and not outcome.attempted
 
@@ -210,7 +223,9 @@ class TestApply:
         """A timeout or a malformed answer proves nothing either way — the write
         may have landed — so the re-read is what shows the truth."""
         client = _Client(fail={NEW: error})
-        outcome = apply_role_writes(client, HEADERS, [(NEW, "pump")], confirm=_Confirm(True))
+        outcome = apply_role_writes(
+            client, HEADERS, [(NEW, "pump")], confirm=_Confirm(True), capabilities=None
+        )
         assert outcome.failed_assign.error is error
         assert outcome.headers == HEADERS
 
@@ -222,6 +237,7 @@ class TestApply:
             HEADERS,
             [(NEW, "chassis_fan")],
             confirm=_Confirm(True),
+            capabilities=None,
             publish_headers=published.append,
         )
         assert outcome.landed_ids() == {NEW}, "precondition: the write landed"

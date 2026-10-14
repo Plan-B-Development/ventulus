@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 from tests.layout_helpers import settle_at_minimum
 from ventulus.api.models import ConnectionState
-from ventulus.constants import PAGE_LOGS, PAGE_SYSTEM_STATE
+from ventulus.constants import PAGE_HARDWARE, PAGE_LOGS
 from ventulus.services.app_state import AppState
 from ventulus.services.diagnostics_service import MAX_EVENTS, DiagnosticsService
 from ventulus.services.logs_view import (
@@ -612,7 +612,7 @@ def test_the_contextual_action_requests_navigation(qtbot):
 
     with qtbot.waitSignal(page.navigate_requested, timeout=500) as sig:
         page._action_btn.click()
-    assert sig.args == [PAGE_SYSTEM_STATE]
+    assert sig.args == [PAGE_HARDWARE]
 
 
 def test_copy_event_with_context_includes_the_related_rows(qtbot):
@@ -779,17 +779,26 @@ def test_set_theme_repaints_without_reconstructing(qtbot):
     assert page._model.rowCount() == 1
 
 
-def test_export_bundle_invokes_service(qtbot, monkeypatch, tmp_path):
+def _quick_bundle_collectors(monkeypatch, diag) -> None:
+    """lsmod and journalctl stand-ins: the export's subprocesses are not under test."""
+    monkeypatch.setattr(diag, "fetch_journal_entries", lambda: "")
+    monkeypatch.setattr(DiagnosticsService, "collect_kernel_modules", staticmethod(lambda: ""))
+    monkeypatch.setattr(DiagnosticsService, "fetch_kernel_log_amdgpu", staticmethod(lambda: ""))
+
+
+def test_export_bundle_writes_the_chosen_file(qtbot, monkeypatch, tmp_path):
     page, diag = _page(qtbot)
     target = tmp_path / "bundle.json"
     monkeypatch.setattr(
         "ventulus.ui.pages.logs_page.QFileDialog.getSaveFileName",
         lambda *a, **k: (str(target), ""),
     )
-    seen: list[str] = []
-    diag.export_support_bundle = lambda p: seen.append(str(p))  # type: ignore[method-assign]
-    page.export_bundle()
-    assert seen == [str(target)]
+    _quick_bundle_collectors(monkeypatch, diag)
+    with qtbot.waitSignal(page.bundle_export_finished, timeout=5000) as sig:
+        page.export_bundle()
+    page.cleanup()
+    assert sig.args[0] is True
+    assert target.exists()
 
 
 def test_export_bundle_cancel_is_noop(qtbot, monkeypatch):
@@ -798,9 +807,10 @@ def test_export_bundle_cancel_is_noop(qtbot, monkeypatch):
         "ventulus.ui.pages.logs_page.QFileDialog.getSaveFileName", lambda *a, **k: ("", "")
     )
     called: list[int] = []
-    diag.export_support_bundle = lambda p: called.append(1)  # type: ignore[method-assign]
+    diag.snapshot_support_bundle = lambda: called.append(1)  # type: ignore[method-assign]
     page.export_bundle()
     assert called == []
+    assert page._journal_thread is None, "a cancel starts no worker"
 
 
 def test_export_bundle_failure_surfaces_into_feed(qtbot, monkeypatch, tmp_path):
@@ -809,12 +819,15 @@ def test_export_bundle_failure_surfaces_into_feed(qtbot, monkeypatch, tmp_path):
         "ventulus.ui.pages.logs_page.QFileDialog.getSaveFileName",
         lambda *a, **k: (str(tmp_path / "b.json"), ""),
     )
+    _quick_bundle_collectors(monkeypatch, diag)
 
-    def boom(_p):
+    def boom(*_a, **_k):
         raise OSError("disk full")
 
-    diag.export_support_bundle = boom  # type: ignore[method-assign]
-    page.export_bundle()
+    monkeypatch.setattr("ventulus.paths.atomic_write", boom)
+    with qtbot.waitSignal(page.bundle_export_finished, timeout=5000):
+        page.export_bundle()
+    page.cleanup()
     assert any("export failed" in e.message for e in diag.events)
     assert any("export failed" in m for m in _messages(page))
 

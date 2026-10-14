@@ -353,6 +353,10 @@ class HardwarePage(QWidget):
         #: and that header's (role, role_source) when it was shown.
         self._role_outcome_header = ""
         self._role_outcome_role: tuple[str, str] | None = None
+        #: The same for the OpenFan Channels outcome line: the channel it is
+        #: about and that channel's (role, role_source) when it was shown.
+        self._openfan_outcome_fan = ""
+        self._openfan_outcome_role: tuple[str, str] | None = None
 
         self._build_ui()
 
@@ -372,6 +376,7 @@ class HardwarePage(QWidget):
             self._state.capabilities_updated.connect(self._refresh_cooling_section)
             self._state.cooling_devices_updated.connect(self._refresh_cooling_section)
             self._state.openfan_roles_updated.connect(self._refresh_openfan_roles)
+            self._state.openfan_roles_updated.connect(self._expire_openfan_outcome)
             # DEC-481: the firmware button follows the OpenFAN link and any update.
             self._state.status_updated.connect(self._on_status_for_firmware)
             # §6.3's "Last validated" row is daemon-persisted, so it must be
@@ -936,6 +941,24 @@ class HardwarePage(QWidget):
             return
         self._openfan_outcome.setText(message)
         self._openfan_outcome.setVisible(bool(message))
+        self._openfan_outcome_fan = fan_id
+        self._openfan_outcome_role = self._openfan_role_key(fan_id)
+
+    def _openfan_role_key(self, fan_id: str) -> tuple[str, str] | None:
+        role = self._state.openfan_role(fan_id) if self._state is not None else None
+        return (role.role, role.role_source) if role is not None else None
+
+    def _expire_openfan_outcome(self, *_args) -> None:
+        """Clear the OpenFan outcome line once its channel's role moves on, as
+        `ROLE-d` does for the header cards: a role set from the report or another
+        client would otherwise sit under a past-tense line that contradicts it."""
+        fan_id = self._openfan_outcome_fan
+        if not fan_id or self._openfan_role_key(fan_id) == self._openfan_outcome_role:
+            return
+        self._openfan_outcome.setText("")
+        self._openfan_outcome.setVisible(False)
+        self._openfan_outcome_fan = ""
+        self._openfan_outcome_role = None
 
     def change_openfan_role(self, fan_id: str, parent: QWidget | None) -> str | None:
         """Pick, confirm and write one OpenFan channel's role (`ROLE-f`).
@@ -2641,6 +2664,7 @@ class HardwarePage(QWidget):
             [header],
             [(header_id, role)],
             confirm=lambda _ids: confirm_remove_pump_protection(parent, [name]),
+            capabilities=caps,
             # Emits `headers_updated`, which re-renders this page's cards.
             publish_headers=state.set_hwmon_headers,
         )

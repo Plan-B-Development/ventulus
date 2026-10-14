@@ -186,6 +186,20 @@ class DiagEvent:
         return time.strftime("%H:%M:%S", time.localtime(self.timestamp))
 
 
+#: The worst case a whole support-bundle export spends in subprocesses (lsmod,
+#: the daemon journal, the kernel log), run one after another.
+BUNDLE_SUBPROCESS_BUDGET_S = LSMOD_TIMEOUT_S + JOURNAL_TIMEOUT_S + KERNEL_LOG_TIMEOUT_S
+
+
+@dataclass(frozen=True)
+class SupportBundleDraft:
+    """The GUI-state half of a support bundle (``snapshot_support_bundle``)."""
+
+    bundle: dict
+    missing: list[str]
+    serials: frozenset[str]
+
+
 class DiagnosticsService(QObject):
     """Collects diagnostic events, retrieves status detail, and exports support bundles.
 
@@ -747,11 +761,24 @@ class DiagnosticsService(QObject):
         return serials
 
     def export_support_bundle(self, path: Path) -> None:
-        """Export a JSON support bundle for troubleshooting."""
+        """Export a JSON support bundle for troubleshooting, on the calling thread.
+
+        The two halves are separate so the Logs page can run the slow one off the
+        GUI thread: :meth:`snapshot_support_bundle` reads GUI-owned state and must
+        run on the GUI thread; :meth:`finish_support_bundle` only spawns
+        subprocesses and writes the file.
+        """
+        self.finish_support_bundle(self.snapshot_support_bundle(), path)
+
+    def snapshot_support_bundle(self) -> SupportBundleDraft:
+        """Everything the bundle takes from AppState, settings and profiles.
+
+        GUI thread only. The kernel, module, journal and kernel-log sections are
+        left for :meth:`finish_support_bundle`, which runs their subprocesses.
+        """
         missing: list[str] = []
         # GSA-g: an event can quote a daemon answer naming a by-id port.
         serials = self._known_openfan_serials()
-        kernel_info = self.collect_kernel_info()
         bundle: dict = {
             "timestamp": time.time(),
             "system": {
@@ -763,9 +790,10 @@ class DiagnosticsService(QObject):
                 "arch": platform.machine(),
                 # DEC-098: kernel release + boot parameters so triagers
                 # can identify amdgpu regressions and verify ppfeaturemask
-                # without asking the user for extra commands.
-                "kernel": kernel_info,
-                "kernel_modules": self.collect_kernel_modules(),
+                # without asking the user for extra commands. Filled in by
+                # finish_support_bundle; the keys are placed here to keep the order.
+                "kernel": None,
+                "kernel_modules": None,
             },
             "events": [
                 {
@@ -910,6 +938,20 @@ class DiagnosticsService(QObject):
                     "enable_revert_counts": hd.hwmon.enable_revert_counts,
                 },
             }
+
+        return SupportBundleDraft(bundle, missing, frozenset(serials))
+
+    def finish_support_bundle(self, draft: SupportBundleDraft, path: Path) -> None:
+        """Run the bundle's subprocesses and write it to ``path``.
+
+        Touches no GUI-owned state, so it may run on a worker thread. Raises on a
+        failed write; the caller reports it.
+        """
+        bundle = draft.bundle
+        missing = list(draft.missing)
+        serials = set(draft.serials)
+        bundle["system"]["kernel"] = self.collect_kernel_info()
+        bundle["system"]["kernel_modules"] = self.collect_kernel_modules()
 
         # System journal (daemon logs), without the board's serial (GSA-g). The
         # Logs page shows the same lines unscrubbed: they stay on this machine.

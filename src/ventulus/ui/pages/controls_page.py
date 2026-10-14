@@ -1341,6 +1341,29 @@ class ControlsPage(QWidget):
         self._set_status_chip(text, css_class, detail=warnings)
         return True
 
+    _DIALOG_NOT_APPLIED = "Not applied — the profile on screen changed while the dialog was open"
+
+    def _profile_replaced_during_dialog(self, profile: Profile, *, report: bool = True) -> bool:
+        """True when the profile a modal dialog edited is no longer the one shown.
+
+        A modal dialog runs a nested event loop, so an activation from the
+        Dashboard, the tray or another client can move the page to another
+        profile, or re-read this one from its store, before the dialog returns.
+        Its result then belongs to an object the page no longer shows: applied,
+        it would sit in memory unseen until a later Apply ran it, or be lost
+        silently. The caller drops it, and the chip says so (``report``: a
+        cancelled dialog had nothing to apply, so it says nothing).
+        """
+        if self._get_current_profile() is profile:
+            return False
+        if not report:
+            return True
+        previous = self._unsaved_label.text()
+        note = self._DIALOG_NOT_APPLIED
+        if note not in previous:
+            self._set_status_chip(f"{previous} · {note}" if previous else note, "WarningChip")
+        return True
+
     def _set_status_chip(self, text: str, css_class: str, *, detail: Sequence[str] = ()) -> None:
         """Set the toolbar status chip. Every writer goes through here, so a
         detail (the daemon's reasons) never outlives the text it explains.
@@ -1396,6 +1419,10 @@ class ControlsPage(QWidget):
         already succeeded, so a failed re-apply never loses the edit.
         """
         assert self._client is not None  # guaranteed by the caller's guard
+        # DEC-165: the stand-down that refuses Apply refuses this activation too.
+        if (blocked := self._profile_service.control_blocked_reason) is not None:
+            self._log.warning("Not reapplying active profile %s: %s", profile.id, blocked)
+            return False
         profile_path = str(self._profile_service.profile_path(profile.id))
         try:
             result = self._client.activate_profile(profile_path)
@@ -1638,6 +1665,7 @@ class ControlsPage(QWidget):
             self._state.hwmon_headers,
             assignments,
             confirm=self._confirm_pump_clears,
+            capabilities=self._state.capabilities,
             publish_headers=self._state.set_hwmon_headers,
         )
         failure = outcome.failed_assign
@@ -1705,10 +1733,15 @@ class ControlsPage(QWidget):
             has_coolant=det.has_coolant,
             parent=self,
         )
-        if not exec_dialog(dlg):
+        if not exec_dialog(dlg) or self._profile_replaced_during_dialog(profile):
             return
         res = dlg.get_result()
-        if not self._apply_header_roles(res["role_assignments"]):
+        # The role writes can ask about a pump removal, another nested loop; the
+        # roles have landed daemon-side either way, but the controls follow the
+        # profile only if it is still the one on screen.
+        if not self._apply_header_roles(
+            res["role_assignments"]
+        ) or self._profile_replaced_during_dialog(profile):
             return
         # Rebuild the pump member from the refreshed header, so a role just
         # assigned is reflected in `member_label` — that label is the DEC-095/162
@@ -1934,7 +1967,7 @@ class ControlsPage(QWidget):
             default_zero_rpm=True,
             parent=self,
         )
-        if not exec_dialog(dlg):
+        if not exec_dialog(dlg) or self._profile_replaced_during_dialog(profile):
             return
         res = dlg.get_result()
         if not res["sensor_id"]:
@@ -1970,7 +2003,7 @@ class ControlsPage(QWidget):
             name, ok = QInputDialog.getText(
                 self, "New Fan Role", "Control name:", text=default_name
             )
-            if not ok or not name.strip():
+            if not ok or not name.strip() or self._profile_replaced_during_dialog(profile):
                 return
             name = name.strip()
         # With no curve to follow, a new control starts in Manual: a curve-mode
@@ -1980,6 +2013,7 @@ class ControlsPage(QWidget):
         control = LogicalControl(name=name, mode=mode, curve_id=curve_id)
         profile.controls.append(control)
         self._refresh_controls_grid(profile)
+        self._refresh_curve_links(profile)
         self._set_unsaved(True)
 
     def _on_edit_role(self, control_id: str) -> None:
@@ -2003,13 +2037,23 @@ class ControlsPage(QWidget):
         # (it is where the role floor is reapplied), so Discard has to undo it.
         before = copy.deepcopy(control)
         was_unsaved = self._has_unsaved
-        if not exec_dialog(dlg):
+        accepted = exec_dialog(dlg)
+        if self._profile_replaced_during_dialog(profile, report=bool(accepted)):
+            # Undo what "Edit Members…" wrote while the dialog was open: this
+            # object may still be in memory, off screen. The unsaved flag now
+            # belongs to the profile on screen, so it is left alone.
+            if control != before:
+                for f in dataclasses.fields(control):
+                    setattr(control, f.name, getattr(before, f.name))
+            return
+        if not accepted:
             if control != before:
                 for f in dataclasses.fields(control):
                     setattr(control, f.name, getattr(before, f.name))
                 card = self._control_cards.get(control_id)
                 if card:
                     card.update_control(control, profile.curves)
+                self._refresh_curve_links(profile)
             # Accepting the member editor marks unsaved even with nothing changed.
             if self._has_unsaved != was_unsaved:
                 self._set_unsaved(was_unsaved)
@@ -2037,6 +2081,9 @@ class ControlsPage(QWidget):
         card = self._control_cards.get(control_id)
         if card:
             card.update_control(control, profile.curves)
+        # The role's curve and members feed the curve cards' "Used by" and the
+        # open editor's floor.
+        self._refresh_curve_links(profile)
         self._set_unsaved(True)
 
     def _on_delete_control(self, control_id: str) -> None:
@@ -2065,6 +2112,7 @@ class ControlsPage(QWidget):
             return
         profile.controls = [c for c in profile.controls if c.id != control_id]
         self._refresh_controls_grid(profile)
+        self._refresh_curve_links(profile)
         self._set_unsaved(True)
 
     def focus_control(self, control_id: str) -> bool:
@@ -2131,7 +2179,10 @@ class ControlsPage(QWidget):
             reserved=self._cooling_reservations(exempt_ids=[m.member_id for m in control.members]),
             missing_ids=missing_header_member_ids(control.members, self._detected_hwmon_ids()),
         )
-        if exec_dialog(dlg):
+        accepted = exec_dialog(dlg)
+        if self._profile_replaced_during_dialog(profile, report=bool(accepted)):
+            return
+        if accepted:
             new_members = dlg.get_members()
             # Check if any NEW GPU fans were added — show zero-RPM info popup
             old_gpu_ids = {m.member_id for m in control.members if m.source == "amd_gpu"}
@@ -2180,10 +2231,7 @@ class ControlsPage(QWidget):
             self._curve_cards[curve.id] = card
             self._curves_flow.add_card(card, curve.id)
 
-        # Set "Used by" on each curve card
-        for _cid, ccard in self._curve_cards.items():
-            role_names = [ctrl.name for ctrl in profile.controls if ctrl.curve_id == ccard.curve.id]
-            ccard.set_used_by(role_names)
+        self._refresh_curve_links(profile)
 
         # DEC-233: re-apply the editing highlight after a rebuild so the card open
         # in the editor stays "on the workbench". If that curve is gone (deleted,
@@ -2219,6 +2267,32 @@ class ControlsPage(QWidget):
         curve_map = {c.id: c for c in profile.curves}
         profile.curves = [curve_map[cid] for cid in new_order if cid in curve_map]
         self._set_unsaved(True)
+
+    def _refresh_curve_links(self, profile) -> None:
+        """Repaint what other cards say about the fan roles, without a rebuild.
+
+        Each curve card's "Used by", and the floor of the curve open in the
+        editor: both follow the roles (their curve, members and names), which
+        role edits change without rebuilding the curve grid.
+        """
+        for ccard in self._curve_cards.values():
+            role_names = [ctrl.name for ctrl in profile.controls if ctrl.curve_id == ccard.curve.id]
+            ccard.set_used_by(role_names)
+        editing = self._curve_editor.get_curve() if self._editing_curve_id else None
+        if editing is not None:
+            self._curve_editor.set_min_output(self._curve_min_output_floor(profile, editing.id))
+
+    def _refresh_control_cards(self, profile) -> None:
+        """Repaint each control card in place, e.g. after a curve's name changed.
+
+        Not ``_refresh_controls_grid``: that rebuilds the cards, and the rebuild
+        releases every held Manual override first (DEC-163). A cosmetic edit must
+        not cost the user an override, as a fan rename already does not.
+        """
+        for control in profile.controls:
+            card = self._control_cards.get(control.id)
+            if card is not None:
+                card.update_control(control, profile.curves)
 
     def _on_add_curve_menu(self) -> None:
         menu = self._build_add_curve_menu()
@@ -2296,10 +2370,10 @@ class ControlsPage(QWidget):
         if not curve:
             return
         name, ok = QInputDialog.getText(self, "Rename Curve", "New name:", text=curve.name)
-        if ok and name.strip():
+        if ok and name.strip() and not self._profile_replaced_during_dialog(profile):
             curve.name = name.strip()
             self._refresh_curves_grid(profile)
-            self._refresh_controls_grid(profile)
+            self._refresh_control_cards(profile)
             self._set_unsaved(True)
 
     def _on_duplicate_curve(self, curve_id: str) -> None:
@@ -2385,7 +2459,10 @@ class ControlsPage(QWidget):
                 demo=self._is_demo(),
                 parent=self,
             )
-            if exec_dialog(dlg):
+            accepted = exec_dialog(dlg)
+            if self._profile_replaced_during_dialog(profile, report=bool(accepted)):
+                return
+            if accepted:
                 dlg.apply_to_curve()
                 band = dlg.hysteresis_apply_all()
                 if band is not None:
@@ -2393,6 +2470,8 @@ class ControlsPage(QWidget):
                     # The point editor may be open on another curve this reached.
                     self._curve_editor.refresh_hysteresis()
                 self._refresh_curves_grid(profile)
+                # Control cards name their curve; a rename here reached none.
+                self._refresh_control_cards(profile)
                 self._set_unsaved(True)
         else:
             self._editor_title.setText(f"Editing: {curve.name}")

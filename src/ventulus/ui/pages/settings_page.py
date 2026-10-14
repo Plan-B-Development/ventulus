@@ -879,7 +879,10 @@ class SettingsPage(QWidget):
         self._settings_svc.update(series_colors={})
         self.series_colors_changed.emit(dict(self._settings_svc.settings.series_colors))
         self._refresh_reset_buttons()
-        self._set_status("Chart series colours reset to defaults")
+        self._report_reset(
+            not self._settings_svc.settings.series_colors,
+            "Chart series colours reset to defaults",
+        )
 
     def _chart_orphans(self) -> OrphanReport:
         """Chart settings referring to hardware the daemon no longer reports.
@@ -923,10 +926,20 @@ class SettingsPage(QWidget):
         # a demo session update() drops the call entirely — announcing a removal
         # that did not occur is the same fabricated-success bug v2.39.0 fixed
         # elsewhere, just smaller.
-        if self._chart_orphans().total == report.total:
-            self._set_status("Not saved — demo mode uses session-only settings")
-        else:
-            self._set_status(f"Removed {report.total} setting(s) for missing hardware")
+        self._report_reset(
+            self._chart_orphans().total != report.total,
+            f"Removed {report.total} setting(s) for missing hardware",
+        )
+
+    _SEALED_RESET_STATUS = "Not saved — demo mode uses session-only settings"
+
+    def _report_reset(self, took_effect: bool, done: str) -> None:
+        """Say what a reset did, read back from the settings it wrote.
+
+        The keys these resets write are demo-sealed (DEC-244): in a demo session
+        update() drops them, and announcing the reset anyway is fabricated success.
+        """
+        self._set_status(done if took_effect else self._SEALED_RESET_STATUS)
 
     def _show_all_series(self) -> None:
         if self._series_selection is not None:
@@ -2196,7 +2209,10 @@ class SettingsPage(QWidget):
     def _reseed_chart_series(self) -> None:
         self._settings_svc.update(chart_series_seeded=False)
         self._refresh_reset_buttons()
-        self._set_status("Chart series defaults will be re-picked at next startup")
+        self._report_reset(
+            not self._settings_svc.settings.chart_series_seeded,
+            "Chart series defaults will be re-picked at next startup",
+        )
 
     def _build_card_layout_card(self) -> QWidget:
         card = Card()
@@ -2250,7 +2266,9 @@ class SettingsPage(QWidget):
     def _reset_card_sizes(self) -> None:
         self._settings_svc.update(controls_card_sizes={})
         self._refresh_reset_buttons()
-        self._set_status("Controls card sizes reset")
+        self._report_reset(
+            not self._settings_svc.settings.controls_card_sizes, "Controls card sizes reset"
+        )
 
     def _refresh_reset_buttons(self) -> None:
         """Label each reset control with its count and disable it when empty.

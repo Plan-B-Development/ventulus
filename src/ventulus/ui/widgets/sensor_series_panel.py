@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QModelIndex, QPoint, Qt
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtCore import QEvent, QModelIndex, QObject, QPoint, Qt
+from PySide6.QtGui import QAction, QColor, QKeyEvent
 from PySide6.QtWidgets import (
     QFrame,
     QLineEdit,
@@ -106,6 +106,11 @@ def _sensor_value_text(s: SensorReading) -> str:
 
 def _fan_value_text(f: FanReading) -> str:
     return _value_text(f"{f.rpm} RPM", f) if f.rpm is not None else "\u2014"
+
+
+def _set_if_changed(item: QTreeWidgetItem, column: int, text: str) -> None:
+    if item.text(column) != text:
+        item.setText(column, text)
 
 
 _GROUP_LABELS = {
@@ -231,6 +236,10 @@ class SensorSeriesPanel(QFrame):
         self._tree.setItemDelegate(_FanRowDelegate(self))
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_context_menu)
+        # G-20: the Menu key and Shift+F10 open the current row's menu. Handled
+        # here rather than left to the platform, which does not turn them into a
+        # context-menu event everywhere (the offscreen platform never does).
+        self._tree.installEventFilter(self)
         layout.addWidget(self._tree, 1)
 
         # Chart reference for colour sync (set by DashboardPage after construction)
@@ -264,12 +273,23 @@ class SensorSeriesPanel(QFrame):
 
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         """Open colour picker when column 2 (colour swatch) is clicked."""
-        if column != 2:
-            return
+        if column == 2:
+            self.pick_series_color(item)
+
+    def _colorable_series_key(self, item: QTreeWidgetItem | None) -> str:
+        """The series key whose colour ``item`` can change, or "" for none."""
+        if item is None or not self._chart or not hasattr(self._chart, "color_for_key"):
+            return ""
         series_key = item.data(0, Qt.ItemDataRole.UserRole)
         if not series_key or series_key.startswith("__group__"):
-            return
-        if not self._chart or not hasattr(self._chart, "color_for_key"):
+            return ""
+        return series_key
+
+    def pick_series_color(self, item: QTreeWidgetItem) -> None:
+        """Pick a colour for ``item``'s series: the swatch click, or the row
+        menu's "Change colour…", which is the keyboard path (G-20)."""
+        series_key = self._colorable_series_key(item)
+        if not series_key:
             return
 
         from PySide6.QtWidgets import QApplication, QColorDialog
@@ -406,15 +426,24 @@ class SensorSeriesPanel(QFrame):
         self._apply_search_filter()
 
     def _update_sensor_values(self, sensors: list[SensorReading]) -> None:
-        """Update values in-place without rebuilding items."""
-        for s in sensors:
-            item = self._sensor_items.get(s.id)
-            if item:
-                value = _sensor_value_text(s)
-                if item.text(1) != value:
-                    item.setText(1, value)
-                item.setToolTip(0, self._build_sensor_tooltip(s))
-                item.setToolTip(1, _value_tooltip(s))
+        """Update values in-place without rebuilding items.
+
+        G-19: under ``block_signals`` and only where something changed. Every
+        write to a column-0 role emits ``itemChanged``, and the column-0 tooltip
+        was rewritten each poll, so ``_on_item_changed`` re-applied every
+        sensor's visibility to the selection model once a second.
+        """
+        with block_signals(self._tree):
+            for s in sensors:
+                item = self._sensor_items.get(s.id)
+                if item:
+                    _set_if_changed(item, 1, _sensor_value_text(s))
+                    tip = self._build_sensor_tooltip(s)
+                    if item.toolTip(0) != tip:
+                        item.setToolTip(0, tip)
+                    value_tip = _value_tooltip(s)
+                    if item.toolTip(1) != value_tip:
+                        item.setToolTip(1, value_tip)
 
     def _update_group_summaries(self, sensors: list[SensorReading]) -> None:
         """Update group header text with count and max value.
@@ -552,37 +581,60 @@ class SensorSeriesPanel(QFrame):
             item.setText(0, self._fan_row_label(fan_id))
         self._apply_search_filter()
 
-    def build_fan_menu(self, item: QTreeWidgetItem | None) -> QMenu | None:
-        """Build the right-click menu for *item*, or None if it is not a fan row.
+    def build_row_menu(self, item: QTreeWidgetItem | None) -> QMenu | None:
+        """Build the context menu for *item*, or None when it offers nothing.
 
         Kept separate from showing it so the menu's contents are assertable
-        without driving a real popup. Sensor rows get no menu: sensor labels are
-        daemon-owned and there is no sensor-alias setting to write.
+        without driving a real popup. A fan row can be renamed; a sensor row
+        cannot (sensor labels are daemon-owned, with no alias setting to write).
+        Every series row offers "Change colour…": the swatch is a mouse-only
+        target, and this menu is what the keyboard's Menu key opens (G-20).
         """
         if item is None:
             return None
         fan_id = self._fan_id_for_item(item)
-        if not fan_id:
+        series_key = self._colorable_series_key(item)
+        if not fan_id and not series_key:
             return None
         menu = QMenu(self)
-        rename = QAction("Rename fan…", self)
-        rename.setObjectName("SensorSeriesPanel_Action_renameFan")
-        rename.triggered.connect(lambda: self._tree.editItem(item, 0))
-        menu.addAction(rename)
-        if self._state and fan_id in self._state.fan_aliases:
-            reset = QAction("Reset to default name", self)
-            reset.setObjectName("SensorSeriesPanel_Action_resetFanName")
-            reset.triggered.connect(lambda: self.rename_fan(fan_id, ""))
-            menu.addAction(reset)
+        if fan_id:
+            rename = QAction("Rename fan…", menu)
+            rename.setObjectName("SensorSeriesPanel_Action_renameFan")
+            rename.triggered.connect(lambda: self._tree.editItem(item, 0))
+            menu.addAction(rename)
+            if self._state and fan_id in self._state.fan_aliases:
+                reset = QAction("Reset to default name", menu)
+                reset.setObjectName("SensorSeriesPanel_Action_resetFanName")
+                reset.triggered.connect(lambda: self.rename_fan(fan_id, ""))
+                menu.addAction(reset)
+        if series_key:
+            colour = QAction("Change colour…", menu)
+            colour.setObjectName("SensorSeriesPanel_Action_changeColour")
+            colour.triggered.connect(lambda: self.pick_series_color(item))
+            menu.addAction(colour)
         return menu
 
-    def _on_context_menu(self, pos: QPoint) -> None:
-        """Right-click a fan row to rename it.
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is self._tree and event.type() == QEvent.Type.KeyPress:
+            key_event: QKeyEvent = event  # type: ignore[assignment]
+            key = key_event.key()
+            shift_f10 = (
+                key == Qt.Key.Key_F10 and key_event.modifiers() == Qt.KeyboardModifier.ShiftModifier
+            )
+            if key == Qt.Key.Key_Menu or shift_f10:
+                item = self._tree.currentItem()
+                if item is not None:
+                    self._on_context_menu(self._tree.visualItemRect(item).center())
+                return True
+        return super().eventFilter(obj, event)
 
-        Double-click and F2 already open the editor; this exists because neither
-        is discoverable on its own.
+    def _on_context_menu(self, pos: QPoint) -> None:
+        """The row menu: right-click, or the Menu key / Shift+F10 on the current row.
+
+        Double-click and F2 already open the rename editor; this exists because
+        neither is discoverable on its own.
         """
-        menu = self.build_fan_menu(self._tree.itemAt(pos))
+        menu = self.build_row_menu(self._tree.itemAt(pos))
         if menu is not None:
             exec_menu(menu, self._tree.viewport().mapToGlobal(pos))
 
@@ -643,20 +695,19 @@ class SensorSeriesPanel(QFrame):
         self._apply_search_filter()
 
     def _update_fan_values(self, fans: list[FanReading]) -> None:
-        """Update fan values in-place."""
-        for f in fans:
-            item = self._fan_items.get(f.id)
-            if item:
-                rpm_text = _fan_value_text(f)
-                if item.text(1) != rpm_text:
-                    item.setText(1, rpm_text)
-                item.setToolTip(1, _value_tooltip(f))
-                # Re-resolve the name in case an alias changed. Must go through
-                # _fan_row_label \u2014 recomputing a bare fan_display_name here is
-                # what used to erase the "(AIO)" tag on the second poll.
-                label = self._fan_row_label(f.id)
-                if item.text(0) != label:
-                    item.setText(0, label)
+        """Update fan values in-place, without ``itemChanged`` (G-19, as for sensors)."""
+        with block_signals(self._tree):
+            for f in fans:
+                item = self._fan_items.get(f.id)
+                if item:
+                    _set_if_changed(item, 1, _fan_value_text(f))
+                    value_tip = _value_tooltip(f)
+                    if item.toolTip(1) != value_tip:
+                        item.setToolTip(1, value_tip)
+                    # Re-resolve the name in case an alias changed. Must go through
+                    # _fan_row_label \u2014 recomputing a bare fan_display_name here is
+                    # what used to erase the "(AIO)" tag on the second poll.
+                    _set_if_changed(item, 0, self._fan_row_label(f.id))
 
     # ── Group management ─────────────────────────────────────────────
 

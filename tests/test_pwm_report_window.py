@@ -1060,6 +1060,37 @@ def test_a_header_left_changed_offers_reapply_and_it_activates_the_profile(qtbot
     qtbot.waitUntil(lambda: "re-applied" in message.text(), timeout=2000)
 
 
+def test_reapply_is_refused_against_a_daemon_the_gui_stood_down_from(qtbot, rig, monkeypatch):
+    """DEC-165: Re-apply calls the daemon directly, not through ProfileService,
+    so it checks the stand-down itself — a daemon that stopped advertising
+    `autonomous_control` (replaced by an old one mid-session) is not asked."""
+    window, controller, state, daemon, clock, _settings = rig
+    daemon.final_fans = [fan(CPU, mode=2), fan(SYS)]
+    _clear(window)
+    _box(window, "verify", CPU).click()
+    _btn(window, "PwmReport_Btn_next").click()
+    _btn(window, "PwmReport_Btn_next").click()
+    window.findChild(QCheckBox, "PwmReport_Check_consent").click()
+    _btn(window, "PwmReport_Btn_start").click()
+    _run_to_end(qtbot, controller, clock)
+    assert controller.document()["actions"]["reapply_profile"] is True
+    state.set_capabilities(_caps(autonomous_control=False))
+    asked: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Yes,
+    )
+    _btn(window, "PwmReport_Btn_reapply").click()
+    assert not asked, "nothing to confirm: it will not be sent"
+    assert controller.reapply_profile("quiet") is False
+    qtbot.wait(50)
+    assert "reapply_profile" not in daemon.kinds()
+    message = window.findChild(QLabel, "PwmReport_Label_reapply")
+    assert message.isVisibleTo(window)
+    assert message.text() == controller.reapply_blocked_reason() != ""
+
+
 # ── `PTA-l`: the Hardware page's own verify joins the start gate ─────────────
 
 

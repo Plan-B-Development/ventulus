@@ -12,6 +12,8 @@ class ErrorBanner(QWidget):
     """A horizontal banner that shows error/warning messages with auto-dismiss."""
 
     dismissed = Signal()
+    #: The user pressed Dismiss on this message (``dismissed`` fires on any hide).
+    user_dismissed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -35,7 +37,7 @@ class ErrorBanner(QWidget):
         # a setting. A minimum keeps the button from collapsing in a cramped
         # banner without capping it below its own text.
         self._dismiss_btn.setMinimumWidth(80)
-        self._dismiss_btn.clicked.connect(self.hide_banner)
+        self._dismiss_btn.clicked.connect(self._on_dismiss_clicked)
         layout.addWidget(self._dismiss_btn)
 
         self._auto_dismiss_timer = QTimer(self)
@@ -73,10 +75,23 @@ class ErrorBanner(QWidget):
         else:
             self._auto_dismiss_timer.stop()
 
+    def _on_dismiss_clicked(self) -> None:
+        message = self._message_label.text()
+        self.hide_banner()
+        self.user_dismissed.emit(message)
+
     def hide_banner(self) -> None:
         self._auto_dismiss_timer.stop()
         self.setVisible(False)
         self.dismissed.emit()
+
+    def is_alerting(self) -> bool:
+        """True while the banner is up with a warning or an error, not an info."""
+        return not self.isHidden() and self._icon_label.text() != "[i]"
+
+    def is_showing(self, message: str) -> bool:
+        """True while the banner is up with exactly ``message``."""
+        return not self.isHidden() and self._message_label.text() == message
 
     def hide_if_showing(self, message: str) -> bool:
         """Hide the banner only while it still shows ``message``; True if it did.
@@ -87,7 +102,7 @@ class ErrorBanner(QWidget):
         banner's own flag, which is what "showing" means here even while the
         window itself is not on screen.
         """
-        if self.isHidden() or self._message_label.text() != message:
+        if not self.is_showing(message):
             return False
         self.hide_banner()
         return True

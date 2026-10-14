@@ -164,6 +164,8 @@ DASHBOARD_OBJECTNAMES = frozenset(
         "Inspector_Root",
         "SensorSeriesPanel_Edit_search",
         "TimelineChart_Combo_range",
+        # GUI audit batch G (G-20): the plot is named for screen readers.
+        "TimelineChart_Plot",
         "TimelineChart_Label_mode",
         "TimelineChart_Label_range",
     }

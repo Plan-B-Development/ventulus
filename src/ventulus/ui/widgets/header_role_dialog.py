@@ -136,7 +136,9 @@ def confirm_remove_pump_protection(parent: QWidget | None, names: list[str]) -> 
     The ONLY role write that can lower a floor, so the only one that asks. The
     copy names the protection being removed rather than implying it: a user who
     reads "clear the pump role" does not necessarily know that this is what
-    stops the fan wizard driving it to 0.
+    stops the fan wizard driving it to 0. ``apply_role_writes`` asks it only
+    about headers that would lose protection, never one the daemon still infers
+    a pump from its own label or cooler channel.
     """
     listed = "\n".join(f"• {n}" for n in names)
     answer = QMessageBox.question(
@@ -145,8 +147,8 @@ def confirm_remove_pump_protection(parent: QWidget | None, names: list[str]) -> 
         "You previously named this as the pump:\n\n"
         f"{listed}\n\n"
         "Clearing that role removes its pump protection — the daemon will no "
-        "longer hold it above the 30% pump floor, and it may be stopped "
-        "during fan identification.\n\n"
+        "longer hold it at the pump floor, and it may be stopped during fan "
+        "identification.\n\n"
         "Clear it?",
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         QMessageBox.StandardButton.No,

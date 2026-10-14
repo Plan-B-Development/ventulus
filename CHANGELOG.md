@@ -106,6 +106,43 @@ rename. Version numbers carry on from Control-OFC.
   Alert Centre, the Fan Wizard, role pickers, colour pickers, message boxes and the Hardware page's
   run dialogs) and every right-click menu was kept, hidden, until Ventulus quit. A kept Alert
   Centre also kept rebuilding itself on every alert change.
+- **Against a daemon too old to control (before 2.0), Apply and Stop are off.** The "Daemon upgrade
+  required" banner said the GUI had stood down, but the sidebar and Dashboard **Apply** and **Stop**
+  still sent the request, as did saving the running profile (which re-applies it) and the PWM Test
+  Report's **Re-apply profile**. They are now greyed or refused with the reason, and the banner names the daemon
+  version now running instead of the first one seen, as does the "GUI is older" banner its floor.
+- **A dialog no longer applies its changes to a profile you have left.** If another profile was
+  activated (from the Dashboard, the tray or another client) while a fan role, curve, rename,
+  Configure AIO or Dedicate GPU dialog was open, its changes went into the profile no longer on
+  screen, unseen until a later **Apply** ran them. They are now dropped, and the status chip says so.
+- **Removing a pump role you assigned no longer warns about protection the header keeps.** A header
+  whose own label (`PUMP`, `AIO_PUMP`…) or cooler channel tells the daemon it drives a pump stays
+  protected whatever its role, so the "Remove pump protection?" question is not asked for it.
+- **Export Support Bundle no longer freezes the window, and says how it went.** It ran `lsmod` and
+  two `journalctl` reads on the GUI thread, then said nothing unless it failed, and a failure only
+  reached the Logs feed. It now runs in the background and a banner says where the file went (unless
+  a warning such as a disconnect is already showing), or why it was not written.
+- A refused **Apply**'s reason comes back after the daemon reconnects, instead of being replaced
+  by "Connected to daemon"; a reason you dismissed, or one overtaken by a profile change since,
+  stays down.
+- Demo mode: the status banner and Dashboard name the profile demo runs instead of "No profile".
+- Logs: **Clear Logs** also clears the time-filter label; a **Follow** paused by scrolling now
+  reads as off, so one click resumes it; **Open Hardware** opens the Hardware page, not System
+  State.
+- Dashboard: a hwmon or OpenFAN fault the daemon no longer reports leaves its chip on the next poll
+  rather than up to five minutes later, and **Dismiss** on the hwmon and API-version banners lasts
+  until their message changes.
+- Overview: the "N hidden sensors" row expands on a single click, or **Enter**, as it says.
+- Settings in demo mode: **Reset colours**, **Reset all sizes** and chart-series **Run again** say
+  they were not saved, since demo keeps those settings for the session only.
+- Controls: a curve card's "Used by" and a role card's curve name follow role and curve edits
+  straight away; renaming a curve no longer releases **Manual** overrides you are holding; the
+  curve editor's floor follows role changes made while it is open.
+- Hardware: the OpenFAN channel outcome line goes away once that channel's role changes elsewhere.
+- Accessibility: the Dashboard chart is no longer an unnamed Tab stop, and each Sensors panel row's
+  menu (right-click, <kbd>Menu</kbd> or <kbd>Shift</kbd>+<kbd>F10</kbd>) offers **Change colour…**,
+  so a series colour can be set without the mouse. The panel no longer re-applies every series'
+  visibility on each poll.
 
 ## [5.0.0] — 2026-10-10
 

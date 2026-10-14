@@ -225,7 +225,7 @@ Three strips frame every page:
 
 Two banners can appear across the top of the window when the GUI and the daemon do not fit together:
 
-- **"Daemon upgrade required"**: the daemon is too old for this GUI to control, so the GUI stands down. Upgrade `ventulusd`.
+- **"Daemon upgrade required"**: the daemon is too old for this GUI to control, so the GUI stands down: **Apply**, **Stop** and **Manual** are off until you upgrade `ventulusd`.
 - **"This GUI is older than the daemon supports"**: the daemon declares a minimum GUI version above this one. Fan control is unaffected (the daemon drives the fans itself), but some screens may not show everything the daemon can do. Upgrade `ventulus`.
 
 ### Keyboard shortcuts

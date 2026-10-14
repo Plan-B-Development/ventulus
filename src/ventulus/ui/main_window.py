@@ -385,6 +385,12 @@ class MainWindow(QWidget):
         # visible) then runs there; Export reuses the Logs page's bundle handler.
         self.footer.rescan_clicked.connect(self._on_footer_rescan)
         self.footer.export_bundle_clicked.connect(self.logs_page.export_bundle)
+        # Export is started from the footer on any page and finishes off-thread,
+        # so its outcome goes on the window banner, not only into the Logs feed.
+        self.logs_page.bundle_export_finished.connect(self._on_bundle_export_finished)
+        # A refused Apply's reason comes back after a reconnect, unless the user
+        # dismissed it.
+        self.error_banner.user_dismissed.connect(self._on_banner_user_dismissed)
         # DEC-314: the Logs inspector's contextual action leaves the page. The page
         # names a destination; the stack and the sidebar are MainWindow's to move,
         # exactly as for the Dashboard's Edit → Controls hop.
@@ -451,6 +457,10 @@ class MainWindow(QWidget):
         # activation, whatever the reason — and a later success takes it down.
         self.dashboard_page.activation_failed.connect(self._show_activation_failure)
         self.dashboard_page.activation_succeeded.connect(self._clear_activation_failure)
+        # A remembered failure is re-shown on reconnect only while nothing has
+        # changed which profile the daemon runs: it may have landed after all
+        # (a timeout proves nothing) or another client ran one since.
+        self._state.active_profile_id_changed.connect(self._forget_activation_failure)
         # `WUI-c`: a delete the daemon refused is said here, as a failed Stop is.
         self.controls_page.delete_refused.connect(self.error_banner.show_warning)
         # DEC-207/DEC-216: the Cooling Hardware Readiness "set preferred sensor"
@@ -833,6 +843,7 @@ class MainWindow(QWidget):
         "Profile control stopped (demo). Choose a profile and press Apply to resume."
     )
     STOP_PROFILE_MESSAGE_MS = 10_000
+    DISCONNECTED_MESSAGE = "Daemon disconnected — retrying..."
 
     def _refresh_stop_profile_button(self, *_args) -> None:
         """Enable the sidebar's Stop only while a profile is active (DEC-462).
@@ -846,12 +857,16 @@ class MainWindow(QWidget):
         active = self._profile_service.active_profile
         name = active.name if active is not None else self._state.active_profile_name
         btn = self.sidebar.stop_profile_btn
-        btn.setEnabled(bool(name))
-        btn.setToolTip(
-            f"Stop profile control: the daemon stops running '{name}' and hands the fans back"
-            if name
-            else "No profile is running"
-        )
+        blocked = self._profile_service.control_blocked_reason
+        btn.setEnabled(bool(name) and not blocked)
+        if blocked:
+            btn.setToolTip(blocked)
+        else:
+            btn.setToolTip(
+                f"Stop profile control: the daemon stops running '{name}' and hands the fans back"
+                if name
+                else "No profile is running"
+            )
 
     def _on_sidebar_stop_profile(self) -> None:
         """Stop profile control without deleting anything (DEC-462, `DC-co`).
@@ -871,11 +886,28 @@ class MainWindow(QWidget):
         message = self.STOP_PROFILE_MESSAGE_DEMO if res.local_only else self.STOP_PROFILE_MESSAGE
         self.error_banner.show_info(message, self.STOP_PROFILE_MESSAGE_MS)
 
+    def _on_bundle_export_finished(self, ok: bool, message: str) -> None:
+        if ok:
+            # The banner has one slot, and an 8 s info in it would hide a
+            # disconnect or a refused Apply for good. The Logs feed has the
+            # success; the warning still up is the more urgent of the two.
+            if not self.error_banner.is_alerting():
+                self.error_banner.show_info(message, auto_dismiss_ms=8000)
+        else:
+            self.error_banner.show_warning(message)
+
     def _show_activation_failure(self, message: str) -> None:
         """Show a failed activation's reason (`CTRL-k`), remembering the text so
         a later success can take down exactly this banner and nothing else."""
         self._activation_failure_text = message
         self.error_banner.show_warning(message)
+
+    def _forget_activation_failure(self, *_args) -> None:
+        self._activation_failure_text = None
+
+    def _on_banner_user_dismissed(self, message: str) -> None:
+        if message == self._activation_failure_text:
+            self._activation_failure_text = None
 
     def _clear_activation_failure(self) -> None:
         """A later Apply succeeded: hide the failure banner if it is still up.
@@ -938,9 +970,19 @@ class MainWindow(QWidget):
         if self._demo_mode:
             return
         if state == ConnectionState.DISCONNECTED:
-            self.error_banner.show_warning("Daemon disconnected — retrying...")
+            self.error_banner.show_warning(self.DISCONNECTED_MESSAGE)
         elif state == ConnectionState.CONNECTED:
-            self.error_banner.show_info("Connected to daemon", auto_dismiss_ms=3000)
+            # The banner has one slot. A refused Apply's reason is persistent
+            # until a later Apply succeeds, but a blip's disconnect warning took
+            # its slot, and a 3 s "Connected" then left nothing saying why the
+            # profile is not running. It comes back instead.
+            if self._activation_failure_text is not None:
+                self.error_banner.show_warning(self._activation_failure_text)
+            elif self.error_banner.isHidden() or self.error_banner.is_showing(
+                self.DISCONNECTED_MESSAGE
+            ):
+                # Nor does "Connected" replace any other message still up.
+                self.error_banner.show_info("Connected to daemon", auto_dismiss_ms=3000)
 
     def _on_control_capability_gate(self, caps) -> None:
         """Safety gate (DEC-165): never pretend to control a pre-2.0 daemon.
@@ -959,32 +1001,55 @@ class MainWindow(QWidget):
         autonomous = bool(control and control.autonomous_control)
         if autonomous:
             if self._control_blocked:
-                self._control_blocked = False
+                self._set_control_blocked(None)
                 self._gate_banner.setVisible(False)
                 log.info("Daemon now reports autonomous_control — control gate cleared")
             return
-        if self._control_blocked:
-            return
-        self._control_blocked = True
         found = getattr(caps, "daemon_version", "") or "unknown"
         # DEC-257: `min_supported_gui` used to be quoted here, which had the
         # direction backwards — it is the floor the DAEMON places on the GUI, not
         # the daemon version this GUI requires. It only ever read correctly
         # because both numbers happened to be 2.0.0. The version this gate is
         # actually about is the one that introduced `autonomous_control`.
+        # G-18: re-written on every refresh while engaged, so a daemon replaced by
+        # another old one is named as the one now running.
         self._gate_banner.setText(
             f"⚠  Daemon upgrade required — this GUI needs ventulusd "
             f"≥ {AUTONOMOUS_CONTROL_DAEMON_VERSION} (found {found}). The GUI has "
-            f"stood down; the daemon's built-in engine is controlling your fans. "
-            f"Upgrade the daemon for full GUI control."
+            f"stood down: Apply, Stop and Manual are off, because this GUI cannot "
+            f"control fans through that daemon. Upgrade the daemon for GUI control."
         )
         self._gate_banner.setVisible(True)
+        newly_blocked = not self._control_blocked
+        self._set_control_blocked(
+            f"ventulusd {found} is too old for this GUI to control "
+            f"(needs ≥ {AUTONOMOUS_CONTROL_DAEMON_VERSION})"
+        )
+        if not newly_blocked:
+            return
         log.warning(
             "Control gate engaged — daemon %s lacks autonomous_control (needs >= %s); "
             "GUI refuses to control (it has no local loop)",
             found,
             AUTONOMOUS_CONTROL_DAEMON_VERSION,
         )
+
+    def _set_control_blocked(self, reason: str | None) -> None:
+        """Engage (``reason``) or clear (None) the DEC-165 stand-down.
+
+        ProfileService refuses activate/deactivate on its reason, which covers
+        every entry point; the buttons that only lead there are greyed with it.
+        Manual overrides are already gated on ``autonomous_control`` by the
+        Controls page itself.
+        """
+        self._control_blocked = reason is not None
+        self._profile_service.control_blocked_reason = reason
+        self.sidebar.apply_profile_btn.setEnabled(reason is None)
+        self.sidebar.apply_profile_btn.setToolTip(
+            "Run the selected profile on the daemon" if reason is None else reason
+        )
+        self._refresh_stop_profile_button()
+        self.dashboard_page.set_control_blocked(reason)
 
     def _apply_gui_version_floor(self, caps) -> None:
         """Warn when this GUI is older than the daemon says it supports (DEC-257).
@@ -1008,8 +1073,9 @@ class MainWindow(QWidget):
                 self._gui_floor_banner.setVisible(False)
                 log.info("GUI version now satisfies the daemon's floor")
             return
-        if not self._gui_floor_banner.isHidden():
-            return
+        # G-18: the text is re-written while shown, so a daemon that raised its
+        # floor is quoted with the floor it declares now. Logged once.
+        already_shown = not self._gui_floor_banner.isHidden()
         self._gui_floor_banner.setText(
             f"⚠  This GUI is older than the daemon supports — ventulus "
             f"{APP_VERSION} is below the daemon's declared minimum of {floor}. "
@@ -1017,6 +1083,8 @@ class MainWindow(QWidget):
             f"screens may not reflect everything this daemon can do. Upgrade the GUI."
         )
         self._gui_floor_banner.setVisible(True)
+        if already_shown:
+            return
         log.warning(
             "GUI %s is below the daemon's declared min_supported_gui %s", APP_VERSION, floor
         )
@@ -1119,6 +1187,12 @@ class MainWindow(QWidget):
         self._demo_controller.outputs_changed.connect(self.controls_page.update_control_outputs)
         self._demo_controller.start()
         self.controls_page.set_demo_controller(self._demo_controller)
+        # The controller runs the service's active profile, but demo status says
+        # nothing about one (no daemon), so bridge its name as Apply does — or the
+        # status banner and Dashboard say "No profile" while one runs.
+        demo_active = self._profile_service.active_profile
+        if demo_active is not None:
+            self._state.set_active_profile(demo_active.name)
 
         # Load initial demo data
         self._state.set_capabilities(self._demo_service.capabilities())

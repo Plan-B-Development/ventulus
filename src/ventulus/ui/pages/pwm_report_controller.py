@@ -180,10 +180,23 @@ class PwmReportController(QObject):
         self._dispatch(self._runner.request_cancel(self._clock(), reason))
         self._after_change()
 
+    def reapply_blocked_reason(self) -> str:
+        """Why re-applying is refused, or "" (DEC-165): a daemon without
+        ``control.autonomous_control`` is one the GUI has stood down from, as
+        the main window's control gate says. Unknown capabilities do not refuse,
+        as they do not engage that gate."""
+        caps = self._state.capabilities if self._state is not None else None
+        if caps is None:
+            return ""
+        control = getattr(caps, "control", None)
+        if control and control.autonomous_control:
+            return ""
+        return "Not re-applied: this daemon is too old for the GUI to control. Upgrade ventulusd."
+
     def reapply_profile(self, profile_id: str) -> bool:
         """``POST /profile/activate`` for *profile_id*. The window confirms first:
         activating clears every active manual override (DEC-189)."""
-        if not profile_id or not self._ensure_worker():
+        if not profile_id or self.reapply_blocked_reason() or not self._ensure_worker():
             return False
         self._reapply_seq += 1
         self._reapply_req = self._reapply_seq

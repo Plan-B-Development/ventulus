@@ -900,6 +900,7 @@ class CoolingDevicePage(QWizardPage):
             state.hwmon_headers,
             requested,
             confirm=self._confirm_clear,
+            capabilities=state.capabilities,
             publish_headers=state.set_hwmon_headers,
         )
         display = state.fan_display_name

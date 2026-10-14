@@ -194,14 +194,20 @@ class TestFooterActionContracts:
     retired Diagnostics page — Rescan to System State, Export to Logs."""
 
     def test_export_bundle_via_footer_writes_file(self, qtbot, window, tmp_path):
-        """Fire the footer Export signal → the Logs page's bundle handler runs."""
+        """Fire the footer Export signal → the Logs page's bundle handler runs.
+
+        The export finishes on a worker thread; its outcome signal ends it."""
         dest = tmp_path / "bundle.json"
 
-        with patch(
-            "ventulus.ui.pages.logs_page.QFileDialog.getSaveFileName",
-            return_value=(str(dest), "JSON files (*.json)"),
+        with (
+            patch(
+                "ventulus.ui.pages.logs_page.QFileDialog.getSaveFileName",
+                return_value=(str(dest), "JSON files (*.json)"),
+            ),
+            qtbot.waitSignal(window.logs_page.bundle_export_finished, timeout=20_000),
         ):
             window.footer.export_bundle_clicked.emit()
+        window.logs_page.cleanup()
 
         assert dest.exists()
         assert dest.stat().st_size > 0

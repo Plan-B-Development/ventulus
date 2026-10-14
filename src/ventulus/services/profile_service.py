@@ -2338,6 +2338,9 @@ class ProfileService(QObject):
         # DEC-403: the hardware the save rule checks against, attached by the
         # main window. None until then, and the rule has nothing to check.
         self._state: AppState | None = None
+        # DEC-165: why activate/deactivate refuse to reach the daemon, set by the
+        # main window's control gate while the daemon is pre-2.0; None otherwise.
+        self.control_blocked_reason: str | None = None
 
     def attach_state(self, state: AppState) -> None:
         """Give the save rule its view of the hardware (DEC-403, `TS-bb`).
@@ -2773,6 +2776,13 @@ class ProfileService(QObject):
         profile = self.get_profile(profile_id)
         if profile is None:
             return ProfileActivateOutcome(activated=False, error="Profile not found")
+        # DEC-165: against a daemon too old to be the fan writer the GUI stands
+        # down. Refused here, so no entry point that activates through the
+        # service (sidebar, Dashboard, Quick Actions) reaches the daemon. The two
+        # that call the client directly check it themselves: a Save's reapply
+        # (ControlsPage) and the PWM Test Report's Re-apply.
+        if client is not None and self.control_blocked_reason:
+            return ProfileActivateOutcome(activated=False, error=self.control_blocked_reason)
 
         # Save first so the daemon reads the latest version. A profile the save
         # rule refuses is refused here too, before the daemon is asked (DEC-403).
@@ -2824,6 +2834,8 @@ class ProfileService(QObject):
             self.set_active("")
             log.debug("No daemon client — profile control stopped locally only")
             return ProfileDeactivateOutcome(deactivated=True, local_only=True)
+        if self.control_blocked_reason:  # DEC-165, as in activate()
+            return ProfileDeactivateOutcome(deactivated=False, error=self.control_blocked_reason)
         try:
             result = client.deactivate_profile()
         except DaemonError as exc:

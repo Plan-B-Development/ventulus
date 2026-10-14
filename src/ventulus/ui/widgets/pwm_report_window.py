@@ -1289,6 +1289,11 @@ class PwmReportWindow(ModalDialog):
         profile_id = self.reapply_profile_id()
         if not profile_id:
             return
+        if blocked := self._controller.reapply_blocked_reason():
+            if self._reapply_msg is not None:
+                self._reapply_msg.setText(blocked)
+                self._reapply_msg.setVisible(True)
+            return
         answer = QMessageBox.question(
             self,
             "Re-apply profile",

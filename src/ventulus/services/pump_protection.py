@@ -143,6 +143,22 @@ def header_is_pump_protected(
         return False
     if header.role == "pump":
         return True
+    return header_infers_pump(header, capabilities)
+
+
+def header_infers_pump(header: HwmonHeader | None, capabilities: Capabilities | None) -> bool:
+    """Whether the daemon infers a pump from the header itself: its raw label or
+    a liquid-cooler channel 1 (the daemon's ``classify_header_role``).
+
+    That term of the union holds whatever role the user assigns or removes, so
+    removing a user's pump role from such a header lowers no protection. It is
+    one term only: a ``False`` here says nothing about the user's role or the
+    active profile's pump members (DEC-384), which only ``stop_permitted``
+    reports. Gated on ``control.header_roles`` like the rest of the
+    reconstruction — a daemon without a role model infers nothing.
+    """
+    if header is None or not daemon_protects_pumps(capabilities):
+        return False
     raw_label = header.label or ""
     if is_placeholder_hwmon_label(raw_label, header.pwm_index):
         raw_label = ""
