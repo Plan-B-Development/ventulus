@@ -732,6 +732,10 @@ class MainWindow(QWidget):
         profile_id = self.sidebar.profile_combo.currentData() or ""
         if profile_id and profile_id != self.controls_page.viewed_profile_id:
             self.controls_page.select_profile(profile_id)
+            # The page refuses to leave edits it cannot discard (no saved
+            # version); then the selector follows the page instead.
+            if self.controls_page.viewed_profile_id != profile_id:
+                self._reflect_sidebar_viewed_profile(self.controls_page.viewed_profile_id)
 
     def _on_sidebar_profile_selected(self, _index: int = -1) -> None:
         """Browse to the selected profile — view only, no daemon call (`CTRL-c`).
@@ -748,8 +752,10 @@ class MainWindow(QWidget):
         profile_id = self.sidebar.profile_combo.currentData()
         if not profile_id or profile_id == self.controls_page.viewed_profile_id:
             return
+        # Discard re-reads the profile from its store; a bare flag clear kept
+        # the edits in memory, and the next Apply saved and ran them.
         if self.controls_page.has_unsaved_changes() and not (
-            self.controls_page.confirm_discard_unsaved()
+            self.controls_page.confirm_discard_unsaved() and self.controls_page.discard_unsaved()
         ):
             self._reflect_sidebar_viewed_profile(self.controls_page.viewed_profile_id)
             return

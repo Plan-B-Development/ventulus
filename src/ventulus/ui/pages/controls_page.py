@@ -8,6 +8,8 @@ Profile bar at top for profile management.
 from __future__ import annotations
 
 import contextlib
+import copy
+import dataclasses
 import html
 import logging
 import time
@@ -45,6 +47,7 @@ from ventulus.services.controls_view import (
     build_sensor_choices,
     cooling_device_reservations,
     curve_min_output_floor,
+    default_curve_sensor_id,
     detected_hwmon_header_ids,
     divergent_gpu_output,
     member_rpm_map,
@@ -721,6 +724,9 @@ class ControlsPage(QWidget):
         # profiles are created/renamed/deleted elsewhere.
         self._profile_service.active_changed.connect(self._on_active_profile_changed)
         self._profile_service.profiles_changed.connect(self._on_profiles_changed)
+        # Any save of the profile on screen leaves nothing unsaved, including the
+        # save `activate` makes before it asks the daemon (sidebar or Dashboard).
+        self._profile_service.profile_saved.connect(self.note_saved)
 
         if self._state:
             self._state.sensors_updated.connect(self._on_sensor_values_updated)
@@ -899,8 +905,9 @@ class ControlsPage(QWidget):
         """View + edit ``profile_id`` on the page.
 
         The sidebar owns *activation* (DEC-214); this only changes which profile
-        the page renders. Clears the unsaved flag since a fresh profile is being
-        loaded.
+        the page renders. Moving to another profile discards the unsaved edits of
+        the one being left (callers ask first) and clears the chip; re-selecting
+        the profile on screen keeps them.
 
         `CTRL-b`/`CTRL-c`: this is now the ONLY thing that moves the page, and it
         is driven by the sidebar selector as well as by New/Duplicate. It was
@@ -916,9 +923,19 @@ class ControlsPage(QWidget):
         if profile_id and self._profile_service.get_profile(profile_id) is None:
             self._log.warning("Ignoring selection of unknown profile %s", profile_id)
             return
+        # Callers ask (`confirm_discard_unsaved`) and discard first; this is the
+        # backstop for one that did not, so edits never stay in memory unflagged.
+        # What was rendered, not what the page now resolves to: following the
+        # active profile resolves to a new id the moment an activation lands.
+        on_screen = self._loaded_profile_id or self.viewed_profile_id
+        moving = profile_id != on_screen
+        if moving and not self.discard_unsaved(on_screen or None):
+            self._log.warning("Not leaving profile with edits that could not be discarded")
+            return
         self._viewed_profile_id = profile_id or None
         self._refresh_all()
-        self._set_unsaved(False)
+        if moving:
+            self._set_unsaved(False)  # clears the last profile's status chip too
         self.viewed_profile_changed.emit(self.viewed_profile_id)
 
     @property
@@ -940,9 +957,12 @@ class ControlsPage(QWidget):
 
     def _on_active_profile_changed(self, profile_id: str) -> None:
         """Follow a sidebar/service activation: view the now-active profile and
-        rebuild (the rebuild releases live overrides — DEC-189). Clears unsaved
-        because the switch is authoritative (the sidebar apply flow prompts
-        first via ``has_unsaved_changes``).
+        rebuild (the rebuild releases live overrides — DEC-189).
+
+        An activation of another profile is authoritative, so unsaved edits on
+        the one being left are discarded, re-read from the store rather than
+        only un-flagged, which kept them in memory for the next Apply to run.
+        Following the profile already on screen keeps its edits.
 
         A deactivation (``""`` — the sidebar's Stop, the tray, another client)
         has no profile to follow (DEC-462): the page keeps the profile it was
@@ -958,9 +978,36 @@ class ControlsPage(QWidget):
             self._refresh_all()
             self.viewed_profile_changed.emit(self.viewed_profile_id)
             return
+        # The profile on screen until now. Not `_get_current_profile()`: with no
+        # explicit selection that resolves to the active profile, which is
+        # already the new one.
+        left_id = self._loaded_profile_id
+        if self._has_unsaved and left_id and left_id != profile_id:
+            # Leaving an edited profile for the one now running. Nothing can be
+            # asked (the activation came from the Dashboard, the tray or another
+            # client), so the edits go, and the chip says whose they were.
+            left = self._profile_service.get_profile(left_id)
+            if not self.discard_unsaved(left_id):
+                # No stored version to go back to: stay on the edits rather
+                # than hide them in memory, where the next Apply would run them.
+                self._viewed_profile_id = left_id
+                self._refresh_all()
+                self.viewed_profile_changed.emit(self.viewed_profile_id)
+                return
+            self._viewed_profile_id = None
+            self._refresh_all()
+            name = left.name if left is not None else left_id
+            self._set_status_chip(
+                f"Unsaved changes to “{name}” discarded — another profile was activated",
+                "InfoChip",
+            )
+            self.viewed_profile_changed.emit(self.viewed_profile_id)
+            return
+        # Following the profile on screen keeps its edits, and its chip: they are
+        # still unsaved unless whoever activated it saved them first (Apply
+        # does, and `profile_saved` has cleared the chip already).
         self._viewed_profile_id = None  # fall back to the active profile
         self._refresh_all()
-        self._set_unsaved(False)
         self.viewed_profile_changed.emit(self.viewed_profile_id)
 
     def _on_profiles_changed(self) -> None:
@@ -996,6 +1043,52 @@ class ControlsPage(QWidget):
         )
         return result == QMessageBox.StandardButton.Discard
 
+    def discard_unsaved(self, profile_id: str | None = None) -> bool:
+        """Throw away the unsaved edits: the "Discard" answer.
+
+        The page edits the service's in-memory :class:`Profile` in place, so
+        clearing the unsaved flag alone kept every discarded edit. Going back to
+        the profile showed them with no chip, and **Apply** saved and ran them,
+        because ``activate`` saves first. This re-reads the profile from its
+        store, as Revert does (DEC-233).
+
+        *profile_id* names the edited profile when the page no longer resolves
+        to it (an activation has already moved the active id); by default it is
+        the profile on screen. Returns ``False`` when there is no stored version
+        to go back to; the edits and the flag stay and the chip says why. The
+        caller re-renders.
+        """
+        if not self._has_unsaved:
+            return True
+        if profile_id is None:
+            profile_id = self.viewed_profile_id
+        # A profile deleted since has nothing left to discard.
+        held = bool(profile_id) and self._profile_service.get_profile(profile_id) is not None
+        if held and self._profile_service.reload_profile(profile_id) is None:
+            self._set_status_chip(
+                "Changes not discarded — no saved version to restore", "WarningChip"
+            )
+            return False
+        # The editor and the cards still hold objects from the discarded copy.
+        self._close_editor()
+        self._set_unsaved(False)
+        return True
+
+    def note_saved(self, profile_id: str) -> None:
+        """*profile_id* was saved (``ProfileService.profile_saved``). If that is
+        the profile on screen, its edits are in the store now, so they are no
+        longer unsaved, even when the activation that saved them then failed."""
+        if self._has_unsaved and profile_id and profile_id == self.viewed_profile_id:
+            self._set_unsaved(False)
+
+    def _confirm_leaving_edits(self) -> bool:
+        """Ask before an action that moves the page off an edited profile.
+
+        True when there are no edits or the user chose Discard; the discard
+        itself is left to the caller, after its own dialogs, so cancelling those
+        loses nothing."""
+        return not self._has_unsaved or self.confirm_discard_unsaved()
+
     def new_profile(self) -> None:
         """Create a profile, prompting for its name (`CTRL-c`).
 
@@ -1026,6 +1119,10 @@ class ControlsPage(QWidget):
             menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _on_new_profile(self, name: str | None = None) -> None:
+        # The page moves to the new profile, so an edited one is left behind:
+        # ask as a profile switch does, but discard only once the name is given.
+        if not self._confirm_leaving_edits():
+            return
         if name is None:
             name, ok = QInputDialog.getText(
                 self, "New Profile", "Profile name:", text="New Profile"
@@ -1033,43 +1130,78 @@ class ControlsPage(QWidget):
             if not ok or not name.strip():
                 return
             name = name.strip()
+        if not self.discard_unsaved():
+            return
         new_profile = self._profile_service.create_profile(name)
         # View the new draft so it can be edited without activating it (DEC-214).
         self.select_profile(new_profile.id)
 
+    def confirm_rename_saves(self) -> bool:
+        """Ask before a rename saves edits the user has not saved yet.
+
+        Isolated behind a method (like :meth:`confirm_discard_unsaved`) so tests
+        can drive the decision without spinning a real modal.
+        """
+        result = QMessageBox.question(
+            self,
+            "Rename and save?",
+            "Renaming saves the profile, including your unsaved changes. Rename and save it now?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return result == QMessageBox.StandardButton.Save
+
     def _on_rename_profile(self) -> None:
+        """Rename the viewed profile. A rename is a save of the whole profile.
+
+        The store holds whole documents, so the new name cannot be written
+        without the edits beside it. It used to save them anyway, silently, and
+        leave the "Unsaved changes" chip up, so Revert then had nothing to undo
+        and an active profile kept running its old curves. It now asks first and
+        goes through the Save path: chip, reapply (DEC-188), refusals.
+        """
         profile = self._get_current_profile()
         if not profile:
             return
         name, ok = QInputDialog.getText(self, "Rename Profile", "New name:", text=profile.name)
-        if ok and name.strip() and name.strip() != profile.name:
-            old_name = profile.name
-            profile.name = name.strip()
-            try:
-                self._profile_service.save_profile(profile)
-            except SharedSwitchRuleError:
-                # DEC-403: nothing was written, so neither is the new name.
-                profile.name = old_name
-                self._show_shared_switch_refusal("Not renamed")
-                return
-            self._refresh_all()
-            # A rename is a save: one the daemon refuses, or cannot hear, keeps the
-            # new name only locally, and used to say nothing at all (FFA-d).
-            self._report_unpublished(profile, "Renamed locally")
+        if not ok or not name.strip() or name.strip() == profile.name:
+            return
+        if self._has_unsaved and not self.confirm_rename_saves():
+            return
+        old_name = profile.name
+        profile.name = name.strip()
+        if not self._save_and_report(
+            profile, refused="Not renamed", saved_locally="Renamed locally", done="Renamed"
+        ):
+            # DEC-403: nothing was written, so neither is the new name.
+            profile.name = old_name
 
     def _on_duplicate_profile(self) -> None:
-        profile = self._get_current_profile()
-        if not profile:
+        """Copy the viewed profile's saved version and view the copy.
+
+        The page moves to the copy, so unsaved edits are asked about and
+        discarded first, as on a profile switch: what is copied is what is
+        stored, and the source is not left holding edits off-screen.
+        """
+        if self._get_current_profile() is None:
+            return
+        if not self._confirm_leaving_edits() or not self.discard_unsaved():
+            return
+        profile = self._get_current_profile()  # the reloaded copy, after a discard
+        if profile is None:
             return
         try:
             new_profile = self._profile_service.duplicate_profile(
                 profile.id, f"{profile.name} (copy)"
             )
         except SharedSwitchRuleError:
+            self._refresh_all()  # a discard above replaced the objects on screen
             self._show_shared_switch_refusal("Not duplicated")  # DEC-403
             return
         if new_profile:
             self.select_profile(new_profile.id)
+        else:
+            self._refresh_all()
 
     def _on_delete_profile(self) -> None:
         current = self._get_current_profile()
@@ -1122,6 +1254,9 @@ class ControlsPage(QWidget):
                 return
             if was_active_locally and self._state is not None:
                 self._state.set_active_profile("")
+            # Its unsaved edits went with it; the flag must not follow the page
+            # onto a profile that has none.
+            self._set_unsaved(False)
             # After deletion, view something that still exists.
             #
             # NOT an unconditional `_viewed_profile_id = None`. That used to mean
@@ -1148,18 +1283,34 @@ class ControlsPage(QWidget):
         profile = self._get_current_profile()
         if not profile:
             return
+        self._save_and_report(
+            profile, refused="Not saved", saved_locally="Saved locally", done="Settings saved"
+        )
+
+    def _save_and_report(
+        self, profile: Profile, *, refused: str, saved_locally: str, done: str
+    ) -> bool:
+        """Save *profile*, reapply it when it is the active one, and say how it went.
+
+        The one path for Save and Rename. Returns ``False`` only when DEC-403's
+        rule refused the save, so nothing was written; every other outcome
+        (published, kept locally, refused by the daemon) clears the unsaved flag
+        and names itself on the chip. The three strings word the chip for the
+        caller: *refused* for the rule, *saved_locally* for a draft the daemon did
+        not take, *done* for success.
+        """
         try:
             self._profile_service.save_profile(profile)
         except SharedSwitchRuleError:
             # DEC-403: refused before anything was written; the edits stay
             # unsaved and the banner names the fans to add or remove.
-            self._show_shared_switch_refusal("Not saved")
-            return
+            self._show_shared_switch_refusal(refused)
+            return False
         self._set_unsaved(False)
-        if self._report_unpublished(profile, "Saved locally"):
+        if self._report_unpublished(profile, saved_locally):
             # Written to the local cache but the daemon did not accept it — an
             # unpublished draft (6b); the chip now says which way (FFA-d).
-            return
+            return True
         warnings = self._profile_service.save_warnings(profile.id)
         if (
             self._client is not None
@@ -1179,7 +1330,7 @@ class ControlsPage(QWidget):
             else:
                 text, css_class = "Saved — reapply failed (see log)", "WarningChip"
         else:
-            text, css_class = "Settings saved", "SuccessChip"
+            text, css_class = done, "SuccessChip"
         if warnings:
             # Accepted, but the daemon flagged something — e.g. a sensor this
             # machine does not have, whose curve it will skip (FFA-d).
@@ -1187,6 +1338,7 @@ class ControlsPage(QWidget):
             text = f"{text} — {count} warning{'s' if count != 1 else ''} from the daemon"
             css_class = "WarningChip"
         self._set_status_chip(text, css_class, detail=warnings)
+        return True
 
     def _set_status_chip(self, text: str, css_class: str, *, detail: Sequence[str] = ()) -> None:
         """Set the toolbar status chip. Every writer goes through here, so a
@@ -1846,31 +1998,45 @@ class ControlsPage(QWidget):
             display_name=self._state.member_display_name,
         )
         dlg.set_edit_members_callback(self._on_edit_members)
-        if dlg.exec():
-            result = dlg.get_result()
-            # DEC-214: "Delete Role" routes to the existing card-delete path.
-            if result.get("delete"):
-                self._on_delete_control(control_id)
-                return
-            control.name = result["name"]
-            if result["mode"] != control.mode or result["curve_id"] != control.curve_id:
-                # The user chose a mode or a curve. The daemon validates and orders
-                # only a control whose mode is exactly "curve" (a Sync target's
-                # dependency, a curve reference), so a kept unknown mode must not
-                # ride along onto a curve the user picked.
-                control.unknown_mode = None
-            control.mode = result["mode"]
-            control.curve_id = result["curve_id"]
-            control.manual_output_pct = result.get("manual_output_pct", control.manual_output_pct)
-            # Persist per-GPU-member zero-RPM toggles back onto the members.
-            zero_rpm_map = result.get("gpu_fan_zero_rpm", {}) or {}
-            for member in control.members:
-                if member.source == "amd_gpu" and member.member_id in zero_rpm_map:
-                    member.fan_zero_rpm = bool(zero_rpm_map[member.member_id])
-            card = self._control_cards.get(control_id)
-            if card:
-                card.update_control(control, profile.curves)
-            self._set_unsaved(True)
+        # "Edit Members…" commits to the control while this dialog is still open
+        # (it is where the role floor is reapplied), so Discard has to undo it.
+        before = copy.deepcopy(control)
+        was_unsaved = self._has_unsaved
+        if not dlg.exec():
+            if control != before:
+                for f in dataclasses.fields(control):
+                    setattr(control, f.name, getattr(before, f.name))
+                card = self._control_cards.get(control_id)
+                if card:
+                    card.update_control(control, profile.curves)
+            # Accepting the member editor marks unsaved even with nothing changed.
+            if self._has_unsaved != was_unsaved:
+                self._set_unsaved(was_unsaved)
+            return
+        result = dlg.get_result()
+        # DEC-214: "Delete Role" routes to the existing card-delete path.
+        if result.get("delete"):
+            self._on_delete_control(control_id)
+            return
+        control.name = result["name"]
+        if result["mode"] != control.mode or result["curve_id"] != control.curve_id:
+            # The user chose a mode or a curve. The daemon validates and orders
+            # only a control whose mode is exactly "curve" (a Sync target's
+            # dependency, a curve reference), so a kept unknown mode must not
+            # ride along onto a curve the user picked.
+            control.unknown_mode = None
+        control.mode = result["mode"]
+        control.curve_id = result["curve_id"]
+        control.manual_output_pct = result.get("manual_output_pct", control.manual_output_pct)
+        # Persist per-GPU-member zero-RPM toggles back onto the members.
+        zero_rpm_map = result.get("gpu_fan_zero_rpm", {}) or {}
+        for member in control.members:
+            if member.source == "amd_gpu" and member.member_id in zero_rpm_map:
+                member.fan_zero_rpm = bool(zero_rpm_map[member.member_id])
+        card = self._control_cards.get(control_id)
+        if card:
+            card.update_control(control, profile.curves)
+        self._set_unsaved(True)
 
     def _on_delete_control(self, control_id: str) -> None:
         profile = self._get_current_profile()
@@ -2090,6 +2256,11 @@ class ControlsPage(QWidget):
         if curve_type in (CurveType.GRAPH, CurveType.STEPPED):
             points = [CurvePoint(p.temp_c, p.output_pct) for p in PRESETS["Linear"]]
         curve = CurveConfig(name=f"New {curve_type.value.title()}", type=curve_type, points=points)
+        if curve.reads_sensor and self._state is not None:
+            # Bound now, where the card shows it. It used to be bound later, by
+            # the editor re-reading its combo each second, and only if opened; a
+            # curve saved unopened read no sensor, and the daemon skipped it.
+            curve.sensor_id = default_curve_sensor_id(self._state.sensors)
         if curve_type == CurveType.SYNC:
             # Start on the first fan role it may mirror, never on none (GSA-a); the
             # menu offers Sync only when there is one.
@@ -2181,9 +2352,17 @@ class ControlsPage(QWidget):
 
             # Build sensor items from current state
             sensor_items = []
+            unoffered: dict[str, str] = {}
             if self._state:
+                peer_ids = [p.id for p in self._state.sensors]
                 for s in self._state.sensors:
-                    sensor_items.append((s.id, self._sensor_combo_label(s)))
+                    # DEC-193, as the point editor's picker: an ineligible sensor
+                    # is never offered. A curve already bound to one keeps it —
+                    # the dialog lists it as its own row.
+                    if s.control_eligible:
+                        sensor_items.append((s.id, self._sensor_combo_label(s)))
+                    else:
+                        unoffered[s.id] = sensor_display_name(s.id, s.label, peers=peer_ids)
             # Composite curves offer only cycle-free choices (DEC-150/151).
             mix_candidates = (
                 mix_candidate_curves(profile, curve.id) if curve.type == CurveType.MIX else None
@@ -2194,6 +2373,7 @@ class ControlsPage(QWidget):
             dlg = CurveEditDialog(
                 curve,
                 sensor_items,
+                unoffered_sensors=unoffered,
                 mix_candidates=mix_candidates,
                 sync_candidates=sync_candidates,
                 # DEC-312: the same strictest-role floor the embedded point editor
@@ -2836,6 +3016,10 @@ class ControlsPage(QWidget):
         # Also drop intent for controls whose take is still in flight, so their
         # grant is orphan-released by _on_take_result instead of being kept.
         self._manual_intent.clear()
+        # Demo pins live in the simulation, not in `_overrides`: a rebuilt card
+        # shows no Manual, so the pin must not outlive it (DEC-189).
+        if self._client is None and self._demo_controller is not None:
+            self._demo_controller.clear_all_manual()
 
     def _renew_overrides(self) -> None:
         """Dispatch a renew for every held override off-thread (DEC-220). A
@@ -3183,17 +3367,22 @@ class ControlsPage(QWidget):
             self._prev_sensor_ids = current_ids
             seen = set()
             items = []
+            unoffered: dict[str, str] = {}
+            peer_ids = [p.id for p in sensors]
             for s in sensors:
                 # DEC-193: never offer a control-ineligible sensor (e.g. an
                 # ath12k WiFi temp) as a curve source — it would strand the curve
                 # the moment the radio goes down. Existing curves already bound to
                 # one keep working and still show their live value below.
                 if not s.control_eligible:
+                    unoffered[s.id] = sensor_display_name(s.id, s.label, peers=peer_ids)
                     continue
                 if s.id not in seen:
                     items.append((s.id, self._sensor_combo_label(s)))
                     seen.add(s.id)
-            self._curve_editor.set_available_sensors(items)
+            self._curve_editor.set_available_sensors(items, unoffered)
+        # A curve re-keyed elsewhere (DEC-492) is shown by its new id.
+        self._curve_editor.refresh_sensor_selection()
 
         # Update the live current-temp marker — but only while the page is
         # visible (DEC-214): the marker recreates pyqtgraph items each tick, so
@@ -3208,8 +3397,10 @@ class ControlsPage(QWidget):
                         break
                 else:
                     self._curve_editor.set_current_sensor_value(None)
-            elif sensors:
-                self._curve_editor.set_current_sensor_value(sensors[0].value_c)
+            else:
+                # A curve that reads no sensor has no reading to mark; the first
+                # sensor's would show an output the curve is not producing.
+                self._curve_editor.set_current_sensor_value(None)
 
         # Update curve card sensor value labels (cheap — dict lookup per card)
         peers = [s.id for s in sensors]

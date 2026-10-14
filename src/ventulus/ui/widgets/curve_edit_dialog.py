@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ventulus.services.controls_view import unlisted_sensor_choice
 from ventulus.services.profile_service import MIX_FUNCTIONS, CurveConfig, CurveType
 from ventulus.ui.components.a11y import name_value_control
 from ventulus.ui.components.hysteresis_row import HysteresisRow
@@ -30,6 +31,7 @@ class CurveEditDialog(QDialog):
         curve: CurveConfig,
         sensor_items: list[tuple[str, str]] | None = None,
         *,
+        unoffered_sensors: dict[str, str] | None = None,
         mix_candidates: list[tuple[str, str]] | None = None,
         sync_candidates: list[tuple[str, str]] | None = None,
         min_output: float = 0.0,
@@ -67,13 +69,20 @@ class CurveEditDialog(QDialog):
             self._sensor_combo = QComboBox()
             self._sensor_combo.setObjectName("CurveEditDialog_Combo_sensor")
             name_value_control(self._sensor_combo, sensor_label)
-            if sensor_items:
-                for sid, label in sensor_items:
-                    self._sensor_combo.addItem(label, sid)
-                if curve.sensor_id:
-                    idx = self._sensor_combo.findData(curve.sensor_id)
-                    if idx >= 0:
-                        self._sensor_combo.setCurrentIndex(idx)
+            for sid, label in sensor_items or []:
+                self._sensor_combo.addItem(label, sid)
+            if curve.sensor_id:
+                idx = self._sensor_combo.findData(curve.sensor_id)
+                if idx < 0:
+                    # Not listed (gone, or not eligible as a source — DEC-193):
+                    # a row of its own, or Save would re-bind the curve to
+                    # whichever sensor the combo fell back to.
+                    live_name = (unoffered_sensors or {}).get(curve.sensor_id)
+                    self._sensor_combo.insertItem(
+                        0, unlisted_sensor_choice(curve.sensor_id, live_name), curve.sensor_id
+                    )
+                    idx = 0
+                self._sensor_combo.setCurrentIndex(idx)
             sensor_row.addWidget(self._sensor_combo, 1)
             layout.addLayout(sensor_row)
 
@@ -312,8 +321,20 @@ class CurveEditDialog(QDialog):
         return row.value()
 
     def accept(self) -> None:
-        """Validate trigger thresholds before closing (idle must be below load,
-        else the latch would oscillate every cycle)."""
+        """Validate before closing: a Trigger's idle must be below its load, else
+        the latch would oscillate every cycle, and a Sync curve must mirror a
+        control, or the daemon refuses the whole profile (GSA-a)."""
+        if (
+            self._curve.type == CurveType.SYNC
+            and hasattr(self, "_sync_control_combo")
+            and not self._sync_control_combo.currentData()
+        ):
+            QMessageBox.warning(
+                self,
+                "Invalid Sync Curve",
+                "Choose the fan role this curve mirrors.",
+            )
+            return
         if self._curve.type == CurveType.TRIGGER and hasattr(self, "_param_spins"):
             idle = self._param_spins["trigger_idle_temp_c"].value()
             load = self._param_spins["trigger_load_temp_c"].value()

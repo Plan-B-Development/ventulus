@@ -7,6 +7,7 @@ live sensor reading marker, and a synced numeric table.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Mapping
 
 import numpy as np
 import pyqtgraph as pg
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ventulus.services.controls_view import unlisted_sensor_choice
 from ventulus.services.profile_service import CurveConfig, CurvePoint, CurveType
 from ventulus.ui.components.a11y import name_value_control
 from ventulus.ui.components.hysteresis_row import HysteresisRow
@@ -39,6 +41,8 @@ MAX_OUTPUT = 100.0
 MIN_TEMP_SPACING = 0.5  # minimum °C between adjacent points
 MIN_POINTS = 2
 MAX_UNDO = 50
+#: Marks the sensor-combo row standing in for a sensor the combo does not list.
+_UNLISTED_SENSOR_ROLE = Qt.ItemDataRole.UserRole + 1
 
 # Preset curves
 PRESETS: dict[str, list[CurvePoint]] = {
@@ -113,6 +117,7 @@ class CurveEditor(QWidget):
         self._sensor_combo.currentIndexChanged.connect(self._on_sensor_selected)
         top_row.addWidget(self._sensor_combo, 1)
         self._last_sensor_ids: list[str] = []  # track to avoid redundant repopulation
+        self._unoffered_names: dict[str, str] = {}  # reported, not offered (DEC-193)
 
         # Live sensor readout
         self._sensor_value_label = QLabel("")
@@ -478,10 +483,7 @@ class CurveEditor(QWidget):
         # Restore sensor combo from this curve's own saved state
         self._last_sensor_ids = []  # force set_available_sensors to repopulate
         with block_signals(self._sensor_combo):
-            if curve.sensor_id:
-                idx = self._sensor_combo.findData(curve.sensor_id)
-                if idx >= 0:
-                    self._sensor_combo.setCurrentIndex(idx)
+            self._show_curve_sensor()
 
     def set_hysteresis_supported(self, supported: bool, *, demo: bool = False) -> None:
         """Show the slow-down band row only when the daemon applies it (DEC-489)."""
@@ -500,26 +502,79 @@ class CurveEditor(QWidget):
         self.curve_changed.emit()
 
     def get_curve(self) -> CurveConfig | None:
-        if self._curve is None:
-            return None
-        self._curve.sensor_id = self._sensor_combo.currentData() or ""
+        """The curve on the workbench. A read: it changes nothing.
+
+        It used to copy the combo's row into ``sensor_id`` on every call, and the
+        page calls it each second. A curve whose sensor the combo did not list was
+        re-bound to whatever row was current, with no unsaved mark, and the next
+        save kept it. Only :meth:`_on_sensor_selected`, the user's pick, writes
+        the sensor now.
+        """
         return self._curve
 
-    def set_available_sensors(self, sensor_ids: list[tuple[str, str]]) -> None:
-        """Update sensor choices without clobbering user selection."""
+    def set_available_sensors(
+        self,
+        sensor_ids: list[tuple[str, str]],
+        unoffered: Mapping[str, str] | None = None,
+    ) -> None:
+        """Update sensor choices without clobbering user selection.
+
+        *unoffered* names the sensors the daemon reports but the list leaves
+        out (not eligible to drive a curve, DEC-193), so a curve bound to one
+        is not described as unavailable while its reading shows beside it.
+        """
         new_ids = [sid for sid, _ in sensor_ids]
-        if new_ids == self._last_sensor_ids:
+        unoffered = dict(unoffered or {})
+        if new_ids == self._last_sensor_ids and unoffered == self._unoffered_names:
             return  # no change, skip repopulation
         self._last_sensor_ids = new_ids
+        self._unoffered_names = unoffered
 
         with block_signals(self._sensor_combo):
             self._sensor_combo.clear()
             for sid, label in sensor_ids:
                 self._sensor_combo.addItem(label, sid)
-            if self._curve and self._curve.sensor_id:
-                idx = self._sensor_combo.findData(self._curve.sensor_id)
-                if idx >= 0:
-                    self._sensor_combo.setCurrentIndex(idx)
+            self._show_curve_sensor()
+
+    def refresh_sensor_selection(self) -> None:
+        """Show the curve's sensor again if something else changed it.
+
+        The DEC-492 memory-id re-key rewrites an open curve's ``sensor_id`` from
+        outside the editor; the combo would otherwise keep showing the old id.
+        A no-op while the combo already agrees.
+        """
+        if self._curve is None or self._sensor_combo.currentData() == self._curve.sensor_id:
+            return
+        with block_signals(self._sensor_combo):
+            self._show_curve_sensor()
+
+    def _show_curve_sensor(self) -> None:
+        """Select the curve's own sensor in the combo. Callers block its signals.
+
+        The combo lists only the control-eligible sensors the daemon reports
+        (DEC-193). When the curve reads one it does not list, or none, the combo
+        gets a row of its own for that, rather than staying on another sensor:
+        the editor never shows a sensor the curve does not read.
+        """
+        combo = self._sensor_combo
+        for i in reversed(range(combo.count())):
+            if combo.itemData(i, _UNLISTED_SENSOR_ROLE):
+                combo.removeItem(i)
+        if self._curve is None:
+            return
+        sensor_id = self._curve.sensor_id
+        idx = combo.findData(sensor_id) if sensor_id else -1
+        if idx < 0:
+            text = unlisted_sensor_choice(sensor_id, self._unoffered_names.get(sensor_id))
+            combo.insertItem(0, text, sensor_id)
+            combo.setItemData(0, True, _UNLISTED_SENSOR_ROLE)
+            if not sensor_id:
+                # "— Select a sensor —" is a state, not a choice: picking it
+                # again would unbind the curve, which the daemon then skips.
+                item = combo.model().item(0)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            idx = 0
+        combo.setCurrentIndex(idx)
 
     def set_current_sensor_value(self, value_c: float | None) -> None:
         """Update the live sensor reading marker on the graph and readout label."""

@@ -2300,6 +2300,9 @@ class ProfileService(QObject):
     # delete). Both keep cross-page views (e.g. the dashboard combo) in sync.
     active_changed = Signal(str)  # active profile id
     profiles_changed = Signal()  # the profile list changed (CRUD)
+    # A profile was written (local store, and published when the daemon took it),
+    # by whichever caller: Save, Rename, or `activate`, which saves first.
+    profile_saved = Signal(str)  # profile id
 
     def __init__(self, client: DaemonClient | None = None, *, persist: bool = True) -> None:
         super().__init__()
@@ -2686,6 +2689,9 @@ class ProfileService(QObject):
                     e.code,
                     e.message,
                 )
+        # The in-memory profile now matches the store, whatever the daemon said:
+        # an editor holding it has nothing unsaved left.
+        self.profile_saved.emit(profile.id)
         # A save can create, rename, or otherwise mutate the profile list —
         # notify observers once, after the write. create/duplicate reach this via
         # their save_profile call, so they need no separate emit (non-recursive).

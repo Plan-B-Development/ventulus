@@ -10,6 +10,7 @@ never fabricated.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt
@@ -194,6 +195,9 @@ class MemberEditorDialog(ModalDialog):
                     "id": m.member_id,
                     "source": m.source,
                     "label": m.member_label,
+                    # Kept whole, so a member that stays comes back unchanged:
+                    # its GPU zero-RPM flag and unmodelled keys included.
+                    "member": m,
                 },
             )
             self._selected_list.addItem(item)
@@ -262,6 +266,12 @@ class MemberEditorDialog(ModalDialog):
         for i in range(self._selected_list.count()):
             item = self._selected_list.item(i)
             data = item.data(Qt.ItemDataRole.UserRole)
+            kept = data.get("member")
+            if isinstance(kept, ControlMember):
+                # Rebuilding it from the row would reset `fan_zero_rpm` and drop
+                # `extra_fields` for a member the user did not touch.
+                members.append(copy.deepcopy(kept))
+                continue
             members.append(
                 ControlMember(
                     source=data["source"],

@@ -154,9 +154,10 @@ class FanRoleDialog(ModalDialog):
 
         # Role Members header + "Edit Members…"
         members_header = QHBoxLayout()
-        members_title = QLabel(f"Role Members ({len(control.members)})")
-        members_title.setProperty("class", "PageSubtitle")
-        members_header.addWidget(members_title, 1)
+        self._members_title = QLabel(f"Role Members ({len(control.members)})")
+        self._members_title.setObjectName("FanRoleDialog_Label_membersTitle")
+        self._members_title.setProperty("class", "PageSubtitle")
+        members_header.addWidget(self._members_title, 1)
         edit_members_btn = QPushButton("Edit Members…")
         edit_members_btn.setObjectName("FanRoleDialog_Btn_editMembers")
         edit_members_btn.setToolTip("Open member assignment dialog")
@@ -167,7 +168,8 @@ class FanRoleDialog(ModalDialog):
         # Member grid (2 columns of name chips). RPM is not passed to this dialog,
         # so — per "do not invent" — only member names are shown here; the member
         # editor (which is given live readings) is where RPM appears.
-        layout.addWidget(self._build_member_grid(control.members))
+        self._member_grid = self._build_member_grid(control.members)
+        layout.addWidget(self._member_grid)
 
         # Per-GPU-member zero-RPM toggle (v4). Only renders when the role has
         # at least one ``amd_gpu`` member; the daemon ignores the flag for
@@ -201,6 +203,40 @@ class FanRoleDialog(ModalDialog):
     def _on_edit_members(self) -> None:
         if self._edit_members_callback:
             self._edit_members_callback(self._control.id)
+            # The callback edits the control in place; show what it now holds.
+            self._refresh_members()
+
+    def _refresh_members(self) -> None:
+        """Rebuild the member grid and the GPU zero-RPM toggles from the control.
+
+        A toggle the user already changed in this dialog keeps its state for a
+        member that is still there; a new GPU member starts from its own flag.
+        """
+        members = self._control.members
+        self._members_title.setText(f"Role Members ({len(members)})")
+        layout = self.body_layout()
+        grid = self._build_member_grid(members)
+        layout.replaceWidget(self._member_grid, grid)
+        self._member_grid.hide()
+        self._member_grid.deleteLater()
+        self._member_grid = grid
+
+        chosen = self._collect_gpu_zero_rpm()
+        self._gpu_zero_rpm_checks = {}
+        section = self._build_gpu_zero_rpm_section(members)
+        for member_id, check in self._gpu_zero_rpm_checks.items():
+            if member_id in chosen:
+                check.setChecked(chosen[member_id])
+        if self._gpu_section is not None:
+            if section is not None:
+                layout.replaceWidget(self._gpu_section, section)
+            else:
+                layout.removeWidget(self._gpu_section)
+            self._gpu_section.hide()
+            self._gpu_section.deleteLater()
+        elif section is not None:
+            layout.insertWidget(layout.indexOf(grid) + 1, section)
+        self._gpu_section = section
 
     def _on_delete(self) -> None:
         """Delete Role: record the intent and accept so the page's ``_on_edit_role``

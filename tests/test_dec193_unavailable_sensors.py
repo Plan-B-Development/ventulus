@@ -28,8 +28,17 @@ def _sensor(sid: str, *, control_eligible: bool = True, **kw) -> SensorReading:
 
 
 def _picker_ids(page: ControlsPage) -> list[str]:
+    """The sensors the picker offers. Leaves out the row standing for the open
+    curve's own sensor when the list does not include it: that row only keeps
+    the curve's binding, it offers nothing new."""
+    from ventulus.ui.widgets.curve_editor import _UNLISTED_SENSOR_ROLE
+
     combo = page._curve_editor._sensor_combo
-    return [combo.itemData(i) for i in range(combo.count())]
+    return [
+        combo.itemData(i)
+        for i in range(combo.count())
+        if not combo.itemData(i, _UNLISTED_SENSOR_ROLE)
+    ]
 
 
 def test_ineligible_sensor_excluded_from_curve_picker(qtbot, app_state, profile_service):
@@ -97,5 +106,9 @@ def test_ineligible_bound_curve_still_shows_live_value(qtbot, app_state, profile
 
     # Not offered in the picker…
     assert "hwmon:ath12k_hwmon:phy0:temp1" not in _picker_ids(page)
-    # …but its live value was still resolved for the bound curve.
+    # …yet the picker still shows the curve's own binding, not another sensor,
+    # and does not call a sensor with a live reading unavailable…
+    assert page._curve_editor._sensor_combo.currentData() == "hwmon:ath12k_hwmon:phy0:temp1"
+    assert "not offered" in page._curve_editor._sensor_combo.currentText()
+    # …and its live value was still resolved for the bound curve.
     assert page._curve_editor._current_sensor_value == 49.0

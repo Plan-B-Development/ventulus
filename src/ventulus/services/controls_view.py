@@ -418,6 +418,39 @@ _SENSOR_KIND_WORDS: dict[str, str] = {
 }
 
 
+#: The sensor-picker row for a curve that reads no sensor yet.
+NO_SENSOR_CHOICE = "— Select a sensor —"
+
+
+def unlisted_sensor_choice(sensor_id: str, live_name: str | None = None) -> str:
+    """The sensor-picker row for a curve's own sensor when the picker does not
+    list it.
+
+    *live_name* is the sensor's name when the daemon reports it but the picker
+    does not offer it, because it is not eligible to drive a curve (DEC-193); it
+    still has a reading. Without one the sensor is not reported now.
+
+    The curve keeps reading it. A picker that fell back to another row instead
+    showed a sensor the curve does not read, and saving from it re-bound the
+    curve to that sensor.
+    """
+    if not sensor_id:
+        return NO_SENSOR_CHOICE
+    if live_name:
+        return f"{live_name} (not offered as a curve source)"
+    label = sensor_id.split(":")[-1] if ":" in sensor_id else sensor_id
+    return f"{sensor_display_name(sensor_id, label, peers=(sensor_id,))} (unavailable)"
+
+
+def default_curve_sensor_id(sensors) -> str:
+    """The sensor a new curve starts on: the first one the editor's picker offers.
+
+    That is the first control-eligible sensor (DEC-193) in poll order, the row the
+    picker shows first. ``""`` when there is none, as offline.
+    """
+    return next((s.id for s in sensors if s.control_eligible), "")
+
+
 def sensor_combo_label(s, overrides: dict, *, peers: Iterable[str]) -> str:
     """Curve-editor sensor-combo label, starring coolant + CPU sensors (★) — the
     recommended bindings for AIO/radiator curves (DEC-157). Selection stays free;

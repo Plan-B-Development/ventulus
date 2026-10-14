@@ -68,6 +68,14 @@ class DemoController(QObject):
         self._manual.pop(control_id, None)
         self.tick()
 
+    def clear_all_manual(self) -> None:
+        """Release every pin, as the daemon drops every override when the
+        Controls page rebuilds its cards (DEC-189)."""
+        if not self._manual:
+            return
+        self._manual.clear()
+        self.tick()
+
     def tick(self) -> None:
         profile = self._profile_service.active_profile
         if profile is None:

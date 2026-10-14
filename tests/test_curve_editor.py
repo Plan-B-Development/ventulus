@@ -349,8 +349,9 @@ class TestSensorSelection:
                 ("sensor_b", "GPU Temp"),
             ]
         )
-        # Select second sensor
-        editor._sensor_combo.setCurrentIndex(1)
+        # Select the GPU sensor. By data, not by row: the curve's own sensor is
+        # not listed, so the combo carries a row for it ahead of the list.
+        editor._sensor_combo.setCurrentIndex(editor._sensor_combo.findData("sensor_b"))
         assert curve_5pt.sensor_id == "sensor_b"
 
     def test_sensor_selection_survives_refresh(self, editor, curve_5pt):
