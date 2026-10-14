@@ -143,7 +143,7 @@ Machine-specific state is deliberately **excluded** so the file is safe to share
 2. A timestamped **backup** of your current settings file is created automatically
 3. Imported preferences are **merged** onto your current settings: your local machine-specific state (window size, data-directory overrides) is preserved, and directory overrides are applied immediately. Fan names and hidden chart series take effect at once. If the settings file cannot be written, the result says *imported for this session but not saved*. An import never changes your daemon's own configuration: daemon settings live on the daemon and are edited in the **Daemon Configuration** card, so a config shared with you cannot reconfigure your daemon
 4. Profiles from the export are written to your local profile folder (you are asked before overwriting existing ones); invalid profiles are skipped and counted
-5. Custom themes are copied to your themes directory, **replacing a theme file of the same name without asking**; a theme containing an invalid colour is skipped
+5. Custom themes are copied to your themes directory (you are asked before overwriting existing ones); a theme containing an invalid colour is skipped
 
 Some preferences (theme, chart range) take effect on the next launch.
 
@@ -179,14 +179,14 @@ The **Theme** page is a separate entry in the sidebar (not part of Settings). It
 
 ### Theme selection
 
-A dropdown in the page header lists the built-in **Default Dark (built-in)** palette first, then every theme in your themes directory (the presets and any you saved), with four buttons:
+A dropdown in the page header lists the built-in **Default Dark (built-in)** palette first, then every theme in your themes directory (the presets and any you saved), with four buttons. The list is read again each time you open the page, so themes from **Import Config** or a moved themes folder appear without a restart:
 
 | Button | Action |
 |--------|--------|
 | **Load** | Load the selected theme into the editor |
 | **Save** | Save the current editor state (colours, font and base size) as a theme file. Saving **Default Dark** keeps your edited copy as a theme called *Default Dark*, listed beside *Default Dark (built-in)*; apply whichever you want, and that choice is kept across restarts |
-| **Import…** | Import a theme from an external `.json` file |
-| **Export…** | Export the current theme to a `.json` file |
+| **Import…** | Import a theme from an external `.json` file. If your themes directory already has a file of that name, you are asked before it is replaced |
+| **Export…** | Export the current editor state (colours, font and base size) to a `.json` file |
 
 ### Typography and cards
 

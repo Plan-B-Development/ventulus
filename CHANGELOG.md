@@ -63,6 +63,25 @@ rename. Version numbers carry on from Control-OFC.
   when the pump's header is missing or read-only, when the daemon has no validation sessions, and
   while a header test runs. Before, they opened nothing or a window whose **Start** could only be
   refused.
+- **Unapplied theme edits no longer leak into the app.** After **Apply Theme Globally**, every
+  later edit in the theme editor also changed the theme the app had applied, so the chart and other
+  views painted colours you had not applied beside ones you had. The app now gets its own copy.
+- **The Theme page follows changes made in Settings.** A moved themes folder left the picker on the
+  old paths (and **Load** failed with no message), themes brought in by **Import Config** did not
+  appear, and an imported card size was written back over on the next **Apply**. The page now
+  re-reads these each time you open it, and a theme file that has gone is reported, not loaded.
+- **Theme Export includes your font and base size**, as Save and Apply already did.
+- **Importing a theme asks before replacing one.** The Theme page's **Import…** and the themes in
+  **Import Config** replaced a theme file of the same name without a word; they now ask, as
+  profile import does.
+- **Reset colours reaches the chart.** **Reset colours** and **Remove** (settings for missing
+  hardware) changed only the saved setting, so the Dashboard chart and the Sensors panel kept the
+  old colours until restart. The memory-module id migration had the same gap. All three now
+  repaint at once.
+- **Chart series keep their colour across launches.** A series' default colour was picked by a
+  hash that changes every time the app starts, so CPU could be blue today and orange tomorrow.
+  This release moves each series to a fixed colour once; colours you picked are unchanged.
+- The Sensors panel's colour swatches now follow a theme switch, as the chart lines already did.
 
 ## [5.0.0] — 2026-10-10
 

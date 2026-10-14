@@ -8,6 +8,7 @@ values for all visible series at the cursor position.
 from __future__ import annotations
 
 import contextlib
+import zlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -370,17 +371,17 @@ class TimelineChart(QWidget):
 
         # Existing series previously rendered with the old palette get
         # recoloured here so the chart isn't visually two-toned until the
-        # next history rotation. Honors user colour overrides — only the
-        # default (hashed) colours are recomputed.
+        # next history rotation. Overridden series keep their colour.
+        self._repaint_series_colors()
+
+    def _repaint_series_colors(self) -> None:
+        """Re-pen every drawn series and latest-value dot from ``color_for_key``."""
         for key, item in self._temp_items.items():
-            if key not in self._color_overrides:
-                item.setPen(pg.mkPen(self.color_for_key(key), width=1))
+            item.setPen(pg.mkPen(self.color_for_key(key), width=1))
         for key, item in self._rpm_items.items():
-            if key not in self._color_overrides:
-                item.setPen(pg.mkPen(self.color_for_key(key), width=1))
+            item.setPen(pg.mkPen(self.color_for_key(key), width=1))
         for key, dot in self._latest_items.items():
-            if key not in self._color_overrides:
-                self._style_dot(dot, self.color_for_key(key))
+            self._style_dot(dot, self.color_for_key(key))
 
     def cleanup(self) -> None:
         """Disconnect signals and tear down the secondary ViewBox safely.
@@ -495,12 +496,28 @@ class TimelineChart(QWidget):
             self._hide_hover()
 
     def color_for_key(self, key: str) -> str:
-        """Return the colour for a series key: user override > hash default."""
+        """Return the colour for a series key: user override > palette default.
+
+        The default slot comes from a fixed digest of the key. ``hash()`` is
+        salted per process, so it gave a series a different colour every launch.
+        """
         if key in self._color_overrides:
             return self._color_overrides[key]
         colors = self._theme.chart_series
-        idx = hash(key) % len(colors)
+        idx = zlib.crc32(key.encode()) % len(colors)
         return colors[idx]
+
+    def replace_color_overrides(self, overrides: dict[str, str]) -> None:
+        """Make *overrides* the whole set of user colours and repaint.
+
+        For a change made outside the colour picker (Settings ▸ Reset colours
+        or Remove, a re-key): a series that lost its override goes back to its
+        palette colour at once instead of at the next launch.
+        """
+        from ventulus.colors import is_valid_color
+
+        self._color_overrides = {k: v for k, v in overrides.items() if is_valid_color(v)}
+        self._repaint_series_colors()
 
     def set_series_color(self, key: str, color: str) -> None:
         """Set a user colour override for a series and update the graph immediately."""

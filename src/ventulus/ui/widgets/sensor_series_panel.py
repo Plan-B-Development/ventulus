@@ -251,6 +251,16 @@ class SensorSeriesPanel(QFrame):
             color = self._chart.color_for_key(series_key)
             item.setBackground(2, QColor(color))
 
+    def refresh_swatches(self) -> None:
+        """Repaint every row's swatch from the chart's current colours.
+
+        Swatches are painted when rows are built, so a theme switch or a colour
+        change made outside this panel left the legend on the old colours.
+        """
+        with block_signals(self._tree):
+            for item in (*self._sensor_items.values(), *self._fan_items.values()):
+                self._set_color_swatch(item, item.data(0, Qt.ItemDataRole.UserRole))
+
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         """Open colour picker when column 2 (colour swatch) is clicked."""
         if column != 2:

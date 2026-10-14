@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -306,7 +308,9 @@ class ThemeEditorWidget(QWidget):
 
     def __init__(self, tokens: ThemeTokens | None = None, parent=None) -> None:
         super().__init__(parent)
-        self._tokens = tokens or default_dark_theme()
+        # The editor owns its tokens: every edit writes into them in place, so
+        # holding a caller's object would edit that one too (see set_tokens).
+        self._tokens = copy.deepcopy(tokens) if tokens is not None else default_dark_theme()
         self._swatches: dict[str, ColorSwatch] = {}
         self._hex_inputs: dict[str, QLineEdit] = {}
         # Per-series chart-palette swatches, keyed by slot index.
@@ -453,8 +457,13 @@ class ThemeEditorWidget(QWidget):
         return self._tokens
 
     def set_tokens(self, tokens: ThemeTokens) -> None:
-        """Load a new set of tokens into the editor (silent — never re-emits)."""
-        self._tokens = tokens
+        """Load a copy of *tokens* into the editor (silent — never re-emits).
+
+        A copy, because the edits below write into the editor's tokens in place:
+        holding the caller's object let edits nobody applied reach it — the
+        applied theme, when that is what was loaded.
+        """
+        self._tokens = copy.deepcopy(tokens)
         for token_name, swatch in self._swatches.items():
             value = getattr(self._tokens, token_name, "#000000")
             swatch.set_color(value)

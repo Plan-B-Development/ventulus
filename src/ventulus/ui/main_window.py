@@ -491,6 +491,7 @@ class MainWindow(QWidget):
         self._splitter_persistence = SplitterPersistence(self._settings_service, self)
         self._splitter_persistence.adopt(self)
         self.settings_page.layout_reset_requested.connect(self._splitter_persistence.reset)
+        self.settings_page.series_colors_changed.connect(self.dashboard_page.set_series_colors)
 
         # DEC-245: geometry and last-page used to be written only in closeEvent, so
         # a crash, SIGKILL or logout lost them. Debounced from resize/move/page
@@ -1220,6 +1221,9 @@ class MainWindow(QWidget):
                 settings.diagnostics_hidden_sensor_ids, moves, series=False
             ),
         )
+        # The chart holds its own copy of the colours; without this a re-keyed
+        # series showed its palette colour until the next launch.
+        self.dashboard_page.set_series_colors(dict(self._settings_service.settings.series_colors))
         new_hidden = rekey_list(hidden, moves, series=True)
         if new_hidden != hidden:
             # Emits selection_changed, which persists hidden_chart_series.

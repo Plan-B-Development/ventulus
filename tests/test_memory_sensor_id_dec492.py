@@ -216,6 +216,20 @@ class TestMainWindowHook:
         assert profile_service.reload_profile("mem").curves[0].sensor_id == STABLE
         assert any("controller and address" in e.message for e in w._diag.events)
 
+    def test_the_dashboard_chart_follows_a_re_keyed_colour(
+        self, qtbot, settings_service, profile_service
+    ):
+        """The chart holds its own copy of the colours; a re-key that only wrote
+        the setting left the series on its palette colour until restart."""
+        self._seed(settings_service, profile_service)
+        w = self._window(qtbot, settings_service, profile_service)
+        chart = w.dashboard_page._chart
+        assert chart.color_for_key(f"sensor:{STABLE}") != "#123456"  # precondition
+
+        w._state.set_sensors([_dimm(STABLE), _cpu()])
+
+        assert chart.color_for_key(f"sensor:{STABLE}") == "#123456"
+
     def test_ambiguity_leaves_everything_alone(self, qtbot, settings_service, profile_service):
         self._seed(settings_service, profile_service)
         w = self._window(qtbot, settings_service, profile_service)

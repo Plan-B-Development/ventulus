@@ -310,6 +310,8 @@ class DashboardPage(QWidget):
         """
         self._apply_enable_cmd_style()
         self._chart.set_theme(tokens)
+        # The rail's swatches are the chart's legend; repaint them with it.
+        self._sensor_panel.refresh_swatches()
         # DEC-213: recolour the Telemetry Stage legend swatches for the new palette
         # (they are built once, so a theme switch would otherwise leave them stale).
         self._legend_temp_chip.setStyleSheet(
@@ -322,6 +324,12 @@ class DashboardPage(QWidget):
         # need the new palette too (they are built once and updated in place).
         for card in self._fan_cards.values():
             card.set_theme(tokens)
+
+    def set_series_colors(self, colors: dict[str, str]) -> None:
+        """Take the saved series colours after a change made off this page
+        (Settings ▸ Reset or Remove, a re-key): the chart holds its own copy."""
+        self._chart.replace_color_overrides(colors)
+        self._sensor_panel.refresh_swatches()
 
     def _copy_enable_command(self) -> None:
         clipboard = QApplication.clipboard()

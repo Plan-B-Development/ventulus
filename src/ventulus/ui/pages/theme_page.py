@@ -9,6 +9,7 @@ editor + the global QSS, so this page is hex-free (the no-hardcoded-colours guar
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from pathlib import Path
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -83,7 +85,7 @@ class ThemePage(QWidget):
 
         load_btn = make_button("Load", "secondary", object_name="Settings_Btn_applyTheme")
         load_btn.setToolTip("Load selected theme into editor")
-        load_btn.clicked.connect(self._apply_selected_theme)
+        load_btn.clicked.connect(self._load_selected_theme)
         header.addWidget(load_btn)
         save_btn = make_button("Save", "primary", object_name="Settings_Btn_saveTheme")
         save_btn.setToolTip("Save current edits as a theme file")
@@ -128,6 +130,9 @@ class ThemePage(QWidget):
         self._card_size_combo = QComboBox()
         self._card_size_combo.setObjectName("Settings_Combo_cardSize")
         name_value_control(self._card_size_combo, card_size_label)
+        # The stored tier the combo last showed, so a page visit can tell a
+        # change made elsewhere (Settings ▸ Import) from one not yet applied here.
+        self._card_size_seen: str | None = None
         self._card_size_combo.setToolTip(
             "Density of the Fan Role and Curve cards on the Controls page.\n"
             "Cards also scale automatically with the font size."
@@ -170,8 +175,20 @@ class ThemePage(QWidget):
     def cleanup(self) -> None:
         """No-op — the editor owns no timers/threads (closeEvent symmetry)."""
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # Settings changes this page's inputs without telling it: a moved themes
+        # folder, imported themes, an imported card size. Re-read them on
+        # arrival. The editor, the font controls and a card size picked here but
+        # not yet applied are this page's own state and stay.
+        self._refresh_theme_list()
+        if self._settings_svc.settings.card_size != self._card_size_seen:
+            self._load_theme_settings()
+
     def _load_theme_settings(self) -> None:
-        idx = self._card_size_combo.findData(self._settings_svc.settings.card_size)
+        card_size = self._settings_svc.settings.card_size
+        self._card_size_seen = card_size
+        idx = self._card_size_combo.findData(card_size)
         if idx >= 0:
             self._card_size_combo.setCurrentIndex(idx)
 
@@ -181,6 +198,13 @@ class ThemePage(QWidget):
     # ─── Theme handlers (moved verbatim from settings_page, DEC-215) ──
 
     def _refresh_theme_list(self) -> None:
+        """Re-list the themes folder, keeping the picker on the theme it showed.
+
+        Matched by path, then by name: a moved folder changes every path but no
+        name. A theme no longer listed leaves the bundled entry selected.
+        """
+        prev_path = self._theme_combo.currentData()
+        prev_name = self._theme_combo.currentText()
         self._theme_combo.clear()
         self._theme_combo.addItem(BUILTIN_DEFAULT_THEME_NAME, None)
         td = themes_dir()
@@ -197,6 +221,11 @@ class ThemePage(QWidget):
                     self._theme_combo.addItem(t.name, str(p))
                 except (json.JSONDecodeError, OSError, KeyError, ValueError) as e:
                     log.warning("Skipping invalid theme %s: %s", p, e)
+        idx = self._theme_combo.findData(prev_path) if prev_path is not None else -1
+        if idx < 0 and prev_path is not None:
+            idx = self._theme_combo.findText(prev_name)
+        if idx > 0:
+            self._theme_combo.setCurrentIndex(idx)
 
     def _select_saved_theme(self) -> None:
         """Point the combo at the theme actually in force. Startup only (DEC-245).
@@ -246,6 +275,15 @@ class ThemePage(QWidget):
         except (json.JSONDecodeError, OSError, KeyError, ValueError) as e:
             log.warning("Could not load saved theme %r: %s", saved_name, e)
 
+    def _load_selected_theme(self) -> None:
+        """The Load button: a theme file can go between listing and loading."""
+        try:
+            self._apply_selected_theme()
+        except (json.JSONDecodeError, OSError, KeyError, ValueError) as e:
+            log.warning("Could not load theme %r: %s", self._theme_combo.currentText(), e)
+            self._set_status(f"Could not load theme '{self._theme_combo.currentText()}': {e}")
+            self._refresh_theme_list()
+
     def _apply_selected_theme(self) -> None:
         path_str = self._theme_combo.currentData()
         tokens = default_dark_theme() if path_str is None else load_theme(Path(path_str))
@@ -266,12 +304,17 @@ class ThemePage(QWidget):
         ``BUILTIN_DEFAULT_THEME_NAME`` although its tokens say "Default Dark"."""
         return BUILTIN_DEFAULT_THEME_NAME if self._editor_source_path is None else tokens.name
 
-    def _save_current_theme(self) -> None:
+    def _editor_tokens_with_typography(self) -> ThemeTokens:
+        """The editor's tokens with the font controls written in. Save, Apply and
+        Export all go through here, so each carries what the page shows
+        (DEC-431, `DC-r`)."""
         tokens = self._theme_editor.tokens
-        # The font controls reach the tokens here as they do on Apply, so the
-        # saved file matches what the editor shows (DEC-431, `DC-r`).
         tokens.font_family = self._font_combo.currentData() or ""
         tokens.base_font_size_pt = self._font_size_spin.value()
+        return tokens
+
+    def _save_current_theme(self) -> None:
+        tokens = self._editor_tokens_with_typography()
         name = tokens.name or "Custom"
         try:
             dest = theme_file_path(name)
@@ -298,10 +341,9 @@ class ThemePage(QWidget):
         self._set_status(f"Theme '{name}' saved")
 
     def _apply_editor_theme_to_app(self) -> None:
-        tokens = self._theme_editor.tokens
-        # Apply typography settings from the font controls
-        tokens.font_family = self._font_combo.currentData() or ""
-        tokens.base_font_size_pt = self._font_size_spin.value()
+        # A copy goes out: the editor keeps writing into its own tokens, and the
+        # applied theme must not follow edits nobody applied.
+        tokens = copy.deepcopy(self._editor_tokens_with_typography())
         # The bundled palette persists under its reserved name, so choosing it
         # survives a restart even beside a saved "Default Dark" (DEC-431).
         name = self._editor_display_name(tokens)
@@ -326,11 +368,25 @@ class ThemePage(QWidget):
         try:
             tokens = load_theme(Path(path))
             dest = themes_dir() / Path(path).name
+            # G-14: an import used to replace a theme of the same file name
+            # without a word. Re-importing a file onto itself replaces nothing.
+            if dest.exists() and not dest.samefile(path) and not self._confirm_replace(dest):
+                self._set_status(f"Import cancelled — {dest.name} already exists")
+                return
             save_theme(tokens, dest)
             self._refresh_theme_list()
             self._set_status(f"Theme '{tokens.name}' imported")
         except (json.JSONDecodeError, OSError, KeyError, ValueError) as e:
             self._set_status(f"Import failed: {e}")
+
+    def _confirm_replace(self, dest: Path) -> bool:
+        reply = QMessageBox.question(
+            self,
+            "Replace theme?",
+            f"A theme file named {dest.name} already exists and will be replaced.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        return reply == QMessageBox.StandardButton.Yes
 
     def _export_theme(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -339,7 +395,7 @@ class ThemePage(QWidget):
         if not path:
             return
         try:
-            tokens = self._theme_editor.tokens
+            tokens = self._editor_tokens_with_typography()
             current_name = tokens.name
             save_theme(tokens, Path(path))
             self._set_status(f"Theme '{current_name}' exported")

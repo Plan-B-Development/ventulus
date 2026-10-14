@@ -236,6 +236,10 @@ class SettingsPage(QWidget):
     # DEC-245: MainWindow owns the live splitters (it adopts them all in one pass),
     # so the page asks for a reset rather than reaching across for them.
     layout_reset_requested = Signal()
+    # The saved series colours after this page changed them (Reset, Remove; an
+    # import never carries them, DEC-140). The Dashboard chart and rail hold a
+    # live copy that a settings write does not reach.
+    series_colors_changed = Signal(dict)
 
     def __init__(
         self,
@@ -872,6 +876,7 @@ class SettingsPage(QWidget):
 
     def _reset_series_colors(self) -> None:
         self._settings_svc.update(series_colors={})
+        self.series_colors_changed.emit(dict(self._settings_svc.settings.series_colors))
         self._refresh_reset_buttons()
         self._set_status("Chart series colours reset to defaults")
 
@@ -911,6 +916,7 @@ class SettingsPage(QWidget):
         # saved entry has just been removed and the next emit writes it back.
         if self._series_selection is not None:
             self._series_selection.load_hidden(self._settings_svc.settings.hidden_chart_series)
+        self.series_colors_changed.emit(dict(self._settings_svc.settings.series_colors))
         self._refresh_reset_buttons()
         # Report what actually happened. Both keys are demo-sealed (DEC-244), so in
         # a demo session update() drops the call entirely — announcing a removal
@@ -3423,6 +3429,20 @@ class SettingsPage(QWidget):
                 skipped.append(name)
                 continue
             valid[name] = data
+
+        # G-14: themes get the overwrite prompt profiles have; Cancel imports none.
+        existing = [name for name in valid if (td / f"{name}.json").exists()]
+        if existing:
+            reply = QMessageBox.question(
+                self,
+                "Overwrite themes?",
+                f"{len(existing)} theme(s) already exist and will be overwritten:\n"
+                + ", ".join(existing[:5])
+                + ("\n..." if len(existing) > 5 else ""),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return len(skipped)
 
         for name, data in valid.items():
             dest = td / f"{name}.json"

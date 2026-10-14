@@ -124,7 +124,9 @@ coloured **latest-value marker** at its newest reading, and **hovering** the cha
 crosshair and a themed tooltip listing each visible series' reading at that moment, named
 as in the Sensors panel. A series with no reading there (before it started, or in a gap)
 is left out rather than reporting a neighbouring one. The tooltip-plate and crosshair
-colours are themeable on the **Theme** page.
+colours are themeable on the **Theme** page. Each series keeps the same palette colour from
+one launch to the next unless you pick its colour from the swatch in the Sensors panel; the
+swatches follow a theme switch and **Reset colours** in Settings at once.
 
 Readings are placed at the time the daemon took them. A sensor the daemon stops
 refreshing adds no new points, so its line ends where its data ends; a line also breaks
