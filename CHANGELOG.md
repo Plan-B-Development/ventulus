@@ -5,6 +5,11 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+## [5.0.1] — 2026-10-14
+
+Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.0.0 is the current daemon release.
+A fix release: no new features.
+
 ### Fixed
 
 - **Discarding unsaved profile edits now discards them.** Choosing **Discard** when switching
