@@ -21,7 +21,9 @@ Explains the process and runs pre-flight checks. The **Next** button stays disab
 - the daemon is connected, and
 - at least one controllable fan output was detected.
 
-The intro page also checks CPU temperature: if any CPU sensor is above the diagnostic temperature limit (85°C) it shows a red **"Cannot proceed"** warning urging you to let the system idle and cool. The limit is the one the daemon publishes for its hardware tests, so the wizard and the PWM Test Report always name the same figure. The limit is then *enforced* at the moment a fan test starts: the wizard **aborts the individual fan test** ("too hot to test safely") rather than spinning a fan down while the CPU is hot. Your system should be **idle and cool** before running it.
+The page re-checks while it is open, so a daemon that connects (or drops) moves the status and the **Next** button together.
+
+The intro page also checks CPU temperature: if any CPU sensor is above the diagnostic temperature limit (85°C) it shows a warning that no fan test will start until the CPU cools. That warning does not disable **Next**. The limit is the one the daemon publishes for its hardware tests, so the wizard and the PWM Test Report always name the same figure. The limit is then *enforced* at the moment a fan test starts: the wizard **aborts the individual fan test** ("too hot to test safely") rather than spinning a fan down while the CPU is hot. Your system should be **idle and cool** before running it.
 
 When everything is in order it reports "Ready — *N* controllable fan(s) detected."
 
@@ -65,13 +67,13 @@ The wizard works through your selected fans one at a time. For each fan:
 1. Press **Start Test**: the fan's PWM is set to 0% so it spins down
 2. A progress bar fills as the timer runs ("3 / 8 seconds", counting elapsed time upward) with a live RPM readout; press **Abort** to end the test early
 3. Watch your case to see **which physical fan stopped**
-4. The fan is **restored automatically** when the test period ends
+4. The fan is **restored automatically** when the test period ends. If the daemon does not confirm the restore, the wizard says so instead of "Fan restored"; the daemon still restores the fan by itself when the test's hold expires
 5. Pick a **label**: a preset (CPU Cooler, Rear Exhaust, Front Intake Top, …) or any custom text
 6. Press **Save Label & Next Fan**, or **Skip — couldn't identify** to move on without saving a label (you can re-run the test first; nothing limits retries)
 
 ### Step 5: Review Labels
 
-A summary table (ID, Source, New Label) where every label is still editable, including for fans you skipped. Click **Finish** to save all labels, or **Cancel** to discard everything.
+A summary table (ID, Source, New Label) where every label is still editable, including for fans you skipped. Click **Finish** to save the labels in this table, or **Cancel** to discard everything. A label you gave a fan that you later deselected on **Detected Fans** is not in the table and is not saved.
 
 ## Safety features
 

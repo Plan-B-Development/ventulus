@@ -82,6 +82,22 @@ rename. Version numbers carry on from Control-OFC.
   hash that changes every time the app starts, so CPU could be blue today and orange tomorrow.
   This release moves each series to a fixed colour once; colours you picked are unchanged.
 - The Sensors panel's colour swatches now follow a theme switch, as the chart lines already did.
+- **Fan Wizard: Finish keeps what you typed on the Review page.** Labels edited in the review table
+  were thrown away, because they were saved before the table was read back. Finish also no longer
+  saves a label for a fan you deselected after labelling it.
+- **Fan Wizard: "Fan restored" only when the daemon confirmed it.** A restore the daemon refused
+  was still reported as done. The wizard now says the restore was not confirmed, and that the daemon
+  restores the fan by itself when the test's hold expires.
+- **Fan Wizard: the intro page keeps up.** Its status and **Next** button were set once, so a daemon
+  that connected after the wizard opened left **Next** disabled, and one that dropped left it
+  reading "Ready". Both now follow the connection. A hot CPU now shows as a warning instead of
+  "Cannot proceed", since **Next** stays available and each fan test checks the temperature itself.
+- Fan Wizard: **Skip** comes back when you return to the Identify step after the last fan, and
+  status colours now change with the message (a refusal no longer stays red on the next success).
+- **PWM Test Report: a failed save is not hidden.** The "could not be saved" message was replaced by
+  the next status line straight away, and the finished report could say "Saved to" a file from an
+  earlier run, or an earlier checkpoint of this one. The run status now keeps the error until a save
+  succeeds, and the report says it was not saved (and where an earlier copy is, if there is one).
 
 ## [5.0.0] — 2026-10-10
 

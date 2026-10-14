@@ -24,6 +24,7 @@ Uses QWizard for standard multi-step navigation with Back/Next/Finish/Cancel.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import re
@@ -77,6 +78,7 @@ from ventulus.services.pump_protection import (
     pump_identify_warning,
 )
 from ventulus.ui.components.a11y import name_value_control
+from ventulus.ui.qt_util import set_chip_class
 from ventulus.ui.widgets.header_role_dialog import confirm_remove_pump_protection
 
 if TYPE_CHECKING:
@@ -400,18 +402,24 @@ class FanConfigWizard(QWizard):
             self._last_identify_mode.pop(fan_id, None)
             return str(e)
 
-    def restore_fan(self, target: dict) -> None:
+    def restore_fan(self, target: dict) -> str | None:
         """Restore (un-identify) a fan after identification via the daemon
         (DEC-166). Restore is idempotent — the engine recomputes the fan's
-        curve value on the next tick, so the GUI never replays a prior PWM."""
+        curve value on the next tick, so the GUI never replays a prior PWM.
+
+        Returns an error message when the daemon did not confirm the restore,
+        else None, so the test page never says "restored" on a failed call.
+        """
         if not self._client:
-            return
+            return "No daemon client available"
         fan_id = target["id"]
         log.info("Wizard: restoring fan %s", fan_id)
         try:
             self._client.fan_identify(fan_id, "restore")
+            return None
         except (DaemonError, DaemonUnavailable, OSError, ConnectionError) as e:
             log.warning("Failed to restore fan %s: %s", fan_id, e)
+            return str(e)
 
     def thermal_limit_c(self) -> float:
         """The limit :meth:`check_thermal_safe` applies — see :func:`thermal_limit_c`."""
@@ -422,14 +430,25 @@ class FanConfigWizard(QWizard):
         return _hot_cpu_sensor(self._state.sensors, self.thermal_limit_c()) is None
 
     def accept(self) -> None:
-        """Save labels and clean up on Finish."""
+        """Save labels and clean up on Finish.
+
+        QWizard runs ``validateCurrentPage()`` inside ``done()``, which
+        ``super().accept()`` reaches only after this override has run — so the
+        Review page's edits are read back here first, or they are lost.
+        """
+        if not self.validateCurrentPage():
+            return
         self._exit_override()
-        # Save labels
-        for fan_id, label in self._labels.items():
-            if label:
-                self._state.set_fan_alias(fan_id, label)
-        log.info("Wizard: saved %d fan label(s)", len(self._labels))
-        self.labels_saved.emit(dict(self._labels))
+        # Only the fans the Review page showed: a label typed for a fan that
+        # was later deselected (or excluded on the AIO step) is not reviewed.
+        reviewed = self._review_page.reviewed_ids()
+        labels = {
+            fan_id: label for fan_id, label in self._labels.items() if label and fan_id in reviewed
+        }
+        for fan_id, label in labels.items():
+            self._state.set_fan_alias(fan_id, label)
+        log.info("Wizard: saved %d fan label(s)", len(labels))
+        self.labels_saved.emit(labels)
         super().accept()
 
     def reject(self) -> None:
@@ -441,6 +460,7 @@ class FanConfigWizard(QWizard):
     def done(self, result: int) -> None:
         """Ensure cleanup happens regardless of how the wizard closes."""
         self._exit_override()
+        self._intro_page.detach_state()
         super().done(result)
 
 
@@ -478,9 +498,32 @@ class IntroPage(QWizardPage):
 
         self._status_label = QLabel("")
         self._status_label.setWordWrap(True)
+        self._status_label.setObjectName("FanWizard_Lbl_introStatus")
         self._status_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(self._status_label)
         layout.addStretch()
+
+        # The pre-flight is re-run on every poll, not once at page show: the
+        # status text and the Next button read the same live state, so a
+        # daemon that connects (or drops) while the page is open moves both.
+        # `detach_state` undoes this when the wizard closes.
+        self._attached = True
+        state.connection_changed.connect(self._refresh_preflight)
+        state.sensors_updated.connect(self._refresh_preflight)
+        state.fans_updated.connect(self._refresh_preflight)
+
+    def detach_state(self) -> None:
+        """Stop following AppState (idempotent); the wizard is closing."""
+        if not self._attached:
+            return
+        self._attached = False
+        for sig in (
+            self._state.connection_changed,
+            self._state.sensors_updated,
+            self._state.fans_updated,
+        ):
+            with contextlib.suppress(RuntimeError, TypeError):
+                sig.disconnect(self._refresh_preflight)
 
     def _intro_warning_text(self) -> str:
         """Assemble the pre-flight warning, pump bullet included.
@@ -502,28 +545,48 @@ class IntroPage(QWizardPage):
 
     def initializePage(self) -> None:
         self._warning_label.setText(self._intro_warning_text())
-        errors = []
+        self._refresh_preflight()
+
+    def _blockers(self) -> list[str]:
+        """What keeps Next disabled. The single rule behind both the status
+        text and :meth:`isComplete`, so the two cannot disagree."""
+        blockers = []
         if self._state.connection != ConnectionState.CONNECTED:
-            errors.append("Daemon is not connected.")
+            blockers.append("Daemon is not connected.")
         if not self._state.fans:
-            errors.append("No controllable fan outputs detected.")
+            blockers.append("No controllable fan outputs detected.")
+        return blockers
+
+    def _refresh_preflight(self, *_args) -> None:
+        blockers = self._blockers()
+        # A hot CPU warns but does not block: each fan test checks the limit
+        # again when it starts and refuses there, so the user may go on and
+        # label fans, or wait on a later page for the CPU to cool.
         limit_c = thermal_limit_c(getattr(self._state, "capabilities", None))
         hot = _hot_cpu_sensor(self._state.sensors, limit_c)
-        if hot is not None:
-            errors.append(f"CPU temperature too high ({hot.value_c:.1f}°C > {limit_c:g}°C).")
+        heat = (
+            f"CPU temperature is too high ({hot.value_c:.1f}°C > {limit_c:g}°C): "
+            "no fan test will start until it cools."
+            if hot is not None
+            else ""
+        )
 
-        if errors:
-            self._status_label.setText("Cannot proceed:\n• " + "\n• ".join(errors))
-            self._status_label.setProperty("class", "CriticalChip")
+        if blockers:
+            lines = ["Cannot proceed:", *(f"• {b}" for b in blockers)]
+            css = "CriticalChip"
         else:
-            fan_count = len(self._state.fans)
-            self._status_label.setText(f"Ready — {fan_count} controllable fan(s) detected.")
-            self._status_label.setProperty("class", "SuccessChip")
+            lines = [f"Ready — {len(self._state.fans)} controllable fan(s) detected."]
+            css = "WarningChip" if heat else "SuccessChip"
+        if heat:
+            lines.append(heat)
+        text = "\n".join(lines)
+        if self._status_label.text() != text:
+            self._status_label.setText(text)
+        set_chip_class(self._status_label, css, skip_if_unchanged=True)
+        self.completeChanged.emit()
 
     def isComplete(self) -> bool:
-        if self._state.connection != ConnectionState.CONNECTED:
-            return False
-        return bool(self._state.fans)
+        return not self._blockers()
 
 
 class CoolingDevicePage(QWizardPage):
@@ -1133,6 +1196,7 @@ class IdentifyFanPage(QWizardPage):
         layout.addWidget(self._rpm_label)
 
         self._status_msg = QLabel("")
+        self._status_msg.setObjectName("FanWizard_Lbl_testStatus")
         self._status_msg.setWordWrap(True)
         layout.addWidget(self._status_msg)
 
@@ -1195,14 +1259,23 @@ class IdentifyFanPage(QWizardPage):
         self._rpm_label.setText("RPM: —")
         # DEC-311: name what will actually happen to THIS fan.
         verb = self._wizard.identify_verb(target["id"])
-        self._status_msg.setText(f"Press 'Start Test' to {verb} this fan for identification.")
+        self._set_status(f"Press 'Start Test' to {verb} this fan for identification.")
         self._test_btn.setEnabled(True)
         self._abort_btn.setEnabled(False)
         self._label_combo.setCurrentText("")
         self._testing = False
         self._all_done = False
+        # Both, not just Next Fan: the last fan hides the pair, and Back then
+        # forward re-enters this page with the run starting over.
         self._next_fan_btn.setVisible(True)
+        self._skip_btn.setVisible(True)
         self.completeChanged.emit()
+
+    def _set_status(self, text: str, css_class: str = "") -> None:
+        """Show *text*, and set (or clear) its chip class with a repolish —
+        a bare ``setProperty("class", ...)`` does not restyle a shown label."""
+        self._status_msg.setText(text)
+        set_chip_class(self._status_msg, css_class)
 
     def cleanupPage(self) -> None:
         """Called when user presses Back — restore fan if testing."""
@@ -1215,11 +1288,11 @@ class IdentifyFanPage(QWizardPage):
             return
         # Thermal check
         if not self._wizard.check_thermal_safe():
-            self._status_msg.setText(
+            self._set_status(
                 f"ABORTED: CPU temperature exceeds {self._wizard.thermal_limit_c():g}°C — "
-                "too hot to test safely."
+                "too hot to test safely.",
+                "CriticalChip",
             )
-            self._status_msg.setProperty("class", "CriticalChip")
             return
 
         self._testing = True
@@ -1227,7 +1300,6 @@ class IdentifyFanPage(QWizardPage):
         self._progress.setValue(0)
         self._test_btn.setEnabled(False)
         self._abort_btn.setEnabled(True)
-        self._status_msg.setStyleSheet("")
 
         error = self._wizard.stop_fan(target)
         if error:
@@ -1235,8 +1307,7 @@ class IdentifyFanPage(QWizardPage):
             self._test_btn.setEnabled(True)
             self._abort_btn.setEnabled(False)
             verb = "change pump speed" if self._wizard.is_pump_target(target["id"]) else "stop fan"
-            self._status_msg.setText(f"Failed to {verb}: {error}")
-            self._status_msg.setProperty("class", "CriticalChip")
+            self._set_status(f"Failed to {verb}: {error}", "CriticalChip")
             log.warning("Wizard: test failed to start for %s: %s", target["id"], error)
             return
 
@@ -1244,11 +1315,11 @@ class IdentifyFanPage(QWizardPage):
         # re-derived — the daemon decides stop-vs-perturb, so it is the only
         # thing that actually knows.
         if self._wizard.last_identify_perturbed_pump(target["id"]):
-            self._status_msg.setText(
+            self._set_status(
                 "Pump speed changed — watch the RPM reading or listen for the change..."
             )
         else:
-            self._status_msg.setText("Fan stopped — observe which physical fan changed...")
+            self._set_status("Fan stopped — observe which physical fan changed...")
         self._timer.start()
         log.info("Wizard: test started for %s (%ds)", target["id"], self._wizard.spindown_seconds)
 
@@ -1268,39 +1339,59 @@ class IdentifyFanPage(QWizardPage):
 
         # Thermal check during test
         if not self._wizard.check_thermal_safe():
-            self._abort_test()
-            self._status_msg.setText(
+            problem = self._abort_test()
+            self._set_status(
                 f"ABORTED: CPU temperature exceeded {self._wizard.thermal_limit_c():g}°C "
-                "during test."
+                "during test." + (f" {problem}" if problem else ""),
+                "CriticalChip",
             )
-            self._status_msg.setProperty("class", "CriticalChip")
             return
 
         if self._seconds_remaining <= 0:
             self._end_test()
 
+    def _restore_current(self) -> str:
+        """Restore the fan under test: ``""`` once the daemon confirmed it, else
+        a sentence saying it did not. Never a claim the daemon did not make."""
+        target = self._wizard.current_target()
+        if not target:
+            return ""
+        error = self._wizard.restore_fan(target)
+        if error is None:
+            return ""
+        return (
+            f"The daemon did not confirm the fan was restored ({error}). "
+            "It restores the fan by itself when the test's hold expires."
+        )
+
     def _end_test(self) -> None:
         self._timer.stop()
         self._testing = False
         target = self._wizard.current_target()
-        if target:
-            self._wizard.restore_fan(target)
+        problem = self._restore_current()
         self._test_btn.setEnabled(True)
         self._abort_btn.setEnabled(False)
         self._progress.setValue(self._wizard.spindown_seconds)
-        self._status_msg.setText("Fan restored. Enter a label below, then click Next.")
+        if problem:
+            self._set_status(problem, "CriticalChip")
+        else:
+            self._set_status("Fan restored. Enter a label below, then click Next.")
         log.info("Wizard: test completed for %s", target["id"] if target else "unknown")
 
-    def _abort_test(self) -> None:
+    def _abort_test(self) -> str:
+        """End the test early; returns :meth:`_restore_current`'s answer."""
         self._timer.stop()
         self._testing = False
         target = self._wizard.current_target()
-        if target:
-            self._wizard.restore_fan(target)
+        problem = self._restore_current()
         self._test_btn.setEnabled(True)
         self._abort_btn.setEnabled(False)
-        self._status_msg.setText("Test aborted — fan restored.")
+        if problem:
+            self._set_status(f"Test aborted. {problem}", "CriticalChip")
+        else:
+            self._set_status("Test aborted — fan restored.")
         log.info("Wizard: test aborted for %s", target["id"] if target else "unknown")
+        return problem
 
     def _save_current_label(self) -> None:
         """Save the label for the current fan target."""
@@ -1320,7 +1411,7 @@ class IdentifyFanPage(QWizardPage):
             self._all_done = True
             self._next_fan_btn.setVisible(False)
             self._skip_btn.setVisible(False)
-            self._status_msg.setText("All fans tested. Click Next to review labels.")
+            self._set_status("All fans tested. Click Next to review labels.")
             self.completeChanged.emit()
 
     def _skip_target(self) -> None:
@@ -1331,7 +1422,7 @@ class IdentifyFanPage(QWizardPage):
             self._all_done = True
             self._next_fan_btn.setVisible(False)
             self._skip_btn.setVisible(False)
-            self._status_msg.setText("All fans tested. Click Next to review labels.")
+            self._set_status("All fans tested. Click Next to review labels.")
             self.completeChanged.emit()
 
     def validatePage(self) -> bool:
@@ -1370,12 +1461,20 @@ class ReviewPage(QWizardPage):
         excluded = self._wizard.excluded_reasons()
         return [t for t in self._wizard._targets if t["id"] not in excluded]
 
-    def initializePage(self) -> None:
+    def _rows(self) -> list[dict]:
+        """The fans this page lists: the selection, else every included target."""
         targets = self._wizard._targets
         selected = self._wizard._selected_indices
+        return [targets[i] for i in selected] if selected else self._included_targets()
+
+    def reviewed_ids(self) -> set[str]:
+        """Ids of the fans this page showed — the only labels Finish saves."""
+        return {t["id"] for t in self._rows()}
+
+    def initializePage(self) -> None:
         labels = self._wizard._labels
 
-        rows = [targets[i] for i in selected] if selected else self._included_targets()
+        rows = self._rows()
         self._table.setRowCount(len(rows))
 
         for i, t in enumerate(rows):
@@ -1387,11 +1486,7 @@ class ReviewPage(QWizardPage):
 
     def validatePage(self) -> bool:
         # Read back any edits the user made in the review table
-        targets = self._wizard._targets
-        selected = self._wizard._selected_indices
-        rows = [targets[i] for i in selected] if selected else self._included_targets()
-
-        for i, t in enumerate(rows):
+        for i, t in enumerate(self._rows()):
             label_item = self._table.item(i, 2)
             if label_item:
                 label = label_item.text().strip()

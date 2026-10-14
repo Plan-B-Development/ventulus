@@ -120,6 +120,11 @@ _SCOPE_FIXED_COLS = ("Channel", "Role", "Writable", "Fan detected", "In profile"
 _TONE_TO_STATE = {"ok": "ok", "warn": "warn", "bad": "crit", "info": "info", "muted": "neutral"}
 
 
+def save_failed_text(message: str) -> str:
+    """The one wording for a failed report save, wherever it is shown."""
+    return f"The report could not be saved: {message}"
+
+
 def _slug(value: str) -> str:
     """A stable objectName fragment from a stable id (the header-card rule)."""
     return "".join(c if c.isalnum() else "_" for c in value)
@@ -821,6 +826,10 @@ class PwmReportWindow(ModalDialog):
             status = "Working…"
         if runner.stopping and not runner.finished:
             status += " (stopping)"
+        if self._controller.last_save_error:
+            # Re-stated on every render: `save_failed` lands in the same call
+            # stack as the `changed` that would otherwise overwrite it.
+            status += f" — {save_failed_text(self._controller.last_save_error)}"
         self._run_status.setText(status)
         self._run_pill.set_text("Running" if not runner.finished else "Done")
         self._run_pill.set_state("info" if not runner.finished else "ok")
@@ -901,7 +910,14 @@ class PwmReportWindow(ModalDialog):
             layout.addWidget(_plain(vm.trace_note, "PwmReport_Label_traceNote", meta=True))
         if context == CONTEXT_LIVE:
             saved = self._controller.last_path
-            where = f"Saved to {saved}" if saved is not None else ""
+            error = self._controller.last_save_error
+            if error:
+                # The file at `last_path`, if any, is an earlier checkpoint.
+                where = save_failed_text(error)
+                if saved is not None:
+                    where += f" (an earlier copy is at {saved})"
+            else:
+                where = f"Saved to {saved}" if saved is not None else ""
         elif context == CONTEXT_SAVED:
             where = f"Saved report, opened from {path}"
         else:
@@ -1242,7 +1258,7 @@ class PwmReportWindow(ModalDialog):
         self.show_history()
 
     def _on_save_failed(self, message: str) -> None:
-        self._run_status.setText(f"The report could not be saved: {message}")
+        self._run_status.setText(save_failed_text(message))
 
     # ── Export and re-apply ─────────────────────────────────────────────────
 

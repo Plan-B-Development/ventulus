@@ -106,7 +106,12 @@ class PwmReportController(QObject):
         self._finish_announced = False
         self._reapply_req: int | None = None
         self._reapply_seq = 10_000_000  # disjoint from the runner's ids
+        #: Where this run's report was last saved, ``None`` before its first save.
         self.last_path: Path | None = None
+        #: Why the latest save failed, ``None`` once a save succeeds. The window
+        #: reads it on every render, so a failure is not painted over by the
+        #: next status line, and "Saved to" is never shown over a stale file.
+        self.last_save_error: str | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
         self._timer.timeout.connect(self._on_tick)
@@ -159,6 +164,10 @@ class PwmReportController(QObject):
         self._saved_progress = -1
         self._saved_phase = ""
         self._finish_announced = False
+        # A new run has saved nothing yet: the previous run's file and error
+        # are not this report's.
+        self.last_path = None
+        self.last_save_error = None
         self.run_active_changed.emit(True)
         self._dispatch(self._runner.start(self._clock()))
         self._timer.start()
@@ -349,6 +358,8 @@ class PwmReportController(QObject):
             runner.doc["trace"] = self._trace.to_dict()
         try:
             self.last_path = store.save_report(runner.doc, self._directory)
+            self.last_save_error = None
         except (OSError, ValueError) as e:
             log.warning("PWM report: could not save %s: %s", runner.doc.get("report_id"), e)
+            self.last_save_error = str(e)
             self.save_failed.emit(str(e))
