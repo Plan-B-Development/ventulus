@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from html import escape
 from typing import Any
 
+from ventulus.knowledge.driver_install import package_hint, update_hint
+
 # Shown beneath every "To fix" block across the diagnostics UI (DEC-113).
 # Lives here (the lowest-level guidance module) so both the dual-chip warning
 # and the readiness "To fix" guidance can share it without a circular import.
@@ -145,7 +147,7 @@ class ChipGuidance:
     chip_prefix: str
     driver_name: str
     in_mainline: bool
-    driver_package: str
+    driver_source: str
     driver_url: str
     bios_tips: list[str] = field(default_factory=list)
     known_issues: list[str] = field(default_factory=list)
@@ -294,7 +296,7 @@ _GB_FULL_SPEED_NOTE = (
 # the older-daemon wording as their data; the renderers swap it through
 # `localise_it87_rename_note` for whichever daemon is connected.
 _IT87_V2_RENAME_NOTE = (
-    "⚠ it87-dkms-git builds from 2026-09-09 (it87 v2.0) rename Gigabyte chips "
+    "⚠ Out-of-tree it87 builds from 2026-09-09 (it87 v2.0) rename Gigabyte chips "
     "after the board's ID (e.g. it8696_a008090a), which changes every fan "
     "header's id: re-check pump roles, fan names and profile members after "
     "rebuilding. To keep the old names, build commit c567739 (2026-08-25) — the "
@@ -303,7 +305,7 @@ _IT87_V2_RENAME_NOTE = (
     "Z890/B860 boards). Updating the daemon is the better fix."
 )
 _IT87_V2_RENAME_HANDLED_NOTE = (
-    "it87-dkms-git builds from 2026-09-09 (it87 v2.0) name Gigabyte chips after "
+    "Out-of-tree it87 builds from 2026-09-09 (it87 v2.0) name Gigabyte chips after "
     "the board's ID (e.g. it8696_a008090a). The connected daemon strips that "
     "suffix, so fan header ids, pump roles, fan names and profile members stay "
     "the same across a rebuild. Profile members already lost to a rebuild made "
@@ -356,7 +358,7 @@ def _dual_chip_false_alarm_paragraph() -> str:
 
 
 _GB_RECLAIM_NOTE = (
-    "If a header keeps being taken back: keep it87-dkms-git current — PR #128 "
+    "If a header keeps being taken back: keep the out-of-tree it87 driver current — PR #128 "
     "(2026-08-24) addressed the firmware logic that retakes headers on IT8689E, "
     "IT8688E revision 2 and the secondary IT879x chips — and let the daemon's "
     "watchdog re-assert manual mode. If a header still will not hold, use another "
@@ -393,7 +395,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="nct6799",
         driver_name="nct6775",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/nct6775.html",
         known_issues=[
             "The in-kernel driver reports several parts under this one name: "
@@ -424,7 +426,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="nct6798",
         driver_name="nct6775",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/nct6775.html",
         known_issues=[
             "Driver class 0xd428 (a real chip usually reports 0xd42b) — distinct "
@@ -446,7 +448,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="nct6796",
         driver_name="nct6775",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/nct6775.html",
         known_issues=[
             "A chip reported as nct6796 is the plain NCT6796D (e.g. ASRock Z790 "
@@ -462,7 +464,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="nct679",
         driver_name="nct6775",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/nct6775.html",
         bios_tips=[
             "Under nct6775 the pwm files are always writable and the daemon sets "
@@ -482,7 +484,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="nct677",
         driver_name="nct6775",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/nct6775.html",
         known_issues=[_NCT6775_ACPI_CONFLICT],
         notes="Nuvoton NCT677x series — mainline kernel support.",
@@ -491,7 +493,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="nct6686",
         driver_name="nct6683",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/nct6683.html",
         bios_tips=[
             "With an out-of-tree driver bound (asrock-nct6683 or nct6687d): if PWM "
@@ -516,8 +518,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             "several ASRock NCT6686D boards with MSI's register map — its fan "
             "labels are MSI's, so check which header is which before trusting a "
             "'Pump Fan' or 'CPU Fan' label. s25g5d4/nct6686d was only ever tested "
-            "on the A620I Lightning WiFi. None of the three has an AUR package "
-            "except nct6687d-dkms-git.",
+            "on the A620I Lightning WiFi.",
         ],
         notes=(
             "Nuvoton NCT6686D — most ASRock AM5 Steel Legend boards (not the "
@@ -531,7 +532,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="nct6683",
         driver_name="nct6683",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/nct6683.html",
         bios_tips=[
             "MSI boards: if monitoring works but PWM writes do not, try the "
@@ -545,9 +546,9 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             "It never enables PWM writes except on Mitac OEM systems: the pwm "
             "files are read-only and writes are refused even as root. That is by "
             "driver design, not a BIOS setting.",
-            "MSI boards: nct6687d-dkms-git is the fix — and blacklist nct6683 "
-            "when you install it, or both can bind the same chip and garble the "
-            "readings.",
+            "MSI boards: the out-of-tree nct6687d (Fred78290/nct6687d) is the fix "
+            "— and blacklist nct6683 when you install it, or both can bind the same "
+            "chip and garble the readings.",
         ],
         notes=(
             "Nuvoton NCT6683 family — in-kernel driver covering NCT6683D/NCT6686D/"
@@ -558,7 +559,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="nct6687",
         driver_name="nct6687",
         in_mainline=False,
-        driver_package="nct6687d-dkms-git (AUR)",
+        driver_source="Fred78290/nct6687d",
         driver_url="https://github.com/Fred78290/nct6687d",
         known_issues=[
             "Out-of-tree driver — must be rebuilt after kernel updates (DKMS handles this).",
@@ -589,7 +590,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it8688",
         driver_name="it87",
         in_mainline=False,
-        driver_package="it87-dkms-git (AUR)",
+        driver_source="frankcrawford/it87",
         driver_url="https://github.com/frankcrawford/it87",
         bios_tips=[
             "Gigabyte Smart Fan 5: for a 4-pin fan set 'FAN Control Mode' to PWM.",
@@ -614,10 +615,10 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it8689",
         driver_name="it87",
         in_mainline=False,
-        driver_package="it87-dkms-git (AUR)",
+        driver_source="frankcrawford/it87",
         driver_url="https://github.com/frankcrawford/it87",
         bios_tips=[
-            "Update it87-dkms-git before touching the BIOS: since PR #128 "
+            "Update the out-of-tree it87 driver before touching the BIOS: since PR #128 "
             "(2026-08-24) the driver disables the IT8689E's extra curve vectors "
             "itself, and two boards have been reported working with no BIOS "
             "changes at all.",
@@ -668,7 +669,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it8696",
         driver_name="it87",
         in_mainline=False,
-        driver_package="it87-dkms-git (AUR)",
+        driver_source="frankcrawford/it87",
         driver_url="https://github.com/frankcrawford/it87",
         # Curator 2026-09-24 (DEC-421, BRD-01): the "all temperature points
         # identical, 0% PWM except the final point" recipe this entry used to
@@ -699,7 +700,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it8686",
         driver_name="it87",
         in_mainline=False,
-        driver_package="it87-dkms-git (AUR)",
+        driver_source="frankcrawford/it87",
         driver_url="https://github.com/frankcrawford/it87",
         bios_tips=[
             _GB_RECLAIM_NOTE,
@@ -715,7 +716,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it8625",
         driver_name="it87",
         in_mainline=False,
-        driver_package="it87-dkms-git (AUR)",
+        driver_source="frankcrawford/it87",
         driver_url="https://github.com/frankcrawford/it87",
         notes=(
             "ITE IT8625E — requires the out-of-tree driver. There has been no "
@@ -737,7 +738,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it87952",
         driver_name="it87",
         in_mainline=True,
-        driver_package="linux (built-in); control needs it87-dkms-git (AUR)",
+        driver_source="linux (built-in); control needs frankcrawford/it87",
         driver_url="https://github.com/frankcrawford/it87",
         known_issues=[
             "Mainline kernel ≥ 6.3 enumerates IT87952E (sensors/RPM), but on "
@@ -758,7 +759,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         notes=(
             "ITE IT87952E — secondary chip on dual-IO Gigabyte boards. "
             "Enumeration is mainline ≥ 6.3; reliable fan control comes from a "
-            "current it87-dkms-git build."
+            "current frankcrawford/it87 build."
         ),
     ),
     # DEC-144: IT8665E (X399/TR4-era boards, e.g. ASUS ROG Zenith Extreme)
@@ -772,7 +773,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it8665",
         driver_name="it87",
         in_mainline=False,
-        driver_package="it87-dkms-git (AUR)",
+        driver_source="frankcrawford/it87",
         driver_url="https://github.com/frankcrawford/it87",
         known_issues=[
             "The 2026-03+ mmio=on default BROKE IT8665E fan control: PWM writes "
@@ -781,7 +782,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             "issue #106).",
             "Fix: update the driver — frankcrawford/it87 PR #120 (merged "
             "2026-07-22) removes the MMIO path for IT8665E, so rebuilding "
-            "it87-dkms-git fixes the fan with no kernel parameter. Fallback for "
+            "the out-of-tree it87 driver fixes the fan with no kernel parameter. Fallback for "
             "builds older than the merge: create /etc/modprobe.d/it87.conf with "
             "'options it87 mmio=off' and reboot.",
         ],
@@ -803,7 +804,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it8622",
         driver_name="it87",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/it87.html",
         notes="ITE IT8622E — supported in the mainline kernel it87 driver.",
     ),
@@ -832,7 +833,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it8883",
         driver_name="it87",
         in_mainline=False,
-        driver_package="it87-dkms-git (AUR) — installed, but see below",
+        driver_source="frankcrawford/it87 — installed, but see below",
         # NOT issue #64: it is where the bridge reading comes from but was
         # closed in 2025-12, and pointing a user at a closed issue as their
         # entry point is the `HOST-c` defect (citing an upstream issue as
@@ -893,13 +894,13 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             chip_prefix=prefix,
             driver_name="it87",
             in_mainline=False,
-            driver_package="it87-dkms-git (AUR)",
+            driver_source="frankcrawford/it87",
             driver_url="https://github.com/frankcrawford/it87",
             known_issues=[
                 f"{label} is not in the mainline it87 driver's chip list "
                 "(checked against kernel 7.3-rc7 on 2026-10-15), so the "
                 "in-kernel driver will not bind to it. Fan control requires the "
-                "out-of-tree it87-dkms-git build.",
+                "out-of-tree frankcrawford/it87 build.",
                 *extra,
             ],
             notes=(
@@ -950,7 +951,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             chip_prefix=prefix,
             driver_name="it87",
             in_mainline=True,
-            driver_package="linux (built-in)",
+            driver_source="linux (built-in)",
             driver_url="https://www.kernel.org/doc/html/latest/hwmon/it87.html",
             known_issues=[
                 "If the kernel log says 'Detected broken BIOS defaults, "
@@ -972,7 +973,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it87",
         driver_name="it87",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/it87.html",
         known_issues=[
             "This is the fallback entry for older ITE parts that mainline has "
@@ -980,7 +981,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             "8771/8772/8781/8782/8783/8786/8790/8792/8795). If your chip is NOT one of "
             "those, do not read 'mainline' as settled: ITE ships new Super-I/O "
             "parts faster than the in-kernel driver adopts them, and several "
-            "current ones need the out-of-tree it87-dkms-git build. Check your "
+            "current ones need the out-of-tree frankcrawford/it87 build. Check your "
             "exact model against the kernel's it87 documentation before "
             "concluding no driver install is needed.",
         ],
@@ -993,7 +994,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="f71882",
         driver_name="f71882fg",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/f71882fg.html",
         notes="Fintek F71882FG — mainline kernel support.",
     ),
@@ -1001,7 +1002,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="f718",
         driver_name="f71882fg",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/f71882fg.html",
         notes=(
             "Fintek F718xx series — mainline kernel support (F71805F, F71806F and "
@@ -1016,7 +1017,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             chip_prefix=prefix,
             driver_name="f71805f",
             in_mainline=True,
-            driver_package="linux (built-in)",
+            driver_source="linux (built-in)",
             driver_url="https://www.kernel.org/doc/html/latest/hwmon/f71805f.html",
             notes=f"Fintek {label} — mainline kernel support, in the f71805f driver.",
         )
@@ -1040,7 +1041,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             chip_prefix=prefix,
             driver_name="f71882fg",
             in_mainline=True,
-            driver_package="linux (built-in)",
+            driver_source="linux (built-in)",
             driver_url="https://docs.kernel.org/hwmon/f71882fg.html",
             known_issues=list(issues),
             notes=f"Fintek {label} — mainline kernel support, in the f71882fg driver.",
@@ -1065,7 +1066,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             chip_prefix=prefix,
             driver_name="w83627ehf",
             in_mainline=True,
-            driver_package="linux (built-in)",
+            driver_source="linux (built-in)",
             driver_url="https://docs.kernel.org/hwmon/w83627ehf.html",
             notes=f"Winbond {label} — mainline kernel support, in the w83627ehf driver.",
         )
@@ -1081,7 +1082,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             chip_prefix=prefix,
             driver_name="w83627hf",
             in_mainline=True,
-            driver_package="linux (built-in)",
+            driver_source="linux (built-in)",
             driver_url="https://docs.kernel.org/hwmon/w83627hf.html",
             known_issues=[
                 "The plain W83627HF publishes no pwm_enable file — the driver "
@@ -1104,7 +1105,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="smsc47b397",
         driver_name="smsc47b397",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://docs.kernel.org/hwmon/smsc47b397.html",
         known_issues=[
             "Monitoring only: the driver exposes temperatures and fan "
@@ -1119,7 +1120,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="smsc47m",
         driver_name="smsc47m1",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://docs.kernel.org/hwmon/smsc47m1.html",
         known_issues=[
             "The driver creates fan and pwm files only for the pins the chip's "
@@ -1137,7 +1138,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="smsc47m192",
         driver_name="smsc47m192",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://docs.kernel.org/hwmon/smsc47m192.html",
         known_issues=[
             "Monitoring only: voltages and temperatures. The kernel "
@@ -1154,7 +1155,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             chip_prefix=prefix,
             driver_name="dme1737",
             in_mainline=True,
-            driver_package="linux (built-in)",
+            driver_source="linux (built-in)",
             driver_url="https://docs.kernel.org/hwmon/dme1737.html",
             known_issues=[
                 "pwmN_enable 0 drives the fan output at 100 % (it does not stop "
@@ -1174,7 +1175,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="pc8736",
         driver_name="pc87360",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://docs.kernel.org/hwmon/pc87360.html",
         known_issues=[
             "The driver publishes no pwm_enable file, and a pwm file only for a "
@@ -1191,7 +1192,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="pc87427",
         driver_name="pc87427",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://docs.kernel.org/hwmon/pc87427.html",
         known_issues=[
             "Fan control is only partly supported: a header can be returned to "
@@ -1203,7 +1204,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="sch5627",
         driver_name="sch5627",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/sch5627.html",
         notes="SMSC SCH5627 — mainline kernel support.",
     ),
@@ -1211,7 +1212,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="sch5636",
         driver_name="sch5636",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/sch5636.html",
         notes="SMSC SCH5636 — mainline kernel support.",
     ),
@@ -1224,7 +1225,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             chip_prefix=prefix,
             driver_name="asus_ec_sensors",
             in_mainline=True,
-            driver_package="linux (built-in)",
+            driver_source="linux (built-in)",
             driver_url="https://docs.kernel.org/hwmon/asus_ec_sensors.html",
             known_issues=[
                 "Provides extra board sensors (temperatures, RPMs) via ASUS EC "
@@ -1249,7 +1250,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="asus_wmi_sensors",
         driver_name="asus_wmi_sensors",
         in_mainline=True,
-        driver_package="linux (built-in)",
+        driver_source="linux (built-in)",
         driver_url="https://docs.kernel.org/hwmon/asus_wmi_sensors.html",
         bios_tips=[
             "The kernel warns that some ASUS BIOS WMI implementations are buggy — "
@@ -1282,7 +1283,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             chip_prefix=prefix,
             driver_name="asus_atk0110",
             in_mainline=True,
-            driver_package="linux (built-in)",
+            driver_source="linux (built-in)",
             # No kernel.org hwmon doc page exists for asus_atk0110 (verified
             # absent from https://docs.kernel.org/hwmon/index.html, again at
             # 7.3-rc4). Link to the mainline driver source instead.
@@ -1330,10 +1331,10 @@ def format_driver_status(chip_name: str, loaded: bool) -> str:
     if loaded and guidance.in_mainline:
         return f"{guidance.driver_name} loaded (mainline kernel)"
     if loaded and not guidance.in_mainline:
-        return f"{guidance.driver_name} loaded (out-of-tree: {guidance.driver_package})"
+        return f"{guidance.driver_name} loaded (out-of-tree: {guidance.driver_source})"
     if not loaded and guidance.in_mainline:
         return f"{guidance.driver_name} not loaded — try: sudo modprobe {guidance.driver_name}"
-    return f"{guidance.driver_name} not loaded — install {guidance.driver_package}"
+    return f"{guidance.driver_name} not loaded — install {package_hint(guidance.driver_name)}"
 
 
 def format_bound_driver_status(
@@ -1380,7 +1381,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "across five steps on the pre-merge patch; since the merge a B660M "
             "GAMING AC DDR4 (rev 1, after a reboot) and a B550M DS3H R2 (rev 2) "
             "report working, and a B650 Eagle AX needed no BIOS change at all. "
-            "Update it87-dkms-git first, reboot, then verify with Test PWM "
+            "Update the out-of-tree it87 driver first, reboot, then verify with Test PWM "
             "Control.",
             _IT87_V2_RENAME_NOTE,
             "Only on a build older than PR #128: the fork's old stopgap was a "
@@ -1429,7 +1430,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "Note: the secondary ITE controller (IT8792E/IT87952E) was historically "
             "read-only on some of these boards, but that is not a fixed property — "
             "the ISA-bridge MMIO path (PR #95/#102) and the manual-mode fixes in "
-            "PR #128 cover IT8792/IT8795/IT87952. Keep it87-dkms-git current and "
+            "PR #128 cover IT8792/IT8795/IT87952. Keep the out-of-tree it87 driver current and "
             "verify per-header writability rather than assuming the secondary chip "
             "cannot be controlled.",
         ],
@@ -1467,7 +1468,8 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "it never enables PWM writes on MSI boards.",
             "Check which driver is bound: ls -l /sys/class/hwmon/hwmon*/device/"
             "driver. The out-of-tree nct6687d always makes its pwm files writable.",
-            "Fix: install nct6687d-dkms-git and blacklist the in-kernel driver: "
+            "Fix: install the out-of-tree nct6687d (Fred78290/nct6687d) and "
+            "blacklist the in-kernel driver: "
             "echo 'blacklist nct6683' | sudo tee /etc/modprobe.d/nct6683_blacklist.conf "
             "— then reboot. With both loaded they can bind the same chip and "
             "garble the readings.",
@@ -1581,8 +1583,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "writable only for Mitac OEM customer IDs and provides no pwm_enable "
             "attribute, so there is no in-kernel path to fan control here. Changing "
             "BIOS settings will not help; changing driver will.",
-            "Out-of-tree options (board-specific; none but nct6687d has an AUR "
-            "package):\n"
+            "Out-of-tree options (board-specific):\n"
             "  1. asrock-nct6683 (github.com/branchmispredictor/asrock-nct6683) — "
             "enables PWM on the boards it lists by exact name (B550 Taichi and "
             "Razer Edition, A620I / B650I Lightning WiFi, X570 Creator, X670E "
@@ -1639,7 +1640,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
         severity="info",
         summary="Gigabyte ITE — prefer driver-local conflict resolution over system-wide",
         details=[
-            "Keep it87-dkms-git current before reaching for parameters: "
+            "Keep the out-of-tree it87 driver current before reaching for parameters: "
             "2026-03+ builds default MMIO on, which avoids the ACPI I/O port "
             "claim on the IT8688E, IT8689E, IT8696E and IT8698E "
             "(frankcrawford/it87 issue #81 discussion), and master carries a "
@@ -1859,7 +1860,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "carries no fan header at all — the B450 AORUS PRO's five headers "
             "are all on the IT8686E — so a secondary with no fans is normal there.",
             "If the System State page reports a missing chip, update "
-            "it87-dkms-git first, then reboot. 2026-03+ builds default "
+            "the out-of-tree it87 driver first, then reboot. 2026-03+ builds default "
             "mmio=on (frankcrawford/it87 PR #95/#102), which reaches the "
             "secondary chip's extra headers and its fan control; it does not "
             "decide whether the chip is found — that happens over the "
@@ -1886,7 +1887,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "fan headers. Single-chip variants (B550M AORUS PRO, B550I AORUS "
             "PRO AX) ship only the IT8688E.",
             "If the System State page reports a missing secondary chip, "
-            "update it87-dkms-git first, then reboot. 2026-03+ builds default "
+            "update the out-of-tree it87 driver first, then reboot. 2026-03+ builds default "
             "mmio=on (frankcrawford/it87 PR #95/#102), which reaches the "
             "secondary chip's extra headers and its fan control; it does not "
             "decide whether the chip is found — that happens over the "
@@ -2140,7 +2141,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "secondary carries the remaining headers. Some — the X870E AORUS "
             "ELITE WIFI7 and Z890 AORUS ELITE WIFI7 — have the IT8696E only.",
             "Confirmed working: X870E AORUS ELITE X3D reports both chips with "
-            "control working on it87-dkms-git (frankcrawford/it87 issue #89).",
+            "control working on the out-of-tree it87 driver (frankcrawford/it87 issue #89).",
             "Seen failing on X870E AORUS MASTER: one hwmon device appears "
             "instead of two, costing 3 of 8 fan headers and 3 of 9 "
             "temperatures while it lasts. The cause was an ITE eSPI-to-LPC "
@@ -2149,7 +2150,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "views of one blocked state, and the driver logs neither at the "
             "default log level.",
             "On Intel Z890 / B860 boards, rule out the driver first: "
-            "it87-dkms-git builds from 2026-09-09 to 2026-10-01 can fail to load "
+            "out-of-tree it87 builds from 2026-09-09 to 2026-10-01 can fail to load "
             "there ('Invalid argument' after an 'H2RAM set_slot … failed' line) "
             "or find the IT8696E and register nothing (frankcrawford/it87 "
             "#139, #138). PR #140 fixed both on 2026-10-02 — rebuild before "
@@ -2184,7 +2185,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "This board's firmware claims the Super-I/O I/O ports via ACPI, "
             "so `modprobe it87` can fail with 'Device or resource busy' "
             "(frankcrawford/it87 issue #92; IT8689E rev 2 at 0x0a40).",
-            "Update it87-dkms-git first: 2026-03+ builds default MMIO on, "
+            "Update the out-of-tree it87 driver first: 2026-03+ builds default MMIO on, "
             "which per the same issue sidesteps the port conflict on this "
             "chip.",
             "If the bind still fails (or on older builds), use the "
@@ -2337,7 +2338,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "only, and the AMD X670E AORUS boards pair their IT8689E with an "
             "IT8792E instead.",
             "If the System State page reports a missing secondary chip, "
-            "update it87-dkms-git first, then reboot. 2026-03+ builds default "
+            "update the out-of-tree it87 driver first, then reboot. 2026-03+ builds default "
             "mmio=on (PR #95/#102), which reaches the secondary chip's extra "
             "headers and its fan control; it does not decide whether the chip "
             "is found. On older builds set `options it87 mmio=on` in "
@@ -2355,7 +2356,7 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "'found it8'`). The clearest hardware report for the fix is on an "
             "Intel board of exactly this family — a Z790 AORUS MASTER rev 1.0 "
             "with IT8689E revision 1, where fan speed tracked duty across five "
-            "steps. Update it87-dkms-git, then verify: that report tested the "
+            "steps. Update the out-of-tree it87 driver, then verify: that report tested the "
             "patch before it was merged.",
         ],
     ),
@@ -2379,11 +2380,11 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "owner's kernel log shows the IT8696E at 0xa40 and the IT87952E at "
             "0xb10 (frankcrawford/it87 #139).",
             "If chips are missing, check the driver build first: "
-            "it87-dkms-git builds from 2026-09-09 to 2026-10-01 can fail to "
+            "out-of-tree it87 builds from 2026-09-09 to 2026-10-01 can fail to "
             "load on these boards ('Invalid argument' after an 'H2RAM "
             "set_slot … failed' line, #139) or find the IT8696E and register "
             "nothing (B860I AORUS PRO ICE, #138). PR #140 fixed both on "
-            "2026-10-02: rebuild it87-dkms-git and reboot. On such a build, "
+            "2026-10-02: rebuild the out-of-tree it87 driver and reboot. On such a build, "
             "'options it87 mmio=off' (plus ignore_resource_conflict=1 if the "
             "bind is then refused) lets it load, but the IT87952E loses its "
             "extra headers (SYS_FAN7/8_PUMP on the Z890 AORUS MASTER). Do not "
@@ -2737,9 +2738,9 @@ def verification_guidance(
                 "PWM writes were accepted but fan speed did not change. On Gigabyte "
                 "IT8689E Rev 1 boards (e.g. X670E Aorus Master), driver builds older "
                 "than 2026-08-24 let the EC's vector-curve control override manual "
-                "mode while a normal BIOS fan curve was active. Update it87-dkms-git "
-                "first: the driver fix (frankcrawford/it87 PR #128) merged 2026-08-24 "
-                "and three users reported working IT8689E control the day before, "
+                "mode while a normal BIOS fan curve was active. Update the out-of-tree "
+                "it87 driver first: the driver fix (frankcrawford/it87 PR #128) merged "
+                "2026-08-24 and three users reported working IT8689E control the day before, "
                 "including on Rev 1, and more boards have reported working since the "
                 "merge. Re-run this test after updating to confirm on your own board "
                 "rather than assume. If it still fails, use a different fan header "
@@ -3049,13 +3050,14 @@ def dual_chip_warning_html(
         f"<b>First, is the driver loaded?</b> Run "
         f"<code>sudo dmesg | grep -i it87</code>. A healthy chip prints a "
         f"<i>Found IT8xxxE chip</i> line. No <code>it87</code> lines at all means "
-        f"the out-of-tree driver is not loaded: install <code>it87-dkms-git</code>, "
+        f"the out-of-tree driver is not loaded: install "
+        f"{escape(package_hint('it87'))}, "
         f"reboot, then click <i>Rescan Hardware</i> (in the footer). On an Intel "
         f"Z890 / B860 board, an <i>H2RAM … failed</i> line, a module that "
         f"will not load (<i>Invalid argument</i>), or a <i>Found</i> line with "
         f"no chip appearing, means a driver build from 2026-09-09 to "
-        f"2026-10-01: rebuild <code>it87-dkms-git</code> (fixed 2026-10-02, "
-        f"it87 PR #140) and reboot before the steps below.<br><br>"
+        f"2026-10-01, fixed on 2026-10-02 (it87 PR #140): "
+        f"{escape(update_hint('it87'))} and reboot before the steps below.<br><br>"
         f"<b>If the driver is loaded and a chip is still missing, work down this "
         f"list, re-checking after each step:</b><br>"
         f"&nbsp;&nbsp;1. Stop whatever is unlocking the Super-I/O: do not run "

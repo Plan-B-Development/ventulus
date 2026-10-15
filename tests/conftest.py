@@ -447,6 +447,19 @@ def _reset_it87_rename_gate():
 
 
 @pytest.fixture(autouse=True)
+def _pin_install_family():
+    """DEC-499: driver install steps follow this machine's distribution, read
+    from os-release once per process. Pin every test to the generic family so
+    no assertion depends on the host (CachyOS on a developer box, Ubuntu on CI,
+    Debian in the distribution legs); a test about one family sets it itself."""
+    from ventulus.knowledge import driver_install
+
+    driver_install.set_install_family(driver_install.InstallFamily.OTHER)
+    yield
+    driver_install.set_install_family(driver_install.InstallFamily.OTHER)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_libsensors(monkeypatch):
     """Keep the host's ``/etc/sensors.d`` out of every test (DEC-229).
 

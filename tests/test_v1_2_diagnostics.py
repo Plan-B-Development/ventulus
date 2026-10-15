@@ -560,7 +560,7 @@ class TestVerifyTimingConstantsDec101:
 #
 # The retired Diagnostics dual-chip warning banner moved to the System State
 # issue cards, which build their detail from ``dual_chip_warning_html``. The
-# banner's unique assertion — the it87-dkms-git driver update must precede the
+# banner's unique assertion — the out-of-tree it87 driver update must precede the
 # legacy ``mmio=on`` fallback — is pinned here on that pure builder (the
 # pretty-name / None paths are covered by TestDualChipHelpersDec101).
 # ---------------------------------------------------------------------------
@@ -585,9 +585,9 @@ class TestDualChipRemediationOrderingDec144:
         assert out is not None
         assert "IT87952E" in out or "it87952" in out.lower()
         assert "X870E AORUS MASTER" in out
-        # The driver package is still named — it is a real remedy for the two
-        # cases that have one — but never as the answer to the unreachable case.
-        assert "it87-dkms-git" in out
+        # The driver is still named — it is a real remedy for the two cases
+        # that have one — but never as the answer to the unreachable case.
+        assert "frankcrawford/it87" in out
         lowered = out.lower()
         assert "dmesg" in lowered, "the alert must keep the driver-loaded check (DEC-421)"
         assert "power" in lowered and ("wall" in lowered or "power cut" in lowered), (

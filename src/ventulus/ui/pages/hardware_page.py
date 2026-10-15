@@ -1647,20 +1647,14 @@ class HardwarePage(QWidget):
             reason.setWordWrap(True)
             reason.setTextFormat(Qt.TextFormat.PlainText)
             section.add_widget(reason)
-        if row.copy_command:
-            cmd_holder = QWidget()
-            cl = QHBoxLayout(cmd_holder)
-            cl.setContentsMargins(0, 0, 0, 0)
-            cl.setSpacing(8)
-            mono = QLabel(row.copy_command)
-            mono.setProperty("class", "MonoCommand")
-            mono.setTextFormat(Qt.TextFormat.PlainText)
-            mono.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            cl.addWidget(mono, 1)
-            copy = make_button("Copy command", "ghost", object_name=f"Hardware_CmdCopy_{row.chip}")
-            copy.clicked.connect(lambda _=False, c=row.copy_command: _copy_to_clipboard(c))
-            cl.addWidget(copy)
-            section.add_widget(cmd_holder)
+        if row.copy_command and row.command_blocks:
+            # The daemon's hint is prose wherever the GUI has commands of its own
+            # (docs/08: shown, never executed); a copy button would copy a sentence.
+            section.add_widget(_note_label(row.copy_command, f"Hardware_Hint_{row.chip}"))
+        elif row.copy_command:
+            section.add_widget(
+                _command_row(row.copy_command, "Copy command", f"Hardware_CmdCopy_{row.chip}")
+            )
         if row.mainline_text:
             ml = StatusPill(
                 row.mainline_text,
@@ -1668,6 +1662,17 @@ class HardwarePage(QWidget):
                 object_name=f"Hardware_Pill_mainline_{row.chip}",
             )
             section.add_widget(ml)
+        # DEC-499: the daemon's hint is distribution-neutral; the GUI knows which
+        # distribution it runs on and gives that one's commands.
+        for block in row.command_blocks:
+            section.add_widget(_note_label(block.title, f"Hardware_{block.key}Title_{row.chip}"))
+            section.add_widget(
+                _command_row(
+                    block.commands, block.button_label, f"Hardware_{block.key}Copy_{row.chip}"
+                )
+            )
+        for i, note in enumerate(row.install_notes):
+            section.add_widget(_note_label(note, f"Hardware_InstallNote_{row.chip}_{i}"))
         for note in row.risk_notes:
             rn = QLabel(f"⚠ {note}")
             rn.setProperty("class", "WarningChip")
@@ -3095,6 +3100,23 @@ def _note_label(text: str, object_name: str) -> QLabel:
     label.setWordWrap(True)
     label.setTextFormat(Qt.TextFormat.PlainText)
     return label
+
+
+def _command_row(text: str, button_label: str, button_object_name: str) -> QWidget:
+    """Selectable monospace command text with a copy button beside it."""
+    holder = QWidget()
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(8)
+    mono = QLabel(text)
+    mono.setProperty("class", "MonoCommand")
+    mono.setTextFormat(Qt.TextFormat.PlainText)
+    mono.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    row.addWidget(mono, 1)
+    copy = make_button(button_label, "ghost", object_name=button_object_name)
+    copy.clicked.connect(lambda _=False, c=text: _copy_to_clipboard(c))
+    row.addWidget(copy)
+    return holder
 
 
 def _copy_to_clipboard(text: str) -> None:

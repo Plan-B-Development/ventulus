@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ventulus.knowledge.driver_install import package_hint, update_hint
 from ventulus.services.duty_drift import DutyDriftState, drift_problems
 from ventulus.ui.hwmon_guidance import (
     REMEDIATION_DISCLAIMER,
@@ -271,7 +272,7 @@ def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
                     "because the latched bridge keeps standby power and a reboot "
                     "may not clear it. If 'sudo dmesg | grep -i it87' shows no "
                     "it87 lines at all, the driver is not loaded — install "
-                    "it87-dkms-git first. Full steps in the guide below."
+                    f"{package_hint('it87')} first. Full steps in the guide below."
                 ),
                 "doc_url": _MISSING_HEADERS_URL,
                 "doc_title": "Manual: recovering missing fan headers",
@@ -286,8 +287,9 @@ def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
     if diag.acpi_conflicts:
         has_it87 = any(c.conflicts_with_driver == "it87" for c in diag.acpi_conflicts)
         fix = (
-            "Update it87-dkms-git first (2026-03+ builds avoid the port "
-            "claim via MMIO on the IT8688E, IT8689E, IT8696E and IT8698E); "
+            f"Update the out-of-tree it87 driver first ({update_hint('it87')}): "
+            "2026-03+ builds avoid the port claim via MMIO on the IT8688E, "
+            "IT8689E, IT8696E and IT8698E; "
             "if the bind still fails, add "
             "'options it87 ignore_resource_conflict=1' to "
             "/etc/modprobe.d/it87.conf (preferred for ITE chips), or add "
@@ -334,7 +336,8 @@ def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
                 "fix": (
                     "The daemon's watchdog re-asserts manual mode each time. If a "
                     "header keeps being taken back: on Gigabyte boards keep "
-                    "it87-dkms-git current (its 2026-08-24 fixes address the "
+                    "the out-of-tree it87 driver current "
+                    f"({update_hint('it87')}; its 2026-08-24 fixes address the "
                     "firmware logic that retakes headers); on MSI "
                     "B840/B850/B860/X870/Z890 boards load nct6687 with "
                     "msi_fan_brute_force=1; otherwise see the board notes below. "

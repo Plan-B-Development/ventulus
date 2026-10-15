@@ -789,7 +789,7 @@ class RegistryCard(Card):
         # viewport at the default window size, so `Headers` was clipped to
         # "Hea…" on the shipped release screenshot. The surplus all sits in
         # `Driver Status`, whose widest real value is a whole sentence
-        # ("it87 loaded (out-of-tree: it87-dkms-git (AUR))", 307px), and
+        # (then "it87 loaded (out-of-tree: <the package>)", 307px), and
         # `ResizeToContents` sizes a column to the longest cell in it — so that
         # one string set the table's width and every other column paid for it.
         # Stretching it instead hands it whatever is left, the default delegate

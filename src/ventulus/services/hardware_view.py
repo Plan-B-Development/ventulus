@@ -16,10 +16,11 @@ real per-chip fields (no fabricated per-channel/address/poll-age columns).
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from ventulus.api.models import HardwareReadiness, SuperIoReport
+from ventulus.knowledge.driver_install import install_guide
 from ventulus.ui.cooling_readiness import GROUP_ORDER, build_readiness_items, group_for
 from ventulus.ui.readiness_merge import MergedReadinessItem
 from ventulus.ui.widgets.inventory_readiness_view import _AUTO_EXPAND_RANK, _severity_chip
@@ -137,6 +138,16 @@ class RecommendedActionVM:
 
 
 @dataclass(frozen=True)
+class CommandBlockVM:
+    """One copyable block of shell commands, with its heading (DEC-499)."""
+
+    key: str  # objectName part: "Install" or "Update"
+    title: str
+    commands: str
+    button_label: str
+
+
+@dataclass(frozen=True)
 class SuperIoRowVM:
     chip: str
     vendor: str
@@ -158,6 +169,11 @@ class SuperIoRowVM:
     evidence_text: str = ""
     #: The raw tokens, for callers that want to branch rather than render.
     evidence: tuple[str, ...] = ()
+    #: GUI-authored steps for the chip's out-of-tree driver on this machine's
+    #: distribution (DEC-499), in the order to show them. The daemon's `load_hint`
+    #: stays distribution-neutral; these say how. Empty for an in-kernel driver.
+    command_blocks: tuple[CommandBlockVM, ...] = ()
+    install_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -301,12 +317,16 @@ def _superio_row(c) -> SuperIoRowVM:
     mainline_text = ""
     mainline_state = "neutral"
     risk: tuple[str, ...] = ()
+    blocks: tuple[CommandBlockVM, ...] = ()
+    install_notes: tuple[str, ...] = ()
     if rec is not None:
         mainline_text = (
             "in mainline kernel" if rec.in_mainline else "needs out-of-tree (DKMS) driver"
         )
         mainline_state = "ok" if rec.in_mainline else "warn"
         risk = tuple(rec.risk_notes)
+        if not rec.in_mainline:
+            blocks, install_notes = _install_steps(rec.module, c.module_loaded)
     return SuperIoRowVM(
         evidence_text=_evidence_text(c.evidence),
         evidence=tuple(c.evidence),
@@ -325,7 +345,41 @@ def _superio_row(c) -> SuperIoRowVM:
         mainline_state=mainline_state,
         risk_notes=risk,
         caveats=tuple(c.caveats),
+        command_blocks=blocks,
+        install_notes=install_notes,
     )
+
+
+def _install_steps(
+    module: str, module_loaded: bool
+) -> tuple[tuple[CommandBlockVM, ...], tuple[str, ...]]:
+    """Install and update blocks for an out-of-tree *module*, with their notes.
+
+    The daemon also recommends for a driver that is loaded but bound nothing,
+    and there its hint says reinstalling the same build changes nothing: that
+    user needs the update, not a first install (`HOST-d`). Only where the kernel
+    has a module of the same name (it87) can the loaded one still be in-kernel,
+    so that case keeps the install block, second and labelled for it.
+    """
+    guide = install_guide(module)
+    if guide is None:
+        return (), ()
+    install = CommandBlockVM(
+        "Install", f"{guide.title}:", guide.install_text, "Copy install commands"
+    )
+    update = CommandBlockVM(
+        "Update", "To update it later:", guide.update_text, "Copy update commands"
+    )
+    all_notes = (*guide.install_notes, *guide.notes)
+    if not module_loaded:
+        return (install, update), all_notes
+    project = guide.driver.project
+    if guide.driver.in_kernel_namesake:
+        return (
+            replace(update, title=f"Already running {project}? Update it:"),
+            replace(install, title=f"Still on the in-kernel {module}? {guide.title}:"),
+        ), all_notes
+    return (replace(update, title=f"{project} is loaded. To update it:"),), guide.notes
 
 
 #: `SuperIoChip.evidence` tokens in the daemon's discovery order, mapped to

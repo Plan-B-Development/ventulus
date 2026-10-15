@@ -435,7 +435,7 @@ class DashboardPage(QWidget):
         next_msg = QLabel(
             "1. Check that the daemon is running: systemctl status ventulusd\n"
             "2. Missing motherboard sensor driver? Open the Hardware page — its "
-            "readiness report names the exact kernel module or AUR package your "
+            "readiness report names the exact kernel module or driver your "
             "board needs (the manual's Setup Checklist page has the full ordered "
             "walkthrough)\n"
             "3. Using an OpenFan controller? The daemon service opens the serial port "

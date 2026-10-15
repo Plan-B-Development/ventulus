@@ -233,13 +233,61 @@ def test_superio_table_real_columns(qtbot):
 def test_copy_command_to_clipboard(qtbot):
     from PySide6.QtWidgets import QApplication
 
+    # An in-kernel recommendation: there the daemon's hint is a real command.
+    chip = _unbound_chip("it8622")
+    chip.recommendation.in_mainline = True
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(_hw(superio=SuperIoReport(arch_supported=True, chips=[chip])))
+    btn = page.findChild(QPushButton, "Hardware_CmdCopy_it8622")
+    btn.click()
+    assert QApplication.clipboard().text() == "sudo modprobe it87"
+
+
+def test_out_of_tree_chip_shows_this_familys_install_steps(qtbot):
+    """DEC-499: the daemon's hint is distribution-neutral; the page adds the
+    commands for the distribution it runs on, each block copyable."""
+    from PySide6.QtWidgets import QLabel
+
+    from ventulus.knowledge.driver_install import (
+        InstallFamily,
+        install_guide,
+        set_install_family,
+    )
+
+    set_install_family(InstallFamily.DEBIAN)
     page, _ = _page(qtbot)
     page._on_readiness_ok(
         _hw(superio=SuperIoReport(arch_supported=True, chips=[_unbound_chip("it8696")]))
     )
-    btn = page.findChild(QPushButton, "Hardware_CmdCopy_it8696")
-    btn.click()
-    assert QApplication.clipboard().text() == "sudo modprobe it87"
+    guide = install_guide("it87", InstallFamily.DEBIAN)
+    title = page.findChild(QLabel, "Hardware_InstallTitle_it8696")
+    assert title is not None
+    assert title.text() == f"{guide.title}:"
+    page.findChild(QPushButton, "Hardware_InstallCopy_it8696").click()
+    assert QApplication.clipboard().text() == guide.install_text
+    page.findChild(QPushButton, "Hardware_UpdateCopy_it8696").click()
+    assert QApplication.clipboard().text() == guide.update_text
+    expected = (*guide.install_notes, *guide.notes)
+    notes = [
+        page.findChild(QLabel, f"Hardware_InstallNote_it8696_{i}") for i in range(len(expected))
+    ]
+    assert [n.text() for n in notes] == list(expected)
+    # Contract review, XD-1: beside real commands the daemon's prose hint is text,
+    # not a second copy button that would copy a sentence.
+    hint = page.findChild(QLabel, "Hardware_Hint_it8696")
+    assert hint is not None
+    assert hint.text() == "sudo modprobe it87"
+    assert page.findChild(QPushButton, "Hardware_CmdCopy_it8696") is None
+
+
+def test_in_kernel_recommendation_shows_no_install_steps(qtbot):
+    chip = _unbound_chip("it8622")
+    chip.recommendation.in_mainline = True
+    page, _ = _page(qtbot)
+    page._on_readiness_ok(_hw(superio=SuperIoReport(arch_supported=True, chips=[chip])))
+    assert page.findChild(QWidget, "Hardware_ChipHow_it8622") is not None  # precondition
+    assert page.findChild(QWidget, "Hardware_InstallTitle_it8622") is None
+    assert page.findChild(QPushButton, "Hardware_InstallCopy_it8622") is None
 
 
 # ── Probe / lifecycle ──────────────────────────────────────────────────────

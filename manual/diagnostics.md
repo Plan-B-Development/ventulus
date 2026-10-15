@@ -438,7 +438,12 @@ chip (ITE, Nuvoton/Winbond, SMSC…); if its driver is not loaded, the daemon ca
 those fans. The section shows one card per detected chip: vendor, a confidence level,
 how it was detected (the board table, the kernel log, an already-bound driver, or the
 opt-in port probe), and whether its driver is bound. For a chip whose driver is not
-loaded, **How to enable** gives the driver name and a command to load it.
+loaded, **How to enable** gives the driver name and a command to load it. When the
+driver is not part of the kernel, it also gives the commands that build and install it
+on the distribution the GUI runs on (Arch, Debian and Ubuntu, Fedora, or upstream's
+generic steps elsewhere), the commands that update it later, and how to sign it when
+Secure Boot is on. If the driver is already loaded but found no chip, the update
+commands come first.
 
 - The report is **passive and read-only**: the daemon combines signals it already has
   (the board table, bound hwmon chips, `/proc/modules`, the kernel log, ACPI port

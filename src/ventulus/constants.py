@@ -45,7 +45,7 @@ OPENFAN_DEVICE_TIMEOUT_S = 10.0
 
 # Contract version this GUI is built against. Compared on the first
 # /capabilities response against the daemon's reported ``api_version``; a
-# mismatch surfaces a non-fatal warning banner (the AUR ``depends>=`` floor only
+# mismatch surfaces a non-fatal warning banner (the package's ``depends>=`` floor only
 # guards the *minimum* daemon version, not a future-incompatible one, and either
 # package can be upgraded out of lockstep). MUST equal the daemon's
 # ``responses.rs::API_VERSION`` — bump in lockstep on any contract version change.

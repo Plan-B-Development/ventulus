@@ -34,7 +34,7 @@ class TestLookupChipGuidance:
         assert g is not None
         assert g.chip_prefix == "it8688"
         assert g.in_mainline is False
-        assert "AUR" in g.driver_package
+        assert g.driver_source == "frankcrawford/it87"
 
     def test_it8689_matches_specific_entry(self):
         g = lookup_chip_guidance("it8689")
@@ -222,7 +222,7 @@ class TestLookupChipGuidance:
         # Structural facts that actually mislead users if wrong (per test-review):
         # NCT6687-R needs the out-of-tree driver, and this is the actionable remedy.
         assert g.in_mainline is False
-        assert g.driver_package == "nct6687d-dkms-git (AUR)"
+        assert g.driver_source == "Fred78290/nct6687d"
         # Board-generation currency (the 2026-07 refresh):
         assert "B850" in g.notes or "B860" in g.notes
 
@@ -420,7 +420,9 @@ class TestNewVendorQuirks:
         # the driver-local parameter follows it.
         flat = " ".join(quirks[0].details)
         assert "ignore_resource_conflict" in flat
-        assert flat.find("it87-dkms-git") < flat.find("ignore_resource_conflict")
+        update = flat.find("out-of-tree it87 driver current")
+        assert update != -1
+        assert update < flat.find("ignore_resource_conflict")
 
     def test_gigabyte_it87_force_id_warning(self):
         quirks = lookup_vendor_quirks("Gigabyte Technology Co., Ltd.", "it8720")
@@ -519,8 +521,8 @@ class TestOutOfTreeIteChips:
         g = lookup_chip_guidance(chip)
         assert g is not None, f"{chip} has no guidance entry — falls back to 'Unknown chip'"
         assert g.in_mainline is False, f"{chip} is absent from the mainline it87 enum"
-        assert "dkms" in g.driver_package.lower(), (
-            f"{chip} needs the out-of-tree build; guidance offers {g.driver_package!r}"
+        assert g.driver_source == "frankcrawford/it87", (
+            f"{chip} needs the out-of-tree build; guidance offers {g.driver_source!r}"
         )
 
     @pytest.mark.parametrize("chip", OUT_OF_TREE)
@@ -613,7 +615,7 @@ class TestIt8689eGuidanceReflectsHardwareReports:
 
     def test_recommends_updating_the_driver(self):
         blob = self._it8689_text()
-        assert "it87-dkms-git" in blob
+        assert "update the out-of-tree it87 driver" in blob.lower()
 
 
 class TestSecondaryIteChipIsNotDeclaredUnconditionallyReadOnly:
@@ -655,7 +657,7 @@ class TestFormatBoundDriverStatus:
         text = format_bound_driver_status("nct6687", "nct6683", True, {"nct6683"})
         assert text.startswith("nct6683 bound (mainline kernel). ")
         assert text.endswith(format_driver_status("nct6687", False))
-        assert "nct6687d-dkms-git" in text
+        assert "Fred78290/nct6687d" in text
 
     def test_hint_reports_the_guidance_driver_as_loaded_when_it_is(self):
         text = format_bound_driver_status("nct6687", "nct6683", True, {"nct6683", "nct6687"})

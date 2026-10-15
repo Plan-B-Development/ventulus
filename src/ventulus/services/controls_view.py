@@ -673,7 +673,7 @@ def build_member_candidates(
             tip_parts.append(f"Chip: {header.chip_name}")
             g = lookup_chip_guidance(header.chip_name)
             if g:
-                st = "mainline" if g.in_mainline else g.driver_package
+                st = "mainline" if g.in_mainline else g.driver_source
                 tip_parts.append(f"Driver: {g.driver_name} ({st})")
         if presence != FanPresence.PRESENT:
             tip_parts.append(PRESENCE_TOOLTIP.get(presence, ""))

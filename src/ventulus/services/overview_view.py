@@ -267,7 +267,7 @@ def fan_row_tooltip(
                 parts.append(f"Chip: {escape(header.chip_name, quote=False)}")
             g = lookup_chip_guidance(header.chip_name) if header.chip_name else None
             if g:
-                status = "mainline" if g.in_mainline else g.driver_package
+                status = "mainline" if g.in_mainline else g.driver_source
                 parts.append(f"Driver: {g.driver_name} ({status})")
             mode = {0: "DC", 1: "PWM"}.get(header.pwm_mode if header.pwm_mode is not None else -1)
             if mode:

@@ -19,6 +19,13 @@ rename. Version numbers carry on from Control-OFC.
   distribution not built on Arch, on Manjaro, on a CPU other than x86_64, or without systemd.
 - **Driver Setup explains how to install `it87-dkms-git` or `nct6687d-dkms-git` without an AUR
   helper**, with `git clone` and `makepkg`, and how to rebuild it later the same way.
+- **Driver guidance is right on any distribution.** The out-of-tree drivers are named by their
+  upstream projects, `frankcrawford/it87` and `Fred78290/nct6687d`, instead of their Arch packages.
+  Where the GUI tells you to install or update one, it gives the steps for the distribution it runs
+  on: the AUR package on Arch and its derivatives, upstream's DKMS build on Debian, Ubuntu and Fedora
+  (on Fedora, `make akmod` too for nct6687d if RPM Fusion is enabled), and upstream's generic steps
+  elsewhere. The Hardware page's **How to enable** section lists those commands with copy buttons,
+  and how to sign the driver when Secure Boot is on.
 
 ## [5.1.0] — 2026-10-15
 

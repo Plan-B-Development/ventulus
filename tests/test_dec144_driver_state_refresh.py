@@ -3,7 +3,7 @@
 Locks in the four behavioural commitments of the refresh:
 
 1. Remediation ordering: every dual-chip remediation surface recommends
-   updating ``it87-dkms-git`` BEFORE the legacy ``mmio=on`` modparam
+   updating the out-of-tree it87 driver BEFORE the legacy ``mmio=on`` modparam
    (current driver builds default MMIO on — frankcrawford/it87 PR #95).
 2. New escape hatch: IT8665E guidance carries the ``mmio=off``
    remediation for the maintainer-confirmed MMIO regression (issue #106).
@@ -41,7 +41,7 @@ VENDOR_GB = "Gigabyte Technology Co., Ltd."
 
 
 class TestRemediationOrdering:
-    def test_dual_chip_warning_names_the_driver_package_where_it_helps(self):
+    def test_dual_chip_warning_names_the_driver_where_it_helps(self):
         """Rewritten by `UDOC-h` — the ordering it asserted is no longer meaningful.
 
         This was the THIRD test pinning the retracted remedy: it required that
@@ -51,14 +51,16 @@ class TestRemediationOrdering:
         correction landed in `docs/` and in `lookup_vendor_quirks` but not in
         this string — the wrong behaviour had test cover.
 
-        What survives is the part that is still true: installing
-        `it87-dkms-git` is a real remedy for the two cases where the driver is
-        absent or the bridge is merely stuck, so the package must still be
-        named.
+        What survives is the part that is still true: installing the
+        out-of-tree it87 driver is a real remedy for the two cases where the
+        driver is absent or the bridge is merely stuck, so the driver must still
+        be named (by upstream project since DEC-499).
         """
         html = dual_chip_warning_html("X870E AORUS MASTER", ["it8696", "it87952"], ["it8696"])
         assert html is not None
-        assert "it87-dkms-git" in html, "the package must still be named where it genuinely helps"
+        assert "frankcrawford/it87" in html, (
+            "the driver must still be named where it genuinely helps"
+        )
         # ...but never as the answer to the latched-bridge case, which needs a
         # power cut instead.
         lowered = html.lower()
@@ -151,8 +153,8 @@ class TestRemediationOrdering:
         problems = {p["key"]: p for p in detect_readiness_problems(diag, duty_drift=NO_DRIFT)}
         assert "acpi" in problems
         fix = problems["acpi"]["fix"]
-        assert fix.find("it87-dkms-git") != -1
-        assert fix.find("it87-dkms-git") < fix.find("ignore_resource_conflict")
+        assert fix.find("out-of-tree it87 driver") != -1
+        assert fix.find("out-of-tree it87 driver") < fix.find("ignore_resource_conflict")
 
 
 # ── 2. IT8665E mmio=off escape hatch ───────────────────────────────
@@ -183,7 +185,7 @@ class TestChipKnowledgeUpdates:
         assert g is not None
         assert g.chip_prefix == "it8622"
         assert g.in_mainline is True
-        assert "built-in" in g.driver_package
+        assert "built-in" in g.driver_source
 
     def test_it87952_has_dedicated_entry_not_generic_fallthrough(self):
         g = lookup_chip_guidance("it87952")
@@ -198,8 +200,10 @@ class TestChipKnowledgeUpdates:
         # Matches the daemon's chip_driver_in_mainline (kernel ≥ 6.3 — IT87952E
         # landed in v6.3 via d44cb4cd7456; corrected from 6.4 by DEC-421).
         assert g.in_mainline is True
-        flat = " ".join([g.driver_package, *g.known_issues]).lower()
-        assert "it87-dkms-git" in flat, "entry must state dual-chip CONTROL needs the DKMS build"
+        flat = " ".join([g.driver_source, *g.known_issues]).lower()
+        assert "frankcrawford/it87" in flat, (
+            "entry must state dual-chip CONTROL needs the DKMS build"
+        )
 
     def test_it8689_rev1_no_longer_a_dead_end(self):
         g = lookup_chip_guidance("it8689")
@@ -250,7 +254,7 @@ class TestChipKnowledgeUpdates:
         assert "unconfirmed on it8689e" not in flat.lower(), (
             "the retracted 'unconfirmed on IT8689E' claim must not return"
         )
-        assert "it87-dkms-git" in flat, "quirk must tell the user which package to update"
+        assert "out-of-tree it87 driver" in flat, "quirk must tell the user which driver to update"
         assert "verify" in flat.lower(), "the update-then-verify instruction must survive"
 
     def test_it8883_entry_refreshed_not_stale_dated(self):

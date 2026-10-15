@@ -231,7 +231,7 @@ def build_capabilities_vm(
     else:
         banner = None
 
-    # API-version-skew guard: GUI and daemon are independently packaged (AUR), so
+    # API-version-skew guard: GUI and daemon are independently packaged, so
     # a user can upgrade one without the other. Re-evaluated on every reconnect.
     if caps.api_version != expected_api_version:
         api_skew: str | None = (
