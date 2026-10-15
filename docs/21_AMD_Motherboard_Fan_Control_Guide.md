@@ -45,7 +45,9 @@ kernel documentation lists many boards by name.
 - **AM4 300/400-series: an ITE IT8665E, not a Nuvoton part.** "Chip markings and
   sensors-detect say that this is IT8665E" on a PRIME X470-PRO
   ([frankcrawford/it87 #27](https://github.com/frankcrawford/it87/issues/27)), and the
-  same on the ROG STRIX X470-F / X470-I and B450-F. Mainline has no IT8665E driver, so
+  same on the ROG STRIX X470-F / X470-I and B450-F; a B450-I owner's `sensors-detect`
+  found chip ID `0x8665` too
+  ([lm-sensors #195](https://github.com/lm-sensors/lm-sensors/issues/195)). Mainline has no IT8665E driver, so
   fan control needs the out-of-tree `it87-dkms-git`. Use a build from 2026-07-22 or
   later: older builds mangled IT8665E writes under the MMIO default
   ([issue #106](https://github.com/frankcrawford/it87/issues/106)).
@@ -62,9 +64,12 @@ kernel documentation lists many boards by name.
   temperature channels are not meaningful
   ([lm-sensors #542](https://github.com/lm-sensors/lm-sensors/issues/542),
   [#544](https://github.com/lm-sensors/lm-sensors/issues/544)), so drive curves from
-  `k10temp` Tctl or another sensor you can verify. X870 / X870E boards reach the chip
-  through the ASUS WMI path from kernel 7.1; **no B850 board is on that list**, so B850
-  boards use the I/O ports directly and are likelier to hit an ACPI conflict. One ROG
+  `k10temp` Tctl or another sensor you can verify. X870 / X870E boards on the kernel's
+  ASUS list reach the chip through the WMI path from kernel 7.1 (a board missing from
+  the list, such as a newer edition, uses the I/O ports); **no B850 board is on that
+  list**, so B850 boards use the I/O ports directly. Owners of a TUF GAMING B850-PLUS
+  WIFI and a ROG STRIX B850-F report it binding that way (#542, #544); an ACPI conflict
+  can still block another board. One ROG
   STRIX X870E-E owner measured the firmware switching a header straight back from
   manual to full speed
   ([zeule/asus-ec-sensors #100](https://github.com/zeule/asus-ec-sensors/issues/100),
@@ -258,19 +263,24 @@ The in-kernel `nct6683` reads that EC but publishes PWM read-only;
 
 ASRock's AM5 boards split by family, per the block diagrams in ASRock's manuals:
 
-- **Steel Legend / LiveMixer / Lightning ITX** (B650 / X670E Steel Legend, B650
-  LiveMixer, A620I / B650I Lightning WiFi; and the B850 / X870 Steel Legend WiFi and
-  B850I Lightning WiFi): **NCT6686D only**. The in-kernel `nct6683` reads it (some
-  need `force=1`) but publishes PWM **read-only**, so writes are refused. PWM needs an
-  out-of-tree driver: `asrock-nct6683` lists A620I / B650I Lightning WiFi and X670E
-  Steel Legend by exact name; `nct6687d` works on the B650 LiveMixer
+- **Steel Legend / LiveMixer / Riptide / Lightning ITX** (B650 / B650E / X670E Steel
+  Legend, B650 LiveMixer, A620I / B650I Lightning WiFi, the B650E PG-ITX WiFi; and the
+  B850 / X870 Steel Legend WiFi, B850 / X870 Riptide WiFi, B850 / X870 LiveMixer WiFi
+  and B850I Lightning WiFi): **NCT6686D only**. The exception is the **B850M Steel
+  Legend WiFi**, which has an NCT6796D-S like the Pro RS family below. The in-kernel
+  `nct6683` reads the NCT6686D (some boards need `force=1`) but publishes PWM
+  **read-only**, so writes are refused. PWM needs an out-of-tree driver:
+  `asrock-nct6683` lists A620I / B650I Lightning WiFi, X670E Steel Legend and B650E
+  Steel Legend WiFi by exact name; `nct6687d` works on the B650 LiveMixer
   ([#103](https://github.com/Fred78290/nct6687d/issues/103)) and others, with MSI's
-  register map and fan labels; `nct6686d` is tested only on the A620I Lightning WiFi.
-- **Pro RS / PG Lightning / HDV** (B650 Pro RS, X670E Pro RS, X670E PG Lightning,
-  A620M Pro RS, B650M-HDV/M.2) and the **X870 Nova WiFi**: **NCT6796D-S only**,
-  reported as `nct6799`. Mainline `nct6775`, nothing else needed; do not load
-  `nct6687d` here. (Fred78290/nct6687d issue #153 matches the two-chip X870E Nova,
-  NCT6796D-S + NCT5585D, not the X870 Nova.)
+  register map and fan labels; `nct6686d` is tested by its author only on the A620I
+  Lightning WiFi.
+- **Pro RS / Pro-A / Challenger / PG Lightning / HDV** (B650 / B650M Pro RS, X670E Pro
+  RS, X670E PG Lightning, A620M Pro RS, B650M-HDV/M.2; B850 / B850M / X870 Pro RS,
+  Pro-A WiFi and Challenger WiFi; the B850M Steel Legend WiFi) and the **X870 Nova
+  WiFi**: **NCT6796D-S only**, reported as `nct6799`. Mainline `nct6775`, nothing else
+  needed; do not load `nct6687d` here. (Fred78290/nct6687d issue #153 matches the
+  two-chip X870E Nova, NCT6796D-S + NCT5585D, not the X870 Nova.)
 - **Taichi** (X670E Taichi, B650E Taichi, X870E Taichi and their Lite editions): both
   chips, below.
 
@@ -294,6 +304,13 @@ while the real pump header is unlabelled. Assign the pump role to the real pump 
 (**Set role…** on its Hardware-page card, or the fan wizard) so the pump floor covers
 it. The GUI marks `nct6687d`'s MSI labels *unverified* on any non-MSI board and asks
 for the real pump.
+
+The X870E Taichi family has **two pump headers**. AIO_PUMP is on the `nct6799` chip
+(`pwm4`, measured in #155). W_PUMP is, per LibreHardwareMonitor's board map, the
+NCT6686D's first channel, which `nct6687d` labels "CPU Fan"; nobody has measured it on
+Linux yet. That label gives a pump on W_PUMP the CPU floor but not the pump
+protections, so assign the pump role to it as well. Ventulus deliberately does not
+rename this header for the board until a Linux measurement confirms it.
 
 The collision detector does not raise the critical banner here, although both
 `nct6687` and `nct6775` are loaded, because it finds two distinct Nuvoton chip IDs
@@ -353,9 +370,9 @@ a primary chip with a secondary that carries extra headers:
 | AM4 400-series | X470 AORUS ULTRA GAMING, X470 AORUS GAMING 5/7 WIFI, B450 AORUS PRO / PRO WIFI / PRO-CF: **IT8686E** at `0x0a40` + **IT8792E** at `0x0a60`. On the B450 AORUS PRO the IT8792E carries no fan header, so a missing secondary costs temperatures and voltages, not fans | |
 | AM4 500-series | X570 AORUS MASTER / PRO / PRO WIFI / ULTRA / XTREME, B550 AORUS MASTER / PRO, B550 VISION D: **IT8688E + IT8792E**. The X570S refresh (X570S AERO G, X570S AORUS MASTER): **IT8689E + IT87952E** | B550M AORUS PRO, B550I AORUS PRO AX: IT8688E only |
 | AM5 600-series | X670E AORUS MASTER, X670E AORUS PRO X: **IT8689E + IT8792E** (hwmon `it8792`, not `it87952`; [#96](https://github.com/frankcrawford/it87/issues/96) dmesg: "Found IT8792E/IT8795E chip at 0xa60, revision 3") | X670 AORUS ELITE AX, X670 / B650 GAMING X AX: IT8689E only (it87 SIV catalogue) |
-| AM5 800-series | X870E AORUS PRO / ELITE X3D / MASTER / XTREME AI TOP, B850 AI TOP, X870 AORUS ELITE WIFI7, X870 AORUS STEALTH ICE: **IT8696E + IT87952E** | X870E AORUS ELITE WIFI7: IT8696E only |
+| AM5 800-series | X870E AORUS PRO / ELITE X3D / MASTER / XTREME AI TOP, B850 AI TOP, X870 AORUS ELITE WIFI7, X870 AORUS STEALTH ICE: **IT8696E + IT87952E**. Per the it87 SIV catalogue alone, the same pair on the 2026 boards: X870 / B850 AORUS ELITE X3D, X870E EAGLE (X3D) WIFI7, X870E AERO X3D (DARK) WOOD, X870 AORUS TACHYON ICE, X870E AORUS XTREME X3D AI TOP, X870 / B850 AORUS STEALTH | X870E AORUS ELITE WIFI7, X870 EAGLE WIFI7, B850M AORUS STEALTH (ICE): IT8696E only |
 
-The Threadripper boards (X399, TRX40) are in the
+The Threadripper boards (X399, TRX40, TRX50) are in the
 [Hardware Compatibility Guide](19_Hardware_Compatibility.md#amd-platform--typical-chip-mapping).
 
 ### Driver, BIOS and the IT8689E
@@ -370,7 +387,8 @@ why the headers are not read-only, and the MMIO default.
 On builds older than 2026-08-24, IT8689E boards (Rev 1 especially, e.g. the X670E
 AORUS MASTER) accepted PWM writes with no effect while a normal BIOS curve was active,
 although Windows tools could control the fans. The fork's PR #128 fixes this, with
-positive IT8689E reports including Rev 1, but none yet on a dual-chip IT8689E board.
+positive IT8689E reports including Rev 1, but none since the merge on a dual-chip
+IT8689E board.
 So update `it87-dkms-git`, then verify with Test PWM Control. If a header still cannot
 be controlled on a current build, use a different header, move the fan to an external
 controller such as the OpenFAN controller, or let the BIOS curve drive that header,

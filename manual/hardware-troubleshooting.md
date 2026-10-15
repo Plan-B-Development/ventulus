@@ -129,8 +129,23 @@ Z790 AORUS MASTER and others), and one of them did not appear.
 `modprobe` says "module not found":
 
 1. Install `it87-dkms-git` (see [Driver Setup](driver-setup.md)). Current builds reach
-   the secondary chip through MMIO, which is on by default.
+   the secondary chip's extra headers through MMIO, which is on by default.
 2. Reboot, then click **Rescan Hardware**.
+
+**Case A2: an Intel Z890 / B860 board on a 2026-09 driver build.** If `modprobe it87`
+fails with *Invalid argument* after a line like `H2RAM set_slot(1,…) failed: -22`, or
+the log shows *Found IT8696E chip* but no chip appears, the driver build is at fault,
+not your board: builds from 2026-09-09 to 2026-10-01 fail this way on Gigabyte Z890 /
+B860 boards ([it87 #139](https://github.com/frankcrawford/it87/issues/139),
+[#138](https://github.com/frankcrawford/it87/issues/138)). It was fixed on
+2026-10-02 ([PR #140](https://github.com/frankcrawford/it87/pull/140)):
+
+1. Rebuild the driver: `yay -S it87-dkms-git`.
+2. Reboot, then click **Rescan Hardware**.
+
+Do not go on to Case B for this. `options it87 mmio=off` also gets such a build to
+load, but the second chip then loses its extra headers (SYS_FAN7/8_PUMP on the Z890
+AORUS MASTER), so use it only until you can rebuild, then remove it.
 
 **Case B: the driver is loaded, but a chip is missing.** The secondary chip is
 blocked. Work down the recovery ladder below. It is the one upstream gives, and it

@@ -60,7 +60,7 @@ read-only (`-r--r--r--`), it is the in-kernel `nct6683`.
 | Chip      | Chip ID | Driver          | Boards seen                                   |
 |-----------|---------|-----------------|-----------------------------------------------|
 | NCT6683   | `0xc730` | `nct6683` (mainline, read-only) | older MSI / ASRock; the B550 Taichi's fan EC is an NCT6683D-class part |
-| NCT6686D  | `0xd440` (reports `0xd441`) | `nct6683` (mainline; read-only) or out-of-tree `asrock-nct6683` / `nct6687d` / `nct6686d` | ASRock AM5 Steel Legend / LiveMixer / Lightning boards, the AM5 and Z790/Z890 Taichi boards, most ASRock Z890 boards, and the BC-250 (which the kernel names "AMD BC-250") |
+| NCT6686D  | `0xd440` (reports `0xd441`) | `nct6683` (mainline; read-only) or out-of-tree `asrock-nct6683` / `nct6687d` / `nct6686d` | most ASRock AM5 Steel Legend boards (not the B850M Steel Legend WiFi), the LiveMixer / Riptide / Lightning boards, the AM5 and Z790/Z890 Taichi boards, most ASRock Z890 boards, the B860 Steel Legend / Lightning boards, and the BC-250 (which the kernel names "AMD BC-250") |
 | NCT6687D | `0xd590` (reports `0xd592`) | `nct6687d-dkms-git` (out-of-tree) for control | MSI B550 (MAG B550 TOMAHAWK, B550-A PRO), the X570S MPG refresh, B650/X670 (MAG B650 TOMAHAWK WIFI, MAG X670E TOMAHAWK WIFI, MPG X670E CARBON WIFI), Intel 600/700-series; and, with the alternate "msi_alt1" register map, the B840/B850/B860/X870/X870E/Z890 boards (monitoring tools label those *NCT6687DR*) |
 
 (NCT6797D = `0xd450` and NCT6798D = `0xd428` are separate `nct6775`-driven chips;
@@ -167,12 +167,34 @@ ISA-bridge **MMIO/H2RAM access path**
 2026-03; `mmio=off` is the opt-out), and on 2026-08-24 merged
 [PR #128](https://github.com/frankcrawford/it87/pull/128), which handles the
 firmware logic that kept or retook headers (IT8689E and IT8688E rev 2 extra curve
-vectors, the SmartFan enable on the IT879x secondaries). The MMIO path also
-sidesteps the ACPI I/O-port conflicts that once forced `acpi_enforce_resources=lax`
-([issue #81 discussion](https://github.com/frankcrawford/it87/issues/81)), and
-master carries a built-in DMI ACPI-exemption table (`it87_acpi_ignore`) for
-known-safe boards. The AUR package is a `-git` build, so a reinstall picks up the
-current snapshot.
+vectors, the SmartFan enable on the IT879x secondaries). On 2026-10-02
+[PR #140](https://github.com/frankcrawford/it87/pull/140) moved the IT8689E, IT8696E
+and IT8698E (and the IT8688E revision 2) to the chip's own MMIO window and lets the
+IT87952E reach its extra H2RAM headers without the ISA bridge. On the IT8688E,
+IT8689E, IT8696E and IT8698E the MMIO path also sidesteps the ACPI I/O-port
+conflicts that once forced `acpi_enforce_resources=lax`
+([issue #81 discussion](https://github.com/frankcrawford/it87/issues/81)). Boards
+with an IT8686E, or an IT8792E / IT87952E second chip, can still need
+`ignore_resource_conflict=1` (X399 boards,
+[PR #135](https://github.com/frankcrawford/it87/pull/135) and
+[PR #141](https://github.com/frankcrawford/it87/pull/141); Z890 AORUS MASTER,
+[issue #139](https://github.com/frankcrawford/it87/issues/139)). Master carries a
+built-in DMI ACPI-exemption table (`it87_acpi_ignore`) for known-safe boards. The
+AUR package is a `-git` build, so a reinstall picks up the current snapshot. Since
+2026-08-23 the fork builds only on kernel 6.4 or newer, so the 6.1, 5.15 and 5.10
+LTS kernels cannot build it ([PR #142](https://github.com/frankcrawford/it87/pull/142),
+a draft fix).
+
+**Intel Z890 / B860, builds from 2026-09-09 to 2026-10-01.** On these boards those
+builds can fail outright: on a Z890 AORUS MASTER `modprobe it87` failed with
+*Invalid argument* after `H2RAM set_slot(1,…) failed: -22`, so neither chip
+registered ([#139](https://github.com/frankcrawford/it87/issues/139)); on a B860I
+AORUS PRO ICE the driver printed *Found IT8696E chip* and then registered nothing
+([#138](https://github.com/frankcrawford/it87/issues/138)). PR #140 fixed both on
+2026-10-02, so rebuild `it87-dkms-git`. On such a build, `options it87 mmio=off`
+(plus `ignore_resource_conflict=1` if the bind is then refused) gets the module to
+load, but the IT87952E loses its extra headers (SYS_FAN7/8_PUMP on the Z890 AORUS
+MASTER). This is a driver fault, not the bridge latch described below.
 
 #### it87 v2.0 renames Gigabyte chips
 
@@ -299,22 +321,26 @@ the wrong board.
 | | MSI (MAG B650 TOMAHAWK WIFI, MAG X670E TOMAHAWK WIFI, MPG X670E CARBON WIFI, MPG B650 CARBON WIFI, PRO X670-P WIFI) | NCT6687D, **default** register map, never `msi_alt1` | out-of-tree `nct6687d-dkms-git`, with `nct6683` blacklisted |
 | | Gigabyte AORUS (X670E AORUS MASTER, X670E AORUS PRO X) | **IT8689E + IT8792E** dual-chip. The secondary is an IT8792E/IT8795E (hwmon `it8792`), not an IT87952E ([#96](https://github.com/frankcrawford/it87/issues/96) dmesg). Before PR #128, Rev 1 accepted PWM writes with no effect while a normal BIOS curve was active | out-of-tree `it87-dkms-git`. [PR #128](https://github.com/frankcrawford/it87/pull/128) (merged 2026-08-24) is the driver-side fix, with positive IT8689E reports including Rev 1: update, then verify. See [IT8689E boards](#it8689e-boards) |
 | | Gigabyte single-chip (X670 AORUS ELITE AX, X670 / B650 GAMING X AX) | IT8689E only (SIV catalogue) | out-of-tree `it87-dkms-git` |
-| | ASRock AM5 Steel Legend / LiveMixer / Lightning ITX (B650 / X670E Steel Legend, B650 LiveMixer, A620I / B650I Lightning WiFi) | **NCT6686D only** | in-kernel `nct6683` reads it read-only (some need `force=1`); PWM via `asrock-nct6683` (lists A620I / B650I Lightning WiFi, X670E Steel Legend) or `nct6687d` (MSI labels: check the pump header). Test before relying on it |
-| | ASRock AM5 Pro RS / PG Lightning / HDV (B650 Pro RS, X670E Pro RS, X670E PG Lightning, A620M Pro RS, B650M-HDV/M.2) | NCT6796D-S only, reported as `nct6799` | mainline `nct6775` |
+| | ASRock AM5 Steel Legend / LiveMixer / Lightning ITX (B650 / B650E / X670E Steel Legend, B650 LiveMixer, A620I / B650I Lightning WiFi), and the B650E PG-ITX WiFi | **NCT6686D only** (manual block diagrams) | in-kernel `nct6683` reads it read-only (some need `force=1`); PWM via `asrock-nct6683` (lists A620I / B650I Lightning WiFi, X670E Steel Legend, B650E Steel Legend WiFi) or `nct6687d` (MSI labels: check the pump header). Test before relying on it |
+| | ASRock AM5 Pro RS / PG Lightning / HDV (B650 Pro RS, B650M Pro RS, X670E Pro RS, X670E PG Lightning, A620M Pro RS (WiFi), B650M-HDV/M.2) | NCT6796D-S only, reported as `nct6799` (the B650E PG-ITX WiFi is the exception, above) | mainline `nct6775` |
 | | ASRock AM5 Taichi (X670E Taichi, B650E Taichi, and their Lite editions) | NCT6686D + NCT6796D-S (+ Fintek eSPI→LPC bridge) | both drivers; see the X870E Taichi Lite row below |
-| **AM5 800-series** (B850 / X870 / B840) | ASUS (X870E / X870 / B850) | **NCT6701D** (`0xd806`), reported as `nct6799`. Fans and voltages read correctly, most temperatures do not ([lm-sensors #542](https://github.com/lm-sensors/lm-sensors/issues/542), [#544](https://github.com/lm-sensors/lm-sensors/issues/544)). `asus_ec_sensors` per board: ProArt X870E-CREATOR WIFI 6.17; ROG STRIX B850-I / X870-I / X870E-E 6.18; X870E-H / X870-F 6.19; B850-E 7.2; ROG CROSSHAIR X870E HERO and X870E-E WIFI7 R2 7.3 | mainline `nct6775`. X870 / X870E boards reach the chip through the ASUS WMI path from kernel 7.1; **no B850 board** is on that list, so B850 goes through the I/O ports, where ACPI conflicts are likelier. One ROG STRIX X870E-E owner measured the firmware switching a header straight back from manual to full speed ([zeule #100](https://github.com/zeule/asus-ec-sensors/issues/100)) |
+| **AM5 800-series** (B850 / X870 / B840) | ASUS (X870E / X870 / B850) | **NCT6701D** (`0xd806`), reported as `nct6799`. Fans and voltages read correctly, most temperatures do not ([lm-sensors #542](https://github.com/lm-sensors/lm-sensors/issues/542), [#544](https://github.com/lm-sensors/lm-sensors/issues/544)). `asus_ec_sensors` per board: ProArt X870E-CREATOR WIFI 6.17; ROG STRIX B850-I / X870-I / X870E-E 6.18; X870E-H / X870-F 6.19; B850-E 7.2; ROG CROSSHAIR X870E HERO and X870E-E WIFI7 R2 7.3 | mainline `nct6775`. X870 / X870E boards on the kernel's ASUS list reach the chip through the WMI path from kernel 7.1 (a board missing from the list, such as a newer edition, uses the I/O ports); **no B850 board** is on that list, so B850 goes through the I/O ports. Owners of a TUF GAMING B850-PLUS WIFI and a ROG STRIX B850-F report it binding that way ([#542](https://github.com/lm-sensors/lm-sensors/issues/542), [#544](https://github.com/lm-sensors/lm-sensors/issues/544)); an ACPI conflict can still block another board. One ROG STRIX X870E-E owner measured the firmware switching a header straight back from manual to full speed ([zeule #100](https://github.com/zeule/asus-ec-sensors/issues/100)) |
 | | MSI **auto-allowlist** (B840 / B850 / B860 / X870 / X870E / Z890 boards; `nct6687.c::nct6687_msi_alt_boards[]` is the source of truth and keeps growing) | NCT6687D with the alternate "msi_alt1" EC map, enabled automatically for listed boards | out-of-tree `nct6687d-dkms-git`; add `msi_fan_brute_force=1` (with `nct6683` blacklisted) if system-fan writes do not stick |
 | | MSI boards of those series NOT on the list (e.g. MAG B850 TOMAHAWK WIFI, the PZ / WHITE / UNIFY-X editions) | NCT6687D, alternate map | `nct6687d` + `fan_config=msi_alt1`, plus `msi_fan_brute_force=1` if needed |
 | | Gigabyte X870E AORUS **PRO** (incl. ICE / X3D) / **ELITE X3D** ([#89](https://github.com/frankcrawford/it87/issues/89)) / XTREME AI TOP / B850 AI TOP / X870 AORUS ELITE WIFI7 (incl. ICE) | IT8696E + IT87952E (dual-chip) | out-of-tree `it87-dkms-git`; current builds work out of the box. The ELITE X3D is owner-confirmed with both chips controllable ([#89](https://github.com/frankcrawford/it87/issues/89)) |
+| | Gigabyte 2026 boards, per the it87 SIV catalogue alone: X870 / B850 AORUS ELITE X3D (incl. ICE), X870E EAGLE WIFI7, X870E EAGLE X3D WIFI7, X870E AERO X3D WOOD / DARK WOOD, X870 AORUS TACHYON ICE, X870E AORUS XTREME X3D AI TOP, X870 / B850 AORUS STEALTH (incl. ICE) | IT8696E + IT87952E (each SIV has both stanzas; the secondary carries SYS_FAN5/6_PUMP). No owner's log yet. The X870 EAGLE WIFI7 and the B850M AORUS STEALTH (ICE) have the IT8696E only | out-of-tree `it87-dkms-git`. All are in the daemon's dual-chip table, so a missing secondary raises the warning |
 | | Gigabyte X870E AORUS **ELITE WIFI7** | **IT8696E only** (6 fan headers; [PR #131](https://github.com/frankcrawford/it87/pull/131)) | out-of-tree `it87-dkms-git` |
 | | **Gigabyte X870E AORUS MASTER** | IT8696E + IT87952E, the secondary blocked behind an ITE bridge latched in config mode (answers device-ID `0x8883`) | out-of-tree `it87-dkms-git` drives the **primary only** (5 of 8 headers) while the bridge is latched. **It is recoverable**: keep `nct6775`/`w83627ehf` from loading, reboot, then a full power cut if needed (2026-09-05). `mmio` is already the driver default and `force_id` does not help. Same nominal pairing as the ELITE X3D above, different outcome, which is why this table is per board and not per family. See the "IT8883" row and [#64](https://github.com/frankcrawford/it87/issues/64) |
 | | **Gigabyte X870 AORUS STEALTH ICE** | IT8696E + IT87952E, the secondary reachable only once the eSPI→LPC bridge in front of it is out of config mode | out-of-tree `it87-dkms-git` drives the **primary only** while the bridge is latched; the secondary comes back after suppressing `nct6775`/`w83627ehf`, a reboot and, if needed, a full power cut. In the daemon's dual-chip table: #81's own thread records its reporter driving `pwmN` on the second chip. `mmio=on` (already the default) and `force_id` are not the remedy; #81's opening post tried both. [#81](https://github.com/frankcrawford/it87/issues/81) · [#64](https://github.com/frankcrawford/it87/issues/64) is the bridge thread |
 | | ASRock X870 Nova WiFi | **NCT6796D-S** only (manual block diagram), reported as `nct6799` | mainline `nct6775` |
 | | ASRock X870E Nova WiFi | NCT6796D-S + NCT5585D (+ Fintek bridge) | mainline `nct6775` (both chips) |
-| | ASRock B850 / X870 Steel Legend WiFi, B850I Lightning WiFi | **NCT6686D only** | in-kernel `nct6683` read-only; out-of-tree driver for PWM |
-| | **ASRock X870E Taichi Lite: dual-Nuvoton** | NCT6686D @ 0x0a20 + NCT6796D-S @ 0x0290 (reported as `nct6799`) + Fintek F85227N bridge | `nct6687d` (or read-only `nct6683`) + mainline `nct6775` (the collision detector exempts this pairing). On an X870E Taichi an owner measured CHA_FAN1/2, CPU_FAN2 and AIO_PUMP on the `nct6799` chip and CHA_FAN3/4 on the NCT6686D, where `nct6687d` labels one channel "Pump Fan", so assign the pump role by hand ([nct6687d #155](https://github.com/Fred78290/nct6687d/issues/155)) |
-| **TR4 X399** (Threadripper 1000 / 2000) | Gigabyte (X399 AORUS PRO (incl. -CF) / XTREME / GAMING 7, X399 DESIGNARE EX (incl. -CF)) | **IT8686E + IT8792E** (dual-chip; [it87 #135](https://github.com/frankcrawford/it87/issues/135) dmesg on the PRO-CF: IT8686E at `0xa40`, IT8792E/IT8795E at `0xa60`; the SIV catalogue lists all four boards with this pair) | out-of-tree `it87-dkms-git` |
+| | ASRock B850 / X870 Steel Legend WiFi, B850 / X870 Riptide WiFi, B850 / X870 LiveMixer WiFi, B850I Lightning WiFi | **NCT6686D only** (manual block diagrams) | in-kernel `nct6683` read-only; out-of-tree driver for PWM |
+| | ASRock B850M Steel Legend WiFi, B850 / B850M Pro RS (WiFi), B850 / B850M Pro-A WiFi, B850 / B850M Challenger WiFi, X870 Pro RS (WiFi), X870 Pro-A WiFi, X870 Challenger WiFi | **NCT6796D-S only** (manual block diagrams), reported as `nct6799`. The B850M Steel Legend WiFi is the Steel Legend that is not an NCT6686D | mainline `nct6775` |
+| | **ASRock X870E Taichi Lite: dual-Nuvoton** (also X870E Taichi / White / OCF) | NCT6686D @ 0x0a20 + NCT6796D-S @ 0x0290 (reported as `nct6799`) + Fintek F85227N bridge | `nct6687d` (or read-only `nct6683`) + mainline `nct6775` (the collision detector exempts this pairing). On an X870E Taichi an owner measured CHA_FAN1/2, CPU_FAN2 and AIO_PUMP on the `nct6799` chip and CHA_FAN3/4 on the NCT6686D, where `nct6687d` labels one channel "Pump Fan" ([nct6687d #155](https://github.com/Fred78290/nct6687d/issues/155)). The board has **two pump headers**: AIO_PUMP (`nct6799` pwm4) and W_PUMP, which LibreHardwareMonitor's board map puts on the NCT6686D's first channel, the one `nct6687d` labels "CPU Fan" (not yet measured on Linux). Assign the pump role by hand to whichever header carries a pump |
+| **TR4 X399** (Threadripper 1000 / 2000) | Gigabyte (X399 AORUS PRO (incl. -CF) / XTREME / GAMING 7, X399 DESIGNARE EX (incl. -CF)) | **IT8686E + IT8792E** (dual-chip; dmesg on the PRO-CF ([it87 PR #135](https://github.com/frankcrawford/it87/pull/135)) and the GAMING 7 ([PR #141](https://github.com/frankcrawford/it87/pull/141)): IT8686E at `0xa40`, IT8792E/IT8795E at `0xa60`; the SIV catalogue lists all four boards with this pair) | out-of-tree `it87-dkms-git`, with `ignore_resource_conflict=1` (both PRs needed it). Until PR #141 is merged the GAMING 7 shows 3 of its 7 headers |
 | **sTRX4 TRX40** (Threadripper 3000) | Gigabyte (TRX40 AORUS XTREME / MASTER / PRO WIFI, TRX40 DESIGNARE) | **IT8688E + IT8792E** (dual-chip; the it87 fork's `GA-TRX40-AORUS-XTREME.conf` names `it8688-isa-0a40` + `it8792-isa-0a60`; the SIV catalogue lists all four boards with this pair) | out-of-tree `it87-dkms-git` |
+| | ASRock TRX40 Creator | NCT6683D-class EC ([asrock-nct6683 #13](https://github.com/branchmispredictor/asrock-nct6683/pull/13)) | in-kernel `nct6683` read-only; `asrock-nct6683` lists it for PWM (owner-tested, with hand-back to the BIOS) |
+| **sTR5 TRX50** (Threadripper 7000 / 9000) | Gigabyte (TRX50 AI TOP, TRX50 AERO D) | **IT8689E + IT87952E** (dual-chip; [it87 #73](https://github.com/frankcrawford/it87/issues/73) `sensors` on the AI TOP: `it8689-isa-0a40` + `it87952-isa-0a60`, the secondary appearing intermittently; the AERO D from the SIV catalogue alone) | out-of-tree `it87-dkms-git` |
 
 The System State page (`/diagnostics/hardware`) reports the modules actually loaded and
 the chips detected; compare this generic table with your own system's output.
@@ -329,7 +355,7 @@ Fred78290/nct6687d source, the it87 SIV catalogue, ASRock manuals).
 
 | Generation | Typical Vendors | Typical Hwmon Chip(s) | Driver Path |
 |---|---|---|---|
-| **LGA1151 / LGA1200** (Z390 / Z490 / W480) | Gigabyte Z390 AORUS MASTER (incl. G2 EDITION) / PRO (incl. PRO WIFI) / ULTRA (incl. -CF), Z490 AORUS MASTER, and, per the SIV catalogue alone, Z390 AORUS XTREME (incl. WATERFORCE / 5G), Z490 AORUS MASTER WATERFORCE / PRO AX / ULTRA (incl. G2) / XTREME (incl. WATERFORCE), Z490 VISION D and W480 VISION D | **IT8688E + IT8792E** (dual-chip; the SIV catalogue gives each board an `it8688` and an `it8792` stanza). The Z390 boards' SIVs also have an `it8686` stanza, so their primary may bind as IT8686E; the daemon accepts either | out-of-tree `it87-dkms-git` |
+| **LGA1151 / LGA1200** (Z390 / Z490 / W480) | Gigabyte Z390 AORUS MASTER (incl. G2 EDITION) / PRO (incl. PRO WIFI) / ULTRA (incl. -CF), Z490 AORUS MASTER, and, per the SIV catalogue alone, Z390 AORUS XTREME (incl. WATERFORCE / 5G), Z490 AORUS MASTER WATERFORCE / PRO AX / ULTRA (incl. G2) / XTREME (incl. WATERFORCE), Z490 VISION D and W480 VISION D | **IT8688E + IT8792E** (dual-chip; the SIV catalogue gives each board an `it8688` and an `it8792` stanza). The Z390 boards' SIVs also share a voltage-only `it8686` stanza (it labels no fan or temperature). No Z390 board has been seen binding an IT8686E, and a Z390 AORUS PRO WIFI reports an IT8688E ([it87 PR #143](https://github.com/frankcrawford/it87/pull/143)); the daemon accepts either as the primary | out-of-tree `it87-dkms-git` |
 | **LGA1700 600-series** (Z690 / B660 / H670) | ASUS (ROG MAXIMUS Z690 FORMULA, ROG STRIX Z690-A GAMING WIFI D4 / Z690-E GAMING WIFI, TUF GAMING Z690-PLUS) | NCT6798D (reports `0xd42b`) + `asus_ec_sensors` enrichment on listed ROG boards | mainline `nct6775` for PWM; `asus_ec_sensors` for sensor enrichment |
 | | MSI (MAG Z690 TOMAHAWK WIFI, MPG Z690 EDGE WIFI) | NCT6687D, **default** register map (no `msi_alt1`) | out-of-tree `nct6687d-dkms-git`, with `nct6683` blacklisted |
 | | Gigabyte Z690 AORUS PRO / MASTER | **IT8689E + IT87952E** (dual-chip) | out-of-tree `it87-dkms-git` |
@@ -343,9 +369,12 @@ Fred78290/nct6687d source, the it87 SIV catalogue, ASRock manuals).
 | | ASRock Z790 Taichi | **NCT6686D (5 headers) + NCT5585D (3 headers)** (manual block diagram) | NCT5585D: mainline `nct6775` (`nct6798`); NCT6686D: in-kernel `nct6683` read-only, out-of-tree driver for PWM |
 | **LGA1851 800-series** (Z890 / B860 / H810) | MSI (MAG/MEG/MPG Z890) | NCT6687D (reports `0xd592`) with the alternate "msi_alt1" EC map (monitoring tools label these boards *NCT6687DR*); **requires `fan_config=msi_alt1`**, set automatically for boards in the driver's `nct6687_msi_alt_boards[]` | out-of-tree `nct6687d-dkms-git` (auto-allowlist) or manual `fan_config=msi_alt1`; several also need `msi_fan_brute_force=1` |
 | | ASUS (ROG STRIX Z890 / B860) | **NCT6701D**: by chip ID it binds as `nct6799`; no Linux log for an ASUS Z890 exists yet | mainline `nct6775`. Not on the ASUS WMI access list, and no `asus_ec_sensors` or `asus_wmi_sensors` support |
-| | Gigabyte Z890 AORUS MASTER (incl. AI TOP; LibreHardwareMonitor PR #2512), and, per the SIV catalogue alone, Z890 AORUS XTREME AI TOP / PRO ICE / ELITE X ICE / TACHYON ICE / TACHYON DUO X ICE, Z890 AI TOP, Z890 AERO D and W880 AI TOP (all in the daemon's dual-chip table) | **IT8696E + IT87952E** | out-of-tree `it87-dkms-git`; same dual-chip remediation |
-| | Gigabyte Z890 AORUS ELITE WIFI7 (incl. ICE / PLUS / DUO X) | **IT8696E only** | out-of-tree `it87-dkms-git` |
-| | ASRock Z890 (Steel Legend, Lightning, Pro-A, Pro RS, Nova, Taichi) | **NCT6686D** carries the fans; the Nova and Taichi add an NCT6796D-E (reported as `nct6798`) with little or nothing wired | in-kernel `nct6683` reads the NCT6686D read-only (Z890 Pro-A customer ID since 7.2; others may need `force=1`); PWM via `nct6687d`, or `asrock-nct6683` on the Z890 Nova WiFi |
+| | Gigabyte Z890 AORUS MASTER ([it87 #139](https://github.com/frankcrawford/it87/issues/139) dmesg: IT8696E at `0xa40`, IT87952E at `0xb10`; the MASTER AI TOP from the SIV catalogue and the unmerged LibreHardwareMonitor PR #2512), and, per the SIV catalogue alone, Z890 AORUS XTREME AI TOP / PRO ICE / ELITE X ICE / TACHYON ICE / TACHYON DUO X ICE, Z890 AI TOP, Z890 AERO D and W880 AI TOP (all in the daemon's dual-chip table) | **IT8696E + IT87952E** | out-of-tree `it87-dkms-git` from 2026-10-02 or later: builds from 2026-09-09 to 2026-10-01 can fail to load on these boards (see [ITE](#ite)); otherwise the same dual-chip remediation |
+| | Gigabyte Z890 AORUS ELITE WIFI7 (incl. ICE / PLUS / DUO X), B860I AORUS PRO ICE | **IT8696E only** (the B860I: [it87 #138](https://github.com/frankcrawford/it87/issues/138) dmesg) | out-of-tree `it87-dkms-git` (same build window as above) |
+| | ASRock Z890 (Steel Legend, Lightning, Pro-A, Pro RS, Z890I Nova, Z890M Riptide, Nova, Taichi, Taichi Lite) | **NCT6686D** carries the fans; the Nova, Taichi and Taichi Lite add an NCT6796D-E (reported as `nct6798`) with only MOS_FAN1 wired. The **Z890 Taichi OCF** pairs its NCT6686D with a plain NCT6796D (`nct6796`) carrying two fan headers (manual block diagrams) | in-kernel `nct6683` reads the NCT6686D read-only (Z890 Pro-A customer ID since 7.2; others may need `force=1`); PWM via `nct6687d`, or `asrock-nct6683` on the Z890 Nova WiFi |
+| | ASRock B860 / B860M Steel Legend WiFi, B860 / B860I Lightning WiFi | **NCT6686D only** (manual block diagrams) | as for the Z890 NCT6686D boards |
+| | ASRock B860 Pro RS, B860 / B860M Pro-A (WiFi), B860M Pro RS, B860M-X | plain **NCT6796D only** (manual block diagrams), reported as `nct6796` | mainline `nct6775` |
+| | ASRock H810M-X | **NCT5585D** (manual block diagram), reported as `nct6798` | mainline `nct6775` |
 
 Notes:
 
@@ -395,7 +424,11 @@ which PR #128 (2026-08-24) addresses.
 **MMIO.** The out-of-tree `it87` driver needs MMIO (Memory-Mapped I/O) for fan
 control on newer Gigabyte boards. Current builds enable it by default
 ([PR #95](https://github.com/frankcrawford/it87/pull/95), 2026-03); only builds from
-before 2026-03 need `options it87 mmio=on`, and updating is the better fix. One
+before 2026-03 need `options it87 mmio=on`, and updating is the better fix. MMIO
+reaches a secondary chip's extra headers and its fan control; it does not decide
+whether a chip is found, which happens over the Super-I/O ports (#139 found both
+chips with `mmio=off`). On Intel Z890 / B860 boards, builds from 2026-09-09 to
+2026-10-01 have a separate fault, described [above](#ite). One
 counter-case: the default *broke* PWM writes on **IT8665E** boards (ASUS AM4
 300/400-series and X399-era boards such as the ROG Zenith Extreme; values written were
 mangled, 180 stored as about 4,
@@ -510,6 +543,12 @@ WIFI) even for CPU_FAN, until brute force is enabled.
 > That line is always printed and reveals a stale forced setting at a
 > glance. Reference: upstream issue #167 (MSI MPG B650 CARBON WIFI, MS-7D74).
 
+**Some alt1 headers are not exposed.** Under `msi_alt1` the driver reads a fixed
+set of fan channels; a header outside it, such as the EZ Conn header (JAF_2) on a MAG
+X870 TOMAHAWK WIFI, does not appear under Linux
+([#107](https://github.com/Fred78290/nct6687d/issues/107), 2026-09-30). A fan on
+such a header stays under BIOS control.
+
 **Other module parameters** (added 2026-08): `fan_mask` (default `0xff`) and
 `temp_mask` (default `0x7f`) hide unpopulated channels. Masked channels are
 not read from the EC and numbering is never renumbered to fill gaps, so
@@ -569,17 +608,19 @@ below for your board. In-kernel PWM writes on ASRock boards await upstream work:
 Dahlin's series
 ["hwmon: (nct6683) Fan control for ASRock B850 Steel Legend WiFi"](https://ratatoskr.run/lkml/2026/08/17457921/t)
 (posted 2026-08-25: write retries, `pwmN_enable`, restore on unload, and write
-enable for that one board) drew a request for a rework from the hwmon maintainer
-on 2026-09-17 and is not merged (checked 2026-10-04). Even once merged it enables
-writes per board, not for every NCT6686D.
+enable for that one board) drew change requests from the hwmon maintainer
+(2026-08-28 and 2026-09-17) and is not merged (checked 2026-10-15). Even once merged
+it enables writes per board, not for every NCT6686D. A similar series for MSI's
+NCT6687D-R boards (Hamza Mahfooz, 2026-10-04) is not merged either; until one lands,
+the in-kernel `nct6683` is read-only on every released kernel.
 
 **Alternative drivers for ASRock NCT668x boards:**
 
 | Driver | Repository | Supported boards |
 |---|---|---|
-| `asrock-nct6683` | https://github.com/branchmispredictor/asrock-nct6683 | Enables PWM on the boards it lists by exact DMI name: B550 Taichi, B550 Taichi Razer Edition, A620I Lightning WiFi, B650I Lightning WiFi, X570 Creator, X670E Steel Legend, Z370M Pro4, Z890 Nova WiFi. No AUR package |
-| `nct6687d` | https://github.com/Fred78290/nct6687d | Several ASRock NCT6686D boards (e.g. B650 LiveMixer, X870E Taichi Lite). Uses MSI's register map and **MSI's fan labels**, so verify which header is which before trusting a "Pump Fan" label. `nct6687d-dkms-git` on the AUR |
-| `nct6686d` | https://github.com/s25g5d4/nct6686d | Tested only on the A620I Lightning WiFi; its author reports it still targets kernel 6.8. No AUR package |
+| `asrock-nct6683` | https://github.com/branchmispredictor/asrock-nct6683 | Enables PWM on the boards it lists by exact DMI name: B550 Taichi, B550 Taichi Razer Edition, A620I Lightning WiFi, B650I Lightning WiFi, X570 Creator, X670E Steel Legend, B650E Steel Legend WiFi, TRX40 Creator, Z370M Pro4, Z890 Nova WiFi (the table in its `nct6683.c`, as of 2026-10-07; its README lists fewer). No AUR package |
+| `nct6687d` | https://github.com/Fred78290/nct6687d | Several ASRock NCT6686D boards (e.g. B650 LiveMixer, X870E Taichi Lite). Uses MSI's register map and **MSI's fan labels**, so verify which header is which before trusting a "Pump Fan" or "CPU Fan" label. On a B850I Lightning WiFi one developer reports the direct PWM registers have no effect ([PR #217](https://github.com/Fred78290/nct6687d/pull/217), unmerged): test before relying on it. `nct6687d-dkms-git` on the AUR |
+| `nct6686d` | https://github.com/s25g5d4/nct6686d | Tested by its author only on the A620I Lightning WiFi (kernel 6.5); a 2026-03 fix makes it build on 6.11 and later. No AUR package |
 
 Older ASRock boards with NCT677x/NCT679x chips generally work with the
 mainline `nct6775` driver.

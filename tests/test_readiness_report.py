@@ -156,6 +156,28 @@ class TestDetectProblems:
         keys = {p["key"] for p in detect_readiness_problems(diag, duty_drift=NO_DRIFT)}
         assert "acpi" in keys
 
+    def test_acpi_fix_scopes_the_mmio_claim_to_the_chips_it_covers(self):
+        # BLD-04 (2026-10-15): MMIO avoids the ACPI port claim only on the
+        # IT8688E/8689E/8696E/8698E; X399 (IT8686E + IT8792E) and the Z890
+        # AORUS MASTER's IT87952E still needed the parameter. The it87 card must
+        # not promise "most" boards, and the non-it87 card must not mention MMIO.
+        def fix_for(driver: str) -> str:
+            diag = _healthy(
+                acpi_conflicts=[
+                    AcpiConflictInfo(
+                        io_range="0x290", claimed_by="ACPI", conflicts_with_driver=driver
+                    )
+                ]
+            )
+            problems = detect_readiness_problems(diag, duty_drift=NO_DRIFT)
+            return next(p["fix"] for p in problems if p["key"] == "acpi")
+
+        it87 = fix_for("it87")
+        assert "IT8688E, IT8689E, IT8696E and IT8698E" in it87
+        assert "ignore_resource_conflict=1" in it87
+        assert "most port" not in it87
+        assert "MMIO" not in fix_for("nct6775")
+
     def test_module_collision_is_critical(self):
         diag = _healthy(
             module_collisions=[

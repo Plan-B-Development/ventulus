@@ -34,7 +34,7 @@ path, which is always `coretemp` on Intel.
 |---|---|---|---|
 | **LGA1700 600-series** (Z690, B660, H670, H610) | ASUS ROG STRIX / TUF GAMING / PRIME Z690; MSI MAG/MEG/MPG Z690; Gigabyte Z690 AORUS; ASRock Z690 Steel Legend/Extreme | `nct6775` (mainline) on NCT6798D / NCT6796D-E boards; `nct6687d-dkms-git` on MSI Z690 (NCT6687D, default register map: no module parameter; blacklist the read-only in-kernel `nct6683`); `it87-dkms-git` on Gigabyte IT8689E (+ IT87952E on the PRO / MASTER); `asus_ec_sensors` (mainline) for extra ASUS Z690 sensors | Strong mainline coverage. Z690 has the only LGA1700-era ASRock board with an upstream lm-sensors config (Z690 Extreme). |
 | **LGA1700 700-series** (Z790, B760, H770, H610 refresh) | ASUS ROG STRIX Z790-E/-H/-I; MSI MAG Z790 TOMAHAWK / MPG Z790 EDGE WIFI; Gigabyte Z790 AORUS ELITE/MASTER/XTREME; ASRock Z790 Steel Legend/Taichi | Similar to Z690. MSI Z790 ships the NCT6687D with the default map. Gigabyte Z790 AORUS MASTER / XTREME / PRO X are dual-chip (IT8689E + IT87952E); the Z790 AORUS ELITE / ELITE AX has the IT8689E only. ASRock's Z790 Taichi puts five headers on an NCT6686D, read-only in the kernel driver. | The kernel `asus_ec_sensors` list includes ROG STRIX Z790-E GAMING WIFI II, Z790-H and Z790-I GAMING WIFI and ROG MAXIMUS Z790 EXTREME (7.3 adds Z790 HERO). |
-| **LGA1851 800-series** (Z890, B860, H810) | MSI MAG/MEG/MPG Z890; ASUS ROG STRIX Z890; Gigabyte Z890 AORUS; ASRock Z890 Taichi/Steel Legend | MSI Z890 ships the NCT6687D with the alternate "msi_alt1" EC map (monitoring tools call it *NCT6687DR*), which **requires `fan_config=msi_alt1`**, set automatically for boards on the upstream list. ASUS Z890 / B860 carry an NCT6701D, bound as `nct6799`. Gigabyte Z890 AORUS MASTER uses IT8696E + IT87952E, as, per the it87 SIV catalogue, do the XTREME AI TOP, PRO ICE, ELITE X ICE, TACHYON ICE and TACHYON DUO X ICE, the Z890 AI TOP, the Z890 AERO D and the W880 AI TOP; the Z890 AORUS ELITE WIFI7 has the IT8696E only. ASRock Z890 fans sit on an NCT6686D, read-only in the kernel driver. | The newest platform: treat upstream support as still settling. |
+| **LGA1851 800-series** (Z890, B860, H810) | MSI MAG/MEG/MPG Z890; ASUS ROG STRIX Z890; Gigabyte Z890 AORUS; ASRock Z890 Taichi/Steel Legend | MSI Z890 ships the NCT6687D with the alternate "msi_alt1" EC map (monitoring tools call it *NCT6687DR*), which **requires `fan_config=msi_alt1`**, set automatically for boards on the upstream list. ASUS Z890 / B860 carry an NCT6701D, bound as `nct6799`. Gigabyte Z890 AORUS MASTER uses IT8696E + IT87952E, as, per the it87 SIV catalogue, do the XTREME AI TOP, PRO ICE, ELITE X ICE, TACHYON ICE and TACHYON DUO X ICE, the Z890 AI TOP, the Z890 AERO D and the W880 AI TOP; the Z890 AORUS ELITE WIFI7 has the IT8696E only. `it87-dkms-git` builds from 2026-09-09 to 2026-10-01 can fail to load on these Gigabyte boards; rebuild. ASRock Z890 fans sit on an NCT6686D, read-only in the kernel driver; ASRock's B860 Pro RS / Pro-A boards carry a plain NCT6796D for mainline `nct6775`. | The newest platform: treat upstream support as still settling. |
 
 The mainline `coretemp` driver reports CPU temperature on all of these generations
 (per-core + `Package id 0`). It is **not** a fan-control driver: it provides the
@@ -179,8 +179,9 @@ MASTER / XTREME / PRO X (on the Z790 AORUS MASTER at `0x0b10`, not `0x0a60`). Th
 their IT8689E with an IT8792E, not an IT87952E.)
 
 If the System State page shows the dual-chip warning, the secondary is most likely
-blocked by a latched Super-I/O bridge, the cause measured on AM5 boards. A driver
-update does not clear it: keep `sensors-detect`, `nct6775` and `w83627ehf` away,
+blocked by a latched Super-I/O bridge, the cause measured on AM5 boards. (On Z890 /
+B860 boards, rule out a faulty driver build first: see [LGA1851](#lga1851-z890-aorus).)
+A driver update does not clear a latch: keep `sensors-detect`, `nct6775` and `w83627ehf` away,
 reboot, and if the chip is still missing, remove mains power. Follow
 [Hardware Troubleshooting](../manual/hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up)
 step by step; the [AMD guide](21_AMD_Motherboard_Fan_Control_Guide.md#a-secondary-super-io-that-will-not-enumerate)
@@ -203,15 +204,29 @@ fix and its hardware reports, including a Z790 AORUS MASTER with an IT8689E revi
 **Primary chip:** the ITE **IT8696E** (as on the AMD X870E AORUS boards). It needs
 `it87-dkms-git`.
 
-**Secondary chip:** an **IT87952E** on the Z890 AORUS MASTER (LibreHardwareMonitor
-PR #2512), and, per the it87 SIV catalogue alone, on the Z890 AORUS XTREME AI TOP, PRO
-ICE, ELITE X ICE, TACHYON ICE and TACHYON DUO X ICE, the Z890 AI TOP, the Z890 AERO D
-and the W880 AI TOP (the it87 tracker has no report for those yet). All of them are in
-the daemon's dual-chip table, so a missing secondary raises the warning on each. The
-**Z890 AORUS ELITE WIFI7** (ICE / PLUS / DUO X) has the IT8696E only. Remedy and BIOS
+**Secondary chip:** an **IT87952E** on the Z890 AORUS MASTER (an owner's kernel log:
+IT8696E at `0xa40`, IT87952E at `0xb10`,
+[frankcrawford/it87 #139](https://github.com/frankcrawford/it87/issues/139)), and, per
+the it87 SIV catalogue alone, on the Z890 AORUS XTREME AI TOP, PRO ICE, ELITE X ICE,
+TACHYON ICE and TACHYON DUO X ICE, the Z890 AI TOP, the Z890 AERO D and the W880 AI
+TOP (the it87 tracker has no report for those yet). All of them are in the daemon's
+dual-chip table, so a missing secondary raises the warning on each. The **Z890 AORUS
+ELITE WIFI7** (ICE / PLUS / DUO X) and the **B860I AORUS PRO ICE**
+([#138](https://github.com/frankcrawford/it87/issues/138)) have the IT8696E only.
+
+**Driver builds from 2026-09-09 to 2026-10-01 fail on these boards.** On a Z890 AORUS
+MASTER `modprobe it87` failed with *Invalid argument* after
+`H2RAM set_slot(1,…) failed: -22`, so neither chip registered (#139); on a B860I AORUS
+PRO ICE the driver printed *Found IT8696E chip* and registered nothing (#138). The
+fork's [PR #140](https://github.com/frankcrawford/it87/pull/140) fixed both on
+2026-10-02: rebuild `it87-dkms-git` and reboot. If you must stay on such a build,
+`options it87 mmio=off` (plus `ignore_resource_conflict=1` if the bind is then refused)
+lets the module load, but the IT87952E loses its extra headers (SYS_FAN7/8_PUMP on the
+Z890 AORUS MASTER). `mmio=on` is already the default and does not help. This is a
+driver fault, not the bridge latch above. On a current build, the remedy and BIOS
 rules are as for Z690/Z790.
 
-## ASRock (Z690 / Z790 / Z890)
+## ASRock (Z690 / Z790 / Z890 / B860 / H810)
 
 ASRock's Intel boards mix chips, per the block diagrams in ASRock's manuals:
 
@@ -224,9 +239,17 @@ ASRock's Intel boards mix chips, per the block diagrams in ASRock's manuals:
   in-kernel `nct6683` and need an out-of-tree driver.
 - **Z590 Taichi:** NCT6686D (the in-kernel `nct6683` recognises its customer ID from
   7.0; read-only).
-- **Z890 boards** (Steel Legend, Lightning, Pro-A, Pro RS, Nova, Taichi): the fans are
-  on an **NCT6686D**; the Nova and Taichi add an NCT6796D-E with little or nothing
-  wired. PWM needs `nct6687d`, or `asrock-nct6683` on the Z890 Nova WiFi.
+- **Z890 boards** (Steel Legend, Lightning, Pro-A, Pro RS, Z890I Nova, Z890M Riptide,
+  Nova, Taichi, Taichi Lite): the fans are on an **NCT6686D**; the Nova, Taichi and
+  Taichi Lite add an NCT6796D-E with only MOS_FAN1 wired. PWM needs `nct6687d`, or
+  `asrock-nct6683` on the Z890 Nova WiFi. The exception is the **Z890 Taichi OCF**,
+  whose second chip is a plain NCT6796D (`nct6796`, mainline `nct6775`) carrying two
+  fan headers.
+- **B860 Steel Legend WiFi, B860M Steel Legend WiFi, B860 / B860I Lightning WiFi:**
+  **NCT6686D only**, as on the Z890 boards.
+- **B860 Pro RS, B860 / B860M Pro-A (WiFi), B860M Pro RS, B860M-X:** a plain
+  **NCT6796D** (`nct6796`) only. Mainline `nct6775`, no out-of-tree driver needed.
+- **H810M-X:** an **NCT5585D** (reported as `nct6798`), mainline `nct6775`.
 
 The plain Z690 Taichi's chips are unverified. The out-of-tree drivers for the NCT6686D
 are compared in the [ASRock notes](19_Hardware_Compatibility.md#asrock).

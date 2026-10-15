@@ -5,6 +5,31 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Changed
+
+- **Gigabyte Intel Z890 / B860 boards: a failed driver build is diagnosed as one.**
+  `it87-dkms-git` builds from 2026-09-09 to 2026-10-01 can fail to load on these boards ("Invalid
+  argument" after an "H2RAM set_slot … failed" line) or find a chip and register nothing, a driver
+  bug fixed upstream on 2026-10-02. The missing-chip warning, the board notes, the Hardware
+  Troubleshooting manual and the Intel guide now say to rebuild the driver first, instead of sending
+  you round the bridge-latch recovery. They no longer say MMIO fixes chip detection: it reaches the
+  second chip's extra headers, and keeps clear of ACPI conflicts only on the IT8688E, IT8689E,
+  IT8696E and IT8698E.
+- **ASRock X870E Taichi: both pump headers are named.** The board notes now say the board has two
+  pump headers, AIO_PUMP and W_PUMP, and that W_PUMP sits on the channel the `nct6687d` driver calls
+  "CPU Fan". A pump there gets the CPU floor but not the pump protections until you give it the
+  pump role. This mapping comes from another tool's board map and has not been measured on Linux,
+  so Ventulus does not rename the header.
+- **Board and driver lists brought up to date (checked 2026-10-15).** The compatibility, AMD and
+  Intel guides and the in-app notes add the 2026 Gigabyte AM5 boards and the TRX50 boards, ASRock's
+  B850/X870 Riptide, Pro-A and Challenger, B860 and H810 boards from their manuals, and the Z890
+  Taichi OCF's different second chip. They correct the "every AM5 Steel Legend has an NCT6686D"
+  rule (the B850M Steel Legend WiFi has an NCT6796D-S). They also add the two newer boards in
+  `asrock-nct6683`'s list, the X399 boards' need for `ignore_resource_conflict=1`, the it87 driver's
+  kernel 6.4 minimum, and the MSI EZ Conn header that `nct6687d` does not expose. Some BIOS advice
+  for ASRock NCT6686D boards contradicted the read-only kernel driver; it now applies only to the
+  out-of-tree drivers.
+
 ## [5.0.1] — 2026-10-14
 
 Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.0.0 is the current daemon release.

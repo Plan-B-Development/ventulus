@@ -298,7 +298,9 @@ _IT87_V2_RENAME_NOTE = (
     "after the board's ID (e.g. it8696_a008090a), which changes every fan "
     "header's id: re-check pump roles, fan names and profile members after "
     "rebuilding. To keep the old names, build commit c567739 (2026-08-25) — the "
-    "same driver code as the last build before the rename, including PR #128."
+    "same driver code as the last build before the rename, including PR #128 "
+    "but none of the later fixes (such as PR #140, 2026-10-02, for Intel "
+    "Z890/B860 boards). Updating the daemon is the better fix."
 )
 _IT87_V2_RENAME_HANDLED_NOTE = (
     "it87-dkms-git builds from 2026-09-09 (it87 v2.0) name Gigabyte chips after "
@@ -396,12 +398,16 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         known_issues=[
             "The in-kernel driver reports several parts under this one name: "
             "NCT6799D (ASUS AM5 600-series boards), NCT6796D-S (ASRock X870 Nova "
-            "WiFi and the AM5 Pro RS / PG Lightning boards), and the NCT6701D on "
-            "ASUS AM5 800-series and Z890/B860 boards.",
+            "WiFi, the AM5 Pro RS / Pro-A / PG Lightning / Challenger boards and "
+            "the B850M Steel Legend WiFi), and the NCT6701D on ASUS AM5 "
+            "800-series and Z890/B860 boards.",
             "ASUS NCT6701D boards: fans and voltages read correctly but most "
             "temperatures are not meaningful (lm-sensors issue #544); B850, B840, "
             "B860 and Z890 boards are not on the kernel's ASUS WMI access lists, "
-            "so an ACPI I/O-port conflict may block the bind; and the firmware "
+            "so the driver reaches the chip through its I/O ports — owners of a "
+            "TUF GAMING B850-PLUS WIFI and a ROG STRIX B850-F report it binding "
+            "that way (lm-sensors #542, #544), but an ACPI I/O-port conflict can "
+            "still block it on another board; and the firmware "
             "has been seen to put a header straight back into automatic mode "
             "after a manual write. Run Test PWM Control before relying on it.",
             "ASRock Taichi boards (X870E / X670E / B650E Taichi and Taichi Lite) "
@@ -444,7 +450,9 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/nct6775.html",
         known_issues=[
             "A chip reported as nct6796 is the plain NCT6796D (e.g. ASRock Z790 "
-            "PG Lightning / Z790 Pro RS, per ASRock's manuals). The NCT6796D-S on "
+            "PG Lightning / Z790 Pro RS, the B860 Pro RS / Pro-A / B860M-X boards "
+            "and the Z890 Taichi OCF's second chip, per ASRock's manuals). The "
+            "NCT6796D-S on "
             "ASRock AM5 boards such as the X870 Nova WiFi is reported as nct6799 "
             "instead, and the NCT6796D-E as nct6798.",
         ],
@@ -486,7 +494,10 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         driver_package="linux (built-in)",
         driver_url="https://www.kernel.org/doc/html/latest/hwmon/nct6683.html",
         bios_tips=[
-            "ASRock boards: disable 'Smart Fan' in BIOS if PWM writes have no effect.",
+            "With an out-of-tree driver bound (asrock-nct6683 or nct6687d): if PWM "
+            "writes are accepted but the fan does not change, check the header's "
+            "Smart Fan mode in the BIOS. This does not apply to the in-kernel "
+            "nct6683, whose headers are read-only whatever the BIOS says.",
         ],
         known_issues=[
             "The in-kernel nct6683 driver supports NCT6686D monitoring but does not "
@@ -504,14 +515,16 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             "ASRock boards it lists by exact name; nct6687d (Fred78290) drives "
             "several ASRock NCT6686D boards with MSI's register map — its fan "
             "labels are MSI's, so check which header is which before trusting a "
-            "'Pump Fan' label. s25g5d4/nct6686d was only ever tested on the "
-            "A620I Lightning WiFi. None of the three has an AUR package except "
-            "nct6687d-dkms-git.",
+            "'Pump Fan' or 'CPU Fan' label. s25g5d4/nct6686d was only ever tested "
+            "on the A620I Lightning WiFi. None of the three has an AUR package "
+            "except nct6687d-dkms-git.",
         ],
         notes=(
-            "Nuvoton NCT6686D — ASRock AM5 Steel Legend / LiveMixer / Lightning "
-            "boards, Taichi boards (paired with an NCT6796D-S), and ASRock Intel "
-            "Z590/Z790/Z890 boards. The in-kernel nct6683 gives monitoring only."
+            "Nuvoton NCT6686D — most ASRock AM5 Steel Legend boards (not the "
+            "B850M Steel Legend WiFi, which has an NCT6796D-S), the LiveMixer, "
+            "Riptide and Lightning boards, Taichi boards (paired with an "
+            "NCT6796D-S), and ASRock Intel Z590/Z790/Z890/B860 boards. The "
+            "in-kernel nct6683 gives monitoring only."
         ),
     ),
     ChipGuidance(
@@ -717,8 +730,9 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
     # gained the chip ID in kernel 6.3 (torvalds/linux d44cb4cd7456; v6.2
     # lacks it — corrected from "6.4" 2026-09-24), so the in-kernel driver
     # can *enumerate* it — but secondary-chip fan control on these boards
-    # comes from the DKMS build's ISA-bridge MMIO/H2RAM access path
-    # (frankcrawford/it87 PR #102, issue #64).
+    # comes from the DKMS build's MMIO/H2RAM access path (frankcrawford/it87
+    # PR #102, issue #64), reached without the ISA bridge since PR #140
+    # (2026-10-02, curator BLD-03).
     ChipGuidance(
         chip_prefix="it87952",
         driver_name="it87",
@@ -728,11 +742,17 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         known_issues=[
             "Mainline kernel ≥ 6.3 enumerates IT87952E (sensors/RPM), but on "
             "dual-chip Gigabyte boards fan CONTROL of this secondary chip needs "
-            "the frankcrawford/it87 DKMS build — its ISA-bridge MMIO/H2RAM path "
-            "(merged 2026-04, PR #102) plus the smartfan-enable handling "
-            "(issue #64, closed 2025-12) made these headers writable.",
+            "the frankcrawford/it87 DKMS build — its MMIO/H2RAM path (merged "
+            "2026-04, PR #102; since PR #140, 2026-10-02, reached directly "
+            "rather than through the ISA bridge) plus the smartfan-enable "
+            "handling (issue #64, closed 2025-12) made these headers writable.",
             "Older DKMS builds (pre-2026-03) need 'options it87 mmio=on'; "
-            "current builds default MMIO on (PR #95).",
+            "current builds default MMIO on (PR #95). On Intel Z890/B860 boards, "
+            "builds from 2026-09-09 to 2026-10-01 can fail to load or bind no "
+            "chip at all (it87 #139, #138; fixed by PR #140): use a later build. "
+            "'mmio=off' gets such a build to load, but this chip then loses its "
+            "extra (H2RAM) headers, e.g. SYS_FAN7/8_PUMP on the Z890 AORUS "
+            "MASTER.",
             _IT87_V2_RENAME_NOTE,
         ],
         notes=(
@@ -767,8 +787,9 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         ],
         notes=(
             "ITE IT8665E — ASUS AM4 300/400-series boards (PRIME X470-PRO, ROG "
-            "STRIX X470-F/-I, ROG STRIX B450-F, TUF B450-PLUS, ROG STRIX X370-F — "
-            "chip markings and sensors-detect, frankcrawford/it87 #27) and "
+            "STRIX X470-F/-I, ROG STRIX B450-F, ROG STRIX B450-I, TUF B450-PLUS, "
+            "ROG STRIX X370-F — chip markings and sensors-detect, "
+            "frankcrawford/it87 #27, lm-sensors #195) and "
             "X399/TR4-era boards (e.g. ASUS ROG Zenith Extreme). Requires the "
             "out-of-tree driver; update it to a build ≥ 2026-07-22 (PR #120) — "
             "older builds need mmio=off (issue #106)."
@@ -876,7 +897,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             driver_url="https://github.com/frankcrawford/it87",
             known_issues=[
                 f"{label} is not in the mainline it87 driver's chip list "
-                "(checked against kernel 7.3-rc4 on 2026-09-24), so the "
+                "(checked against kernel 7.3-rc7 on 2026-10-15), so the "
                 "in-kernel driver will not bind to it. Fan control requires the "
                 "out-of-tree it87-dkms-git build.",
                 *extra,
@@ -893,18 +914,20 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
                 "it8698",
                 "IT8698E",
                 (
-                    "Covered by the driver's MMIO/H2RAM path, which current "
-                    "builds enable by default (mmio=on is already in effect — "
-                    "setting it changes nothing).",
+                    "Read through the driver's native MMIO path (frankcrawford/"
+                    "it87 PR #140), which current builds enable by default "
+                    "(mmio=on is already in effect — setting it changes "
+                    "nothing).",
                 ),
             ),
             (
                 "it8613",
                 "IT8613E",
                 (
-                    "Mainline support is queued: the IT8613E series was applied "
-                    "to hwmon-next on 2026-08-30 and should reach kernel 7.4 — "
-                    "it is not in 7.3. sensors-detect recognises device ID "
+                    "Mainline support is queued: the IT8613E series is in "
+                    "hwmon-next (re-applied there 2026-09-29) and should reach "
+                    "kernel 7.4 — it is not in 7.3. sensors-detect recognises "
+                    "device ID "
                     "0x8613 but records its driver as 'to-be-written', so a "
                     "sensors-detect run will not give you a usable driver name.",
                 ),
@@ -1547,9 +1570,11 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
         severity="medium",
         summary="ASRock + NCT6686D — monitoring works but PWM writes may not",
         details=[
-            "ASRock boards with an NCT6686D — e.g. the AM5 Steel Legend, LiveMixer "
-            "and Lightning boards, the AM5 and Z790/Z890 Taichi boards, Z590 "
-            "Taichi and most Z890 boards — show sensors and RPMs, but under the "
+            "ASRock boards with an NCT6686D — e.g. most AM5 Steel Legend boards "
+            "(the B850M Steel Legend WiFi has an NCT6796D-S instead), the "
+            "LiveMixer, Riptide and Lightning boards, the AM5 and Z790/Z890 "
+            "Taichi boards, Z590 Taichi, most Z890 boards and the B860 Steel "
+            "Legend / Lightning boards — show sensors and RPMs, but under the "
             "in-kernel nct6683 the headers are read-only: manual PWM writes are "
             "refused, not accepted-and-ignored.",
             "That is by driver design, not a board fault: nct6683 makes pwm "
@@ -1561,10 +1586,15 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "  1. asrock-nct6683 (github.com/branchmispredictor/asrock-nct6683) — "
             "enables PWM on the boards it lists by exact name (B550 Taichi and "
             "Razer Edition, A620I / B650I Lightning WiFi, X570 Creator, X670E "
-            "Steel Legend, Z370M Pro4, Z890 Nova WiFi)\n"
+            "Steel Legend, B650E Steel Legend WiFi, TRX40 Creator, Z370M Pro4, "
+            "Z890 Nova WiFi; the list in its source, not its README, is "
+            "current)\n"
             "  2. nct6687d (github.com/Fred78290/nct6687d) — drives several "
             "ASRock NCT6686D boards with MSI's register map; its fan labels are "
-            "MSI's, so confirm which header is which before trusting 'Pump Fan'\n"
+            "MSI's, so confirm which header is which before trusting 'Pump Fan' "
+            "or 'CPU Fan'. On a B850I Lightning WiFi one developer reports the "
+            "direct PWM registers have no effect (nct6687d PR #217, unmerged) — "
+            "test before relying on it\n"
             "  3. nct6686d (github.com/s25g5d4/nct6686d) — only tested on the "
             "A620I Lightning WiFi",
             "Where the board has a second Nuvoton chip, the headers are split: "
@@ -1574,6 +1604,13 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "three on an NCT5585D that nct6775 drives; on an X870E Taichi an owner "
             "measured CHA_FAN1/2, CPU_FAN2 and AIO_PUMP on the nct6799 chip and "
             "CHA_FAN3/4 on the NCT6686D (nct6687d #155).",
+            "X870E Taichi (and Lite / White / OCF): the board has TWO pump "
+            "headers. AIO_PUMP is on the nct6799 chip (pwm4), and W_PUMP is the "
+            "NCT6686D's first channel (pwm1), which nct6687d labels 'CPU Fan' "
+            "(LibreHardwareMonitor's board map; not yet measured on Linux). A "
+            "pump on either header needs the pump role assigned by hand (Set "
+            "role… on its card, or the fan wizard): the 'CPU Fan' label gives "
+            "W_PUMP the CPU floor, not the pump protections.",
             "Test write capability on a non-critical chassis fan header first.",
         ],
     ),
@@ -1603,10 +1640,13 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
         summary="Gigabyte ITE — prefer driver-local conflict resolution over system-wide",
         details=[
             "Keep it87-dkms-git current before reaching for parameters: "
-            "2026-03+ builds default MMIO on, which sidesteps the ACPI I/O "
-            "port claim on newer ITE chips (frankcrawford/it87 issue #81 "
-            "discussion), and master carries a built-in DMI ACPI-exemption "
-            "table (it87_acpi_ignore) for known-safe boards.",
+            "2026-03+ builds default MMIO on, which avoids the ACPI I/O port "
+            "claim on the IT8688E, IT8689E, IT8696E and IT8698E "
+            "(frankcrawford/it87 issue #81 discussion), and master carries a "
+            "built-in DMI ACPI-exemption table (it87_acpi_ignore) for "
+            "known-safe boards. Boards with an IT8686E, or with an IT8792E or "
+            "IT87952E second chip, can still need the parameter below (X399 "
+            "boards, it87 PRs #135 and #141; Z890 AORUS MASTER, issue #139).",
             _IT87_V2_RENAME_NOTE,
             "If ACPI I/O port conflicts still block the bind, prefer the "
             "driver-local 'ignore_resource_conflict=1' parameter for the "
@@ -1819,11 +1859,13 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "carries no fan header at all — the B450 AORUS PRO's five headers "
             "are all on the IT8686E — so a secondary with no fans is normal there.",
             "If the System State page reports a missing chip, update "
-            "it87-dkms-git first — 2026-03+ builds default mmio=on and merge "
-            "the ISA-bridge MMIO path that fixes secondary-chip enumeration "
-            "(frankcrawford/it87 PR #95/#102). On older builds set "
-            "'options it87 mmio=on' in /etc/modprobe.d/it87.conf. Then "
-            "reboot. Avoid running sensors-detect after boot.",
+            "it87-dkms-git first, then reboot. 2026-03+ builds default "
+            "mmio=on (frankcrawford/it87 PR #95/#102), which reaches the "
+            "secondary chip's extra headers and its fan control; it does not "
+            "decide whether the chip is found — that happens over the "
+            "Super-I/O ports. On older builds set 'options it87 mmio=on' in "
+            "/etc/modprobe.d/it87.conf. Avoid running sensors-detect after "
+            "boot.",
             _IT87_V2_RENAME_NOTE,
             "The secondary IT8792E was historically read-only on some "
             "Gigabyte AM4 boards; verify per-header writability before "
@@ -1844,11 +1886,13 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "fan headers. Single-chip variants (B550M AORUS PRO, B550I AORUS "
             "PRO AX) ship only the IT8688E.",
             "If the System State page reports a missing secondary chip, "
-            "update it87-dkms-git first — 2026-03+ builds default mmio=on "
-            "and merge the ISA-bridge MMIO path that fixes secondary-chip "
-            "enumeration (frankcrawford/it87 PR #95/#102). On older builds "
-            "set 'options it87 mmio=on' in /etc/modprobe.d/it87.conf. Then "
-            "reboot. Avoid running sensors-detect after boot — it can leave "
+            "update it87-dkms-git first, then reboot. 2026-03+ builds default "
+            "mmio=on (frankcrawford/it87 PR #95/#102), which reaches the "
+            "secondary chip's extra headers and its fan control; it does not "
+            "decide whether the chip is found — that happens over the "
+            "Super-I/O ports. On older builds set 'options it87 mmio=on' in "
+            "/etc/modprobe.d/it87.conf. Avoid running sensors-detect after "
+            "boot — it can leave "
             "the SuperIO bridge in configuration mode (frankcrawford/it87 "
             "issue #70).",
             _IT87_V2_RENAME_NOTE,
@@ -2068,9 +2112,11 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "One owner of a ROG STRIX X870E-E measured the firmware switching a "
             "header straight back from manual (pwm_enable 1) to full speed "
             "(zeule/asus-ec-sensors #100), reached through the I/O ports. Kernel "
-            "7.1 moved X870 / X870E boards to the ASUS WMI access path; whether "
-            "that stops the reclaim is unverified, and B850, Z890 and B860 boards "
-            "still use the ports. The daemon's watchdog re-asserts manual mode — "
+            "7.1 moved the X870 / X870E boards on its ASUS list to the WMI access "
+            "path (a board missing from that list, such as a newer edition, still "
+            "uses the ports); whether that stops the reclaim is unverified, and "
+            "B850, Z890 and B860 boards still use the ports. The daemon's "
+            "watchdog re-asserts manual mode — "
             "run Test PWM Control to see whether control holds on your board.",
         ],
     ),
@@ -2102,6 +2148,12 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "0x8883, or 0xFFFF on a read without the unlock key; those are two "
             "views of one blocked state, and the driver logs neither at the "
             "default log level.",
+            "On Intel Z890 / B860 boards, rule out the driver first: "
+            "it87-dkms-git builds from 2026-09-09 to 2026-10-01 can fail to load "
+            "there ('Invalid argument' after an 'H2RAM set_slot … failed' line) "
+            "or find the IT8696E and register nothing (frankcrawford/it87 "
+            "#139, #138). PR #140 fixed both on 2026-10-02 — rebuild before "
+            "trying the recovery below.",
             "It is recoverable (measured 2026-09-05). The latch is written by "
             "the nct6775/w83627ehf modules, which unlock Super-I/O config mode "
             "before reading the device ID and so do the damage even though they "
@@ -2285,12 +2337,12 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "only, and the AMD X670E AORUS boards pair their IT8689E with an "
             "IT8792E instead.",
             "If the System State page reports a missing secondary chip, "
-            "update it87-dkms-git first (2026-03+ builds default mmio=on "
-            "and fix secondary-chip enumeration and control via the "
-            "ISA-bridge MMIO path — PR #95/#102). On older builds set "
-            "`options it87 mmio=on` in /etc/modprobe.d/it87.conf. Then "
-            "reboot. Avoid running sensors-detect after boot "
-            "(frankcrawford/it87 issue #70).",
+            "update it87-dkms-git first, then reboot. 2026-03+ builds default "
+            "mmio=on (PR #95/#102), which reaches the secondary chip's extra "
+            "headers and its fan control; it does not decide whether the chip "
+            "is found. On older builds set `options it87 mmio=on` in "
+            "/etc/modprobe.d/it87.conf. Avoid running sensors-detect after "
+            "boot (frankcrawford/it87 issue #70).",
             _IT87_V2_RENAME_NOTE,
             "BIOS: Smart Fan 6 can take a header back from Linux; the "
             "pwm_enable watchdog detects and re-asserts manual mode.",
@@ -2323,14 +2375,25 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "XTREME AI TOP, PRO ICE, ELITE X ICE, TACHYON ICE and TACHYON DUO X "
             "ICE, the Z890 AI TOP, the Z890 AERO D and the W880 AI TOP the same "
             "way. The Z890 AORUS ELITE WIFI7 (and its ICE / PLUS / DUO X "
-            "editions) has the IT8696E only.",
-            "Apply the same dual-chip remediation if the secondary chip "
-            "fails to enumerate: update it87-dkms-git first (2026-03+ "
-            "builds default mmio=on); on older builds set "
-            "`options it87 mmio=on`. The daemon's board table lists every "
-            "dual-chip board named above, so a missing secondary raises its "
-            "warning. Apart from the MASTER boards, those entries rest on the "
-            "catalogue alone — the it87 tracker has no report for them yet.",
+            "editions) has the IT8696E only. On a Z890 AORUS MASTER an "
+            "owner's kernel log shows the IT8696E at 0xa40 and the IT87952E at "
+            "0xb10 (frankcrawford/it87 #139).",
+            "If chips are missing, check the driver build first: "
+            "it87-dkms-git builds from 2026-09-09 to 2026-10-01 can fail to "
+            "load on these boards ('Invalid argument' after an 'H2RAM "
+            "set_slot … failed' line, #139) or find the IT8696E and register "
+            "nothing (B860I AORUS PRO ICE, #138). PR #140 fixed both on "
+            "2026-10-02: rebuild it87-dkms-git and reboot. On such a build, "
+            "'options it87 mmio=off' (plus ignore_resource_conflict=1 if the "
+            "bind is then refused) lets it load, but the IT87952E loses its "
+            "extra headers (SYS_FAN7/8_PUMP on the Z890 AORUS MASTER). Do not "
+            "set mmio=on — it is already the default.",
+            "On a current build, apply the same dual-chip remediation as on "
+            "the AMD boards if the secondary chip is missing. The daemon's "
+            "board table lists every dual-chip board named above, so a missing "
+            "secondary raises its warning. Apart from the MASTER, those "
+            "entries rest on the it87 sensor catalogue alone — the it87 "
+            "tracker has no report for them yet.",
             _IT87_V2_RENAME_NOTE,
             "BIOS: Smart Fan 6 can take a header back from Linux within "
             "seconds; the daemon's watchdog re-asserts manual mode.",
@@ -2987,7 +3050,12 @@ def dual_chip_warning_html(
         f"<code>sudo dmesg | grep -i it87</code>. A healthy chip prints a "
         f"<i>Found IT8xxxE chip</i> line. No <code>it87</code> lines at all means "
         f"the out-of-tree driver is not loaded: install <code>it87-dkms-git</code>, "
-        f"reboot, then click <i>Rescan Hardware</i> (in the footer).<br><br>"
+        f"reboot, then click <i>Rescan Hardware</i> (in the footer). On an Intel "
+        f"Z890 / B860 board, an <i>H2RAM … failed</i> line, a module that "
+        f"will not load (<i>Invalid argument</i>), or a <i>Found</i> line with "
+        f"no chip appearing, means a driver build from 2026-09-09 to "
+        f"2026-10-01: rebuild <code>it87-dkms-git</code> (fixed 2026-10-02, "
+        f"it87 PR #140) and reboot before the steps below.<br><br>"
         f"<b>If the driver is loaded and a chip is still missing, work down this "
         f"list, re-checking after each step:</b><br>"
         f"&nbsp;&nbsp;1. Stop whatever is unlocking the Super-I/O: do not run "

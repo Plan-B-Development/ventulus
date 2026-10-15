@@ -286,8 +286,9 @@ def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
     if diag.acpi_conflicts:
         has_it87 = any(c.conflicts_with_driver == "it87" for c in diag.acpi_conflicts)
         fix = (
-            "Update it87-dkms-git first (2026-03+ builds sidestep most port "
-            "claims via MMIO); if the bind still fails, add "
+            "Update it87-dkms-git first (2026-03+ builds avoid the port "
+            "claim via MMIO on the IT8688E, IT8689E, IT8696E and IT8698E); "
+            "if the bind still fails, add "
             "'options it87 ignore_resource_conflict=1' to "
             "/etc/modprobe.d/it87.conf (preferred for ITE chips), or add "
             "'acpi_enforce_resources=lax' to the kernel command line."
