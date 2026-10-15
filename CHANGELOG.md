@@ -5,6 +5,21 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The install commands work in fish, CachyOS's default shell.** The documented steps used a heredoc,
+  a `NAME=value` line and a bracketed `(cd … && makepkg -si)`, all parse errors in fish. They are now
+  one set of commands that works as written in bash, zsh and fish, and a test parses every command
+  block in the README and the manual in all three.
+
+### Changed
+
+- **The bootstrap install script checks the machine before it changes anything.** It prints the
+  distribution, CPU architecture and init system it found, and stops with nothing changed on a
+  distribution not built on Arch, on Manjaro, on a CPU other than x86_64, or without systemd.
+- **Driver Setup explains how to install `it87-dkms-git` or `nct6687d-dkms-git` without an AUR
+  helper**, with `git clone` and `makepkg`, and how to rebuild it later the same way.
+
 ## [5.1.0] — 2026-10-15
 
 Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.1.0 is the current daemon release.

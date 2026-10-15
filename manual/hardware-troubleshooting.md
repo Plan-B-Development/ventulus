@@ -140,7 +140,8 @@ B860 boards ([it87 #139](https://github.com/frankcrawford/it87/issues/139),
 [#138](https://github.com/frankcrawford/it87/issues/138)). It was fixed on
 2026-10-02 ([PR #140](https://github.com/frankcrawford/it87/pull/140)):
 
-1. Rebuild the driver: `yay -S it87-dkms-git`.
+1. Rebuild the driver: `yay -S it87-dkms-git`, or without an AUR helper the
+   [rebuild commands in Driver Setup](driver-setup.md#without-an-aur-helper).
 2. Reboot, then click **Rescan Hardware**.
 
 Do not go on to Case B for this. `options it87 mmio=off` also gets such a build to

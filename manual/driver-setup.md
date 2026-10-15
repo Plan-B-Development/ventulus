@@ -80,7 +80,7 @@ To confirm the headers match: `pacman -Q | grep -- -headers` and compare against
 
 ## Step 3 — Install the driver
 
-Install from the AUR with your helper of choice. The examples use `yay`, and building manually with `makepkg` works the same way (see the [Arch wiki AUR page](https://wiki.archlinux.org/title/Arch_User_Repository)):
+Both drivers come from the AUR (the Arch User Repository), which `pacman` does not read. With an AUR helper such as `yay` or `paru` (CachyOS ships both), it is one command:
 
 ```bash
 # Gigabyte / ITE chips
@@ -89,6 +89,31 @@ yay -S it87-dkms-git
 # MSI / Nuvoton NCT6687D
 yay -S nct6687d-dkms-git
 ```
+
+#### Without an AUR helper
+
+A plain Arch install has no AUR helper, and you do not need to install one. An AUR package is a build recipe (a `PKGBUILD`); `makepkg` turns it into an ordinary package and installs it with `pacman`. Run these as your normal user, not as root (`makepkg` refuses to run as root and asks for your password when it installs):
+
+```bash
+# One-time: the build tools and git
+sudo pacman -S --needed base-devel git
+
+# Fetch the recipe, read it, then build and install it
+git clone https://aur.archlinux.org/it87-dkms-git.git
+less it87-dkms-git/PKGBUILD
+makepkg -si -D it87-dkms-git
+```
+
+For an MSI board, use `nct6687d-dkms-git` in place of `it87-dkms-git` on all three lines. `-s` installs what the build needs (including `dkms`) with `pacman`, and `-i` installs the finished package. The kernel headers from Step 2 are still yours to install. Read the `PKGBUILD` before you build it: anyone can publish to the AUR, and the recipe runs on your machine. The [Arch wiki AUR page](https://wiki.archlinux.org/title/Arch_User_Repository) covers the process in full.
+
+To update or rebuild it later, keep the cloned folder and run:
+
+```bash
+git -C it87-dkms-git pull
+makepkg -sif -D it87-dkms-git
+```
+
+The `pull` updates the recipe; `makepkg` fetches the driver's latest source itself, and `-f` rebuilds even when nothing upstream has changed, which is what a reinstall needs.
 
 Both are `-git` packages: every install/reinstall builds the **current upstream snapshot**. That matters, because many historical workarounds are already fixed upstream (for the it87 driver: MMIO on by default since the 2026-03 builds, which also sidesteps the ACPI port conflict on the IT8688E, IT8689E, IT8696E and IT8698E). `it87-dkms-git` builds only on kernel **6.4 or newer** (since 2026-08-23), so it cannot build on the 6.1, 5.15 or 5.10 LTS kernels. The version number shown on the AUR page is stale `-git` metadata; what installs is upstream HEAD at build time. If you installed the driver months ago and something misbehaves, **reinstalling the package is the first remediation, not the last**.
 
@@ -239,7 +264,7 @@ If you created `/etc/modprobe.d/ventulus-superio-local.conf` while [recovering a
 ## Staying current
 
 - **Kernel updates:** DKMS rebuilds the module automatically when a new kernel + matching headers are installed. If fans disappear right after a kernel update, the usual cause is missing/mismatched headers, so re-check Step 2.
-- **Driver updates:** `-git` AUR packages only pick up upstream fixes when *reinstalled* (`yay -S it87-dkms-git`). Do this before troubleshooting any fan-control regression. On a Gigabyte board, a build from 2026-09-09 on renames your chips, which changes nothing in Ventulus: see [it87 v2.0 renames your chips](#it87-v20-renames-your-chips). On an Intel Z890 / B860 Gigabyte board, builds from 2026-09-09 to 2026-10-01 can fail to load; rebuild (see [Module parameters you may actually need](#module-parameters-you-may-actually-need)). (If a current build *fails to compile*, see upstream [issue #108](https://github.com/frankcrawford/it87/issues/108) for a known `-Werror=unused-function` toolchain failure.)
+- **Driver updates:** `-git` AUR packages only pick up upstream fixes when *reinstalled* (`yay -S it87-dkms-git`, or without a helper the [rebuild commands](#without-an-aur-helper) in Step 3). Do this before troubleshooting any fan-control regression. On a Gigabyte board, a build from 2026-09-09 on renames your chips, which changes nothing in Ventulus: see [it87 v2.0 renames your chips](#it87-v20-renames-your-chips). On an Intel Z890 / B860 Gigabyte board, builds from 2026-09-09 to 2026-10-01 can fail to load; rebuild (see [Module parameters you may actually need](#module-parameters-you-may-actually-need)). (If a current build *fails to compile*, see upstream [issue #108](https://github.com/frankcrawford/it87/issues/108) for a known `-Werror=unused-function` toolchain failure.)
 
 ## AMD GPU fan control prerequisite (RDNA3+)
 

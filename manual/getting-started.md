@@ -55,7 +55,8 @@ why each step is needed.
 
 Ventulus is packaged for Arch Linux and CachyOS (x86_64). The signed pacman
 repository is the recommended route: set it up once, and both packages then
-upgrade with your normal `sudo pacman -Syu`.
+upgrade with your normal `sudo pacman -Syu`. Every command in this section works as
+written in bash, zsh and fish (CachyOS's default shell).
 
 ### The signed pacman repository
 
@@ -65,13 +66,11 @@ curl -fsSL https://raw.githubusercontent.com/Plan-B-Development/pacman-repo/main
   | sudo pacman-key --add -
 sudo pacman-key --lsign-key 4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA
 
-# 2. add the repository — run once; `tee -a` would append a duplicate block
-grep -q '^\[ventulus\]' /etc/pacman.conf || sudo tee -a /etc/pacman.conf <<'EOF'
-
-[ventulus]
-SigLevel = Required
-Server = https://github.com/Plan-B-Development/pacman-repo/releases/download/repo
-EOF
+# 2. add the repository — adds nothing if a [ventulus] block is already there
+grep -q '^\[ventulus\]' /etc/pacman.conf || printf '%s\n' '' '[ventulus]' \
+  'SigLevel = Required' \
+  'Server = https://github.com/Plan-B-Development/pacman-repo/releases/download/repo' \
+  | sudo tee -a /etc/pacman.conf
 
 # 3. install — the daemon comes along as a dependency
 sudo pacman -Syu ventulus
@@ -85,19 +84,25 @@ install `ventulusd` instead of `ventulus` in step 3.
 
 ### Or with the bootstrap script
 
-A signed script does the same setup in one step. It trusts the signing key
-(checking the fingerprint first), adds the repository, installs both packages and
-enables the daemon, and it is safe to re-run. Verify its signature before you run
-it: that check is what stops a tampered script from installing your system
-packages.
+A signed script does the same setup in one step. It first prints what it found
+(distribution, CPU architecture, init system) and stops, changing nothing, on a
+machine the packages cannot work on: a distribution not built on Arch, Manjaro, a
+CPU other than x86_64, a system not running systemd, or one without pacman or
+sudo. Otherwise it trusts the
+signing key (checking the fingerprint first), adds the repository, installs both
+packages and enables the daemon, and it is safe to re-run. Verify its signature
+before you run it: that check is what stops a tampered script from installing your
+system packages.
+
+Manjaro is not supported, by the script or by hand: the GUI package installs into
+the Python version current Arch ships, and Manjaro's can lag behind it.
 
 ```bash
-base=https://github.com/Plan-B-Development/pacman-repo/releases/download/repo
-curl -fsSLO "$base/bootstrap.sh"
-curl -fsSLO "$base/bootstrap.sh.sig"
+curl -fsSLO https://github.com/Plan-B-Development/pacman-repo/releases/download/repo/bootstrap.sh
+curl -fsSLO https://github.com/Plan-B-Development/pacman-repo/releases/download/repo/bootstrap.sh.sig
 curl -fsSL https://raw.githubusercontent.com/Plan-B-Development/pacman-repo/main/keys/ventulus.gpg | gpg --import
 gpg --verify bootstrap.sh.sig bootstrap.sh   # expect 4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA
-less bootstrap.sh                            # read it — you are about to run it as root
+less bootstrap.sh                            # read it — it runs commands as root
 bash ./bootstrap.sh
 ```
 
@@ -130,9 +135,9 @@ Build the daemon first, because the GUI package depends on it:
 
 ```bash
 git clone https://github.com/Plan-B-Development/ventulusd.git
-(cd ventulusd/packaging && makepkg -si)
+makepkg -si -D ventulusd/packaging
 git clone https://github.com/Plan-B-Development/ventulus.git
-(cd ventulus/packaging && makepkg -si)
+makepkg -si -D ventulus/packaging
 sudo systemctl enable --now ventulusd
 ```
 

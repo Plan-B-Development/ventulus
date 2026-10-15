@@ -47,7 +47,7 @@ guide covers chips and boards.
 
 Ventulus is packaged for Arch Linux and CachyOS (x86_64) in a signed pacman
 repository. Add it once, and both packages then upgrade with your normal
-`sudo pacman -Syu`:
+`sudo pacman -Syu`. The commands work as written in bash, zsh and fish:
 
 ```bash
 # 1. trust the signing key
@@ -55,13 +55,11 @@ curl -fsSL https://raw.githubusercontent.com/Plan-B-Development/pacman-repo/main
   | sudo pacman-key --add -
 sudo pacman-key --lsign-key 4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA
 
-# 2. add the repository — run once; `tee -a` would append a duplicate block
-grep -q '^\[ventulus\]' /etc/pacman.conf || sudo tee -a /etc/pacman.conf <<'EOF'
-
-[ventulus]
-SigLevel = Required
-Server = https://github.com/Plan-B-Development/pacman-repo/releases/download/repo
-EOF
+# 2. add the repository — adds nothing if a [ventulus] block is already there
+grep -q '^\[ventulus\]' /etc/pacman.conf || printf '%s\n' '' '[ventulus]' \
+  'SigLevel = Required' \
+  'Server = https://github.com/Plan-B-Development/pacman-repo/releases/download/repo' \
+  | sudo tee -a /etc/pacman.conf
 
 # 3. install — the daemon comes along as a dependency
 sudo pacman -Syu ventulus
