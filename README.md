@@ -2,7 +2,7 @@
 
 *Formerly Control-OFC (`control-ofc-gui`).*
 
-**Latest release:** v5.0.1 — 2026-10-14. Pairs with `ventulusd` ≥ v3.0.0; version numbers carry on from Control-OFC. Individual features gate on newer daemons and say so in the app when one is missing.
+**Latest release:** v5.1.0 — 2026-10-15. Pairs with `ventulusd` ≥ v3.0.0; version numbers carry on from Control-OFC. Individual features gate on newer daemons and say so in the app when one is missing.
 
 Ventulus is a fan control app for Linux desktops. You decide how each group of fans
 should respond to temperature; a background service, [`ventulusd`](https://github.com/Plan-B-Development/ventulusd),

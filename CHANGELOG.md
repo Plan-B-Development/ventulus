@@ -5,6 +5,11 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+## [5.1.0] — 2026-10-15
+
+Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.1.0 is the current daemon release.
+Board, driver and GPU guidance brought up to date, and Intel Arc temperatures named by their kernel labels.
+
 ### Changed
 
 - **Gigabyte Intel Z890 / B860 boards: a failed driver build is diagnosed as one.**
