@@ -365,11 +365,14 @@ def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
                 "key": "gpu_ppfeaturemask",
                 "label": "GPU fan control disabled (ppfeaturemask)",
                 "fix": (
-                    "Add 'amdgpu.ppfeaturemask=0xffffffff' to your kernel "
-                    "command line and reboot to enable PMFW fan control."
+                    "Add 'amdgpu.ppfeaturemask=0xfff7ffff' to your kernel "
+                    "command line and reboot to enable PMFW fan control (any "
+                    "mask with bit 0x4000 set works). From Linux 6.13 the "
+                    "kernel then logs 'Overdrive is enabled' and marks itself "
+                    "tainted; that is expected."
                 ),
-                "doc_url": "https://wiki.archlinux.org/title/AMDGPU#Fan_control",
-                "doc_title": "Arch Wiki: AMDGPU fan control",
+                "doc_url": "https://wiki.archlinux.org/title/AMDGPU#Boot_parameter",
+                "doc_title": "Arch Wiki: AMDGPU OverDrive boot parameter",
                 "severity": "warn",
             }
         )
@@ -379,11 +382,12 @@ def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
                 "key": "gpu_readonly",
                 "label": "GPU fan control unavailable",
                 "fix": (
-                    "RDNA3+ cards need 'amdgpu.ppfeaturemask=0xffffffff' on the "
-                    "kernel command line; add it and reboot."
+                    "RDNA3+ cards need 'amdgpu.ppfeaturemask=0xfff7ffff' (or any "
+                    "mask with bit 0x4000 set) on the kernel command line; add it "
+                    "and reboot."
                 ),
-                "doc_url": "https://wiki.archlinux.org/title/AMDGPU#Fan_control",
-                "doc_title": "Arch Wiki: AMDGPU fan control",
+                "doc_url": "https://wiki.archlinux.org/title/AMDGPU#Boot_parameter",
+                "doc_title": "Arch Wiki: AMDGPU OverDrive boot parameter",
                 "severity": "warn",
             }
         )
@@ -659,25 +663,29 @@ def gpu_verify_problems(result: GpuVerifyResult) -> list[dict]:
     cannot see: writes accepted but silently ignored, the fan not spinning, or a
     BIOS reclaim.
     """
-    arch_url = "https://wiki.archlinux.org/title/AMDGPU#Fan_control"
-    arch_title = "Arch Wiki: AMDGPU fan control"
+    arch_url = "https://wiki.archlinux.org/title/Fan_speed_control#AMDGPU_sysfs_fan_control"
+    arch_title = "Arch Wiki: AMDGPU sysfs fan control"
     specs = {
         "curve_not_applied": {
             "key": "gpu_verify_curve_not_applied",
             "label": "GPU fan write had no effect",
             "fix": (
                 "The GPU accepted the fan-control write but did not apply it. Add "
-                "'amdgpu.ppfeaturemask=0xffffffff' to the kernel command line and "
-                "reboot; if it is already set, check the GPU advisories above and "
-                "your kernel version. The 'SMU driver interface version' message "
-                "some cards log is not itself a fault."
+                "'amdgpu.ppfeaturemask=0xfff7ffff' to the kernel command line and "
+                "reboot; if a mask with bit 0x4000 is already set, check the GPU "
+                "advisories above and your kernel version. The 'SMU driver interface "
+                "version' message some cards log is not itself a fault."
             ),
         },
         "no_rpm_effect": {
             "key": "gpu_verify_no_rpm_effect",
             "label": "GPU fan did not respond",
             "fix": (
-                "The fan curve was applied but the fan RPM did not change. Confirm "
+                "The fan curve was applied but the fan RPM did not change. On an "
+                "RX 9000 card at idle, re-test with the GPU under load first: its "
+                "firmware can keep the fan stopped below about 50 °C hotspot even "
+                "with zero-RPM idle off (drm/amd #5905), and some RX 9070 XTs "
+                "report 0 RPM while the fan spins (drm/amd #5514). Otherwise confirm "
                 "the fan is physically connected, and check the advisories above. "
                 "A few cards have per-unit fan faults (e.g. some R9700s, ROCm "
                 "#6101) that no kernel change has been shown to fix — compare the "
@@ -694,9 +702,8 @@ def gpu_verify_problems(result: GpuVerifyResult) -> list[dict]:
                 "pwm1_enable changed from manual during the test, so something "
                 "other than this test changed the card's fan mode. The usual cause "
                 "is another GPU fan tool (for example LACT, CoreCtrl or "
-                "amdgpu-fan): stop it, then re-test. The amdgpu driver also hands "
-                "the fan back to the card's own automatic control when the GPU "
-                "re-initialises (resume from suspend, a GPU reset). Motherboard "
+                "amdgpu-fan): stop it, then re-test. A GPU reset also hands the "
+                "fan back to the card's own automatic control. Motherboard "
                 "BIOS fan settings do not drive a graphics card's fan."
             ),
         },
@@ -705,7 +712,7 @@ def gpu_verify_problems(result: GpuVerifyResult) -> list[dict]:
             "label": "GPU fan write was rejected",
             "fix": (
                 "The driver/firmware rejected the fan write outright. Ensure "
-                "'amdgpu.ppfeaturemask=0xffffffff' is set and the amdgpu driver is "
+                "'amdgpu.ppfeaturemask' has bit 0x4000 set and the amdgpu driver is "
                 "bound to this GPU (not vfio-pci), then re-test."
             ),
         },

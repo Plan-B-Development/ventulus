@@ -170,6 +170,25 @@ def test_gpu_verify_problems_for_failures(verdict, key, must_contain):
     assert prob["doc_url"].startswith("https://")
 
 
+def test_no_rpm_effect_fix_sends_an_idle_rx9000_back_under_load():
+    # Curator GPD-04/05 (2026-10-15): an RDNA4 card's firmware can hold the fan
+    # stopped below ~50 °C hotspot with zero-RPM off (drm/amd #5905), and some
+    # RX 9070 XTs read 0 RPM while spinning (#5514), so "check the fan is
+    # connected" alone sends the owner of a healthy card after a fault.
+    fix = gpu_verify_problems(GpuVerifyResult(result="no_rpm_effect"))[0]["fix"]
+    assert "under load" in fix
+    assert "#5905" in fix
+
+
+def test_pwm_reverted_fix_does_not_claim_resume_hands_the_fan_back():
+    # Curator GPD-12: on RX 5000/6000 resume leaves a manual fan manual (an
+    # inverted check in smu_restore_dpm_user_profile); only a GPU reset hands it
+    # back, so the fix must not blame resume.
+    fix = gpu_verify_problems(GpuVerifyResult(result="pwm_enable_reverted"))[0]["fix"]
+    assert "GPU reset" in fix
+    assert "resume" not in fix
+
+
 # ── Demo path ────────────────────────────────────────────────────────
 
 

@@ -20,7 +20,7 @@ exposes.
 | **Motherboard fan headers** (ITE and Nuvoton Super-I/O chips) | Full control on most boards; some need an out-of-tree driver or a BIOS setting first (see [Driver Setup](driver-setup.md)) |
 | **Dell laptops and some Dell desktops** (`dell_smm`) | Control on models the kernel driver allows; many share one BIOS switch across every fan (see [Driver Setup](driver-setup.md)) |
 | **AMD discrete GPUs** | RX 7000/9000: full control through the firmware fan curve, which needs a one-time kernel setting (see [Driver Setup](driver-setup.md#amd-gpu-fan-control-prerequisite-rdna3)). RX 6000 and older: monitored, and the fan can be tested and reset, but a profile does not drive it: the card's own fan curve stays in charge |
-| **Intel Arc and NVIDIA GPUs** | Monitor only: temperature and fan speed |
+| **Intel Arc and NVIDIA GPUs** | Monitor only: temperature and fan speed. An NVIDIA card of the Turing (RTX 20) generation or newer is seen only through the proprietary driver's opt-in NVML telemetry, not through `nouveau` (see [Hardware Troubleshooting](hardware-troubleshooting.md#nvidia-gpus-are-monitor-only)) |
 | **NZXT Kraken X53/X63/X73, Z53/Z63/Z73, Kraken 2023, 2023 Elite and 2024 Elite** (`nzxt-kraken3`; the 2024 Elite needs kernel 7.3 or newer) | Pump and fans controllable, coolant temperature read |
 | **NZXT Kraken X42/X52/X62/X72** (`nzxt-kraken2`) | Monitor only: the driver cannot set its speeds |
 | **Aquacomputer D5 Next** (`aquacomputer_d5next`) | Pump and fan controllable, coolant temperature read |
@@ -40,7 +40,7 @@ need nothing more. Two cases do:
 - Newer Gigabyte, MSI and some ASRock boards (2022 and later) need an out-of-tree
   driver, built with DKMS from the AUR.
 - An AMD RX 7000 or RX 9000 needs the kernel parameter
-  `amdgpu.ppfeaturemask=0xffffffff` before its fan can be controlled.
+  `amdgpu.ppfeaturemask=0xfff7ffff` before its fan can be controlled.
 
 You do not have to work this out first. Install, launch Ventulus, and the
 **System State** and **Hardware** pages name your chips and say exactly which

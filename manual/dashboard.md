@@ -70,7 +70,7 @@ Each card shows:
 |-------|---------|
 | **State chip** | Auto (the curve is driving it), Override active, Driver alarm, Low RPM, Stale, Stall, or Offline. It sits beside the fan count. **Driver alarm** means the fan chip itself flags a fan (usually one running below the low-speed limit your BIOS set); hover the chip to see which fan and that limit. It is not an alert, because what raises it depends on the chip. A **Stall** stays on for up to five seconds if the daemon briefly stops reporting on that fan, so one missed reading does not clear it and raise it again |
 | **RPM** | Hardware-measured speed, averaged across the control's fans |
-| **SPEED** | Last commanded speed. For a read-only GPU that reports no commanded value, the column is headed **DUTY** instead and shows the firmware's *measured* duty, so a measurement is never read as a speed the daemon commanded |
+| **SPEED** | Last commanded speed. For a read-only GPU that reports no commanded value, the column is headed **DUTY** instead and shows the duty the GPU driver reports, so it is never read as a speed the daemon commanded. For an NVIDIA card NVIDIA documents that duty, and the RPM, as the fan's *intended* speed, so a blocked fan still shows it |
 | **TEMP** | The temperature driving this control's curve |
 | **Curve preview** | A sketch of the control's own curve, as a band along the bottom of the card |
 | **Edit** | Beside the card's name; opens the **Controls** page focused on this control |

@@ -1080,8 +1080,10 @@ class FanReading:
     source: str = ""
     rpm: int | None = None
     last_commanded_pwm: int | None = None
-    # DEC-204: firmware-reported *measured* current fan duty % (NVIDIA via NVML),
-    # distinct from ``last_commanded_pwm`` (daemon-commanded) — never conflate.
+    # DEC-204: driver-reported current fan duty % (NVIDIA via NVML), distinct from
+    # ``last_commanded_pwm`` (daemon-commanded) — never conflate. NVIDIA documents
+    # it as the *intended* fan speed, not a measurement: a blocked fan still
+    # reports it (``nvml.h``, ``nvmlDeviceGetFanSpeed_v2``).
     # May exceed 100 (NVML expresses it as a % of max noise tolerance). ``None``
     # for sources without a duty readback (openfan/hwmon/amd/intel/nouveau) and
     # on pre-DEC-204 daemons (absent from the wire).

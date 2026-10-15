@@ -18,11 +18,15 @@ misreported as controlled, or driven when it should not be.
 - Navi 48 (RX 9070 XT / 9070 / 9070 GRE) has PCI device ID `0x7550`, distinguished by
   revision (`0xC0` = XT, `0xC3` = non-XT, `0xC2` = GRE). Device `0x7551` is the
   workstation Navi 48: Radeon AI PRO R9700 (`0xC0`), R9700S (`0xC1`) and R9600D (`0xC8`)
-  (libdrm `amdgpu.ids`). A rule keyed on `0x7551` alone therefore covers all three.
+  (libdrm `amdgpu.ids`; R9700S is listed on libdrm's main branch, after the 2.4.134
+  release). A rule keyed on `0x7551` alone therefore covers all three.
 - Daemon hwmon discovery excludes `chip_name == "amdgpu"` (and `nouveau`) from the
   hwmon headers (DEC-102, `is_gpu_owned_hwmon_chip`): GPU fans are reached only through
   the `amd_gpu:` / `nvidia_gpu:` ids and the GPU endpoints, never as a motherboard
-  header. *(Safety-critical.)*
+  header. *(Safety-critical.)* `xe` and `i915` are not on that list yet, because no
+  mainline kernel gives them a `pwm` attribute; Intel's pending fan-control series for
+  `xe` would, and a kernel carrying it makes the Arc fan look like a header. Adding both
+  to the list is pending.
 
 ## Write path
 
@@ -92,14 +96,23 @@ misreported as controlled, or driven when it should not be.
 - The `amdgpu.ppfeaturemask` kernel parameter is required for PMFW `fan_curve` access.
 - ppfeaturemask bit 14 (`0x4000`) is required for PMFW. Diagnostics must explain this
   when it is missing.
+- **The recommended value is `amdgpu.ppfeaturemask=0xfff7ffff`** (DEC-497): the kernel's
+  default `0xfff7bfff` with bit 14 added, the value AMD's engineers give. Any mask with
+  bit 14 set is accepted; never tell a user whose mask already has bit 14 to change it.
+  `0xffffffff` also sets bit 19 (GFX DCS), which the kernel leaves off by default; the
+  SMU 13.0.0/13.0.7/14.0.2 code never reads it.
+- **Enabling OverDrive taints the kernel from 6.13** (`b472b8d829c1`,
+  `TAINT_CPU_OUT_OF_SPEC`, logged at critical level as "Overdrive is enabled, please
+  disable it before reporting any bugs unrelated to overdrive."). Wherever the parameter
+  is taught, say that the message is expected.
 - **A missing `fan_curve` is no longer proof that `ppfeaturemask` is wrong.** Since
-  kernel 7.0/7.1 (`470891606` for smu v13, `ab4905d46` for smu v14) the driver
+  kernel 7.0 (`470891606` for smu v13, `ab4905d46` for smu v14) the driver
   **disables the `OD_FAN_CURVE` entries entirely** when the firmware reports an
   invalid temperature or PWM range. So a correctly-configured system can legitimately
   have no `fan_curve` file, and diagnostics must not tell that user to fix a kernel
   parameter that is already right.
-- smu v14.0.x now parses OD-table upload failures into named dmesg messages
-  (`OD_FAN_CURVE_PWM_ERROR`, `OD_FAN_CURVE_TEMP_ERROR`, `OD_FAN_MIN_PWM_ERROR`,
+- Since kernel 7.1 (`4f2c86c62a00`), smu v14.0.x parses OD-table upload failures into
+  named dmesg messages (`OD_FAN_CURVE_PWM_ERROR`, `OD_FAN_CURVE_TEMP_ERROR`, `OD_FAN_MIN_PWM_ERROR`,
   `OD_FAN_ZERO_RPM_STOP_TEMP_ERROR`, …): cheap, high-value diagnostic output to
   surface when a curve write is rejected.
 - Kernel docs warn: **do not** drive `pwm1` and `fan[1-*]_target` at the same time.
@@ -111,6 +124,28 @@ misreported as controlled, or driven when it should not be.
   and what **Dedicate GPU Fan** sets), where the card's own zero-RPM setting is left as
   it is and the firmware stops the fan at idle. A manual write (a hardware verify or
   test) always disables it.
+- **On RDNA4 the firmware can stop the fan under a curve anyway.** On at least one
+  RX 9070 XT (PMFW 104.80.0) the fan stops below about 50 °C hotspot with a curve
+  active and `fan_zero_rpm_enable=0`, even on a flat 100 % curve, and follows the curve
+  above it ([drm/amd #5905](https://gitlab.freedesktop.org/drm/amd/-/issues/5905)). The
+  threshold appears to be the OD table's zero-RPM stop temperature (setting it with
+  AMD's test patch moved the stop point), which SMU 14.0.2 does not expose before
+  AMD's `fan_zero_rpm_stop_temperature` patch (`9e3854634bfa`, expected in 7.4). So
+  never read 0 RPM on an idle RDNA4 card under a curve as a failed write or a dead fan;
+  RDNA4 `fan1_input` can also read 0 while the fan spins
+  ([drm/amd #5514](https://gitlab.freedesktop.org/drm/amd/-/issues/5514)).
+- **RDNA4 fan curves want kernel 6.18.32, 7.0.9, 7.1 or later.** `504f0098ebd0`
+  ("fix incorrect FeatureCtrlMask setting on smu v14.0.x", Cc stable) fixes the
+  fan-curve edit, fan-curve restore and `fan_minimum_pwm` paths; its message says the
+  bug "leads to disabled thermal monitoring and temperature boundary validation".
+  Whether it bit the daemon's write sequence is unproven.
+- **RDNA2 and older: resume from suspend leaves a manual fan manual.**
+  `smu_restore_dpm_user_profile` (resume only) re-applies a saved manual mode and then,
+  through an inverted check (`ret != -EOPNOTSUPP`), logs "Failed to set manual fan
+  control mode", marks the saved mode automatic and skips restoring the duty. On an SMU11
+  card (RX 5000 / RX 6000) the hardware stays in manual mode without its duty (kernel
+  source reading; powerplay generations not checked). A GPU reset does not run this
+  path.
 - `fan_zero_rpm_enable` sysfs returns multi-line formatted output: parse header+value,
   do not just `trim()`.
 - **The daemon must reset the GPU fan curves it drove to automatic on shutdown, and only

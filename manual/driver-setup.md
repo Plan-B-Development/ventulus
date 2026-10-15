@@ -254,10 +254,12 @@ cat /sys/module/amdgpu/parameters/ppfeaturemask
 If bit 14 (`0x4000`, `PP_OVERDRIVE_MASK` in the [kernel amdgpu module-parameters documentation](https://docs.kernel.org/gpu/amdgpu/module-parameters.html)) is not set, add this to the kernel command line:
 
 ```text
-amdgpu.ppfeaturemask=0xffffffff
+amdgpu.ppfeaturemask=0xfff7ffff
 ```
 
-That value is what the daemon's diagnostics, this GUI, and most distro guides standardise on; any narrower mask also works as long as bit 14 is set. [CoolerControl documents OR-ing `0x4000` into your current mask](https://docs.coolercontrol.org/hardware-support.html) as the minimal alternative. Background: [Hardware Compatibility § ppfeaturemask](../docs/19_Hardware_Compatibility.md#ppfeaturemask).
+That is the kernel's default mask with bit 14 added, the value AMD's engineers give ([drm/amd #5514](https://gitlab.freedesktop.org/drm/amd/-/issues/5514)). Any mask with bit 14 set works, so if you already use `0xffffffff` (common in older guides) you can leave it; it also turns on one feature the kernel leaves off by default, which RX 7000 and RX 9000 cards do not use. If you have already changed the mask for another reason, add `0x4000` to your own value instead, as [CoolerControl documents](https://docs.coolercontrol.org/hardware-support.html). Background: [Hardware Compatibility § ppfeaturemask](../docs/19_Hardware_Compatibility.md#ppfeaturemask).
+
+From Linux 6.13 the kernel logs `amdgpu: Overdrive is enabled, please disable it before reporting any bugs unrelated to overdrive.` at boot and marks itself *tainted* when this bit is set ([commit b472b8d829c1](https://git.kernel.org/torvalds/c/b472b8d829c1562c5597c1f212957b6b2696d40e)). That is expected and does not stop anything working. If you report a kernel bug, say that the parameter is set.
 
 How to add a kernel parameter, per bootloader, with the same steps as `man ventulusd` (see also the [Arch Wiki](https://wiki.archlinux.org/title/Kernel_parameters) and, for Limine, the [CachyOS boot-manager guide](https://wiki.cachyos.org/configuration/boot_manager_configuration/)):
 

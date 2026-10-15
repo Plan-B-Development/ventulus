@@ -231,6 +231,30 @@ class TestSensorClassification:
         c = classify_sensor("xe", "temp9")
         assert c.source_class == "gpu_memory"
 
+    # Curator GPD-09 (2026-10-15): since 6.15 xe labels its temperatures and the
+    # daemon passes the kernel label through, so a real card sends `pkg`/`vram`/…,
+    # never `temp2`. Before this, every real Arc B-series temperature fell through
+    # to "Intel GPU temperature (pkg)" / gpu_other.
+    def test_xe_kernel_labels_classify_like_their_channels(self):
+        pairs = [("pkg", "temp2"), ("vram", "temp3"), ("mctrl", "temp4"), ("pcie", "temp5")]
+        for kernel_label, positional in pairs:
+            by_label = classify_sensor("xe", kernel_label)
+            by_index = classify_sensor("xe", positional)
+            assert by_label.source_class == by_index.source_class, kernel_label
+            assert by_label.display_description == by_index.display_description
+            assert by_label.confidence == "high"
+
+    def test_xe_pkg_label_is_package_not_generic(self):
+        c = classify_sensor("xe", "pkg")
+        assert c.source_class == "gpu_package"
+        assert "Intel GPU temperature" not in c.display_description
+
+    def test_xe_vram_channel_label_names_the_channel(self):
+        c = classify_sensor("xe", "vram_ch_3")
+        assert c.source_class == "gpu_memory"
+        assert "channel 3" in c.display_description
+        assert c.confidence == "high"
+
     def test_i915_temp1_is_package(self):
         c = classify_sensor("i915", "temp1")
         assert c.source_class == "gpu_package"

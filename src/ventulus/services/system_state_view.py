@@ -900,7 +900,7 @@ def build_interference_vm(
 #: — deliberately **not** shared (the user's decision, 2026-09-17). Sharing was
 #: considered and rejected on two grounds: Dismiss on a one-line readout would
 #: also hide the condition card carrying the *fix* ("add
-#: `amdgpu.ppfeaturemask=0xffffffff` and reboot"), and the predicates are not
+#: `amdgpu.ppfeaturemask=0xfff7ffff` and reboot"), and the predicates are not
 #: the same fact — `gpu_readonly` additionally requires `not gpu.ppfeaturemask`
 #: where this row does not, which is the DEC-325 two-sources-for-one-fact trap.
 #: `ACK-h`'s "the silencing decision belongs to the ITEM" does not reach here,

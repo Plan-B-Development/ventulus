@@ -184,7 +184,7 @@ class TestDiagnosticsOverdriveGuidance:
         svc = DiagnosticsService(state)
         text = svc.format_gpu_status()
         assert "ppfeaturemask" in text
-        assert "0xffffffff" in text
+        assert "0xfff7ffff" in text
 
     def test_overdrive_enabled_no_guidance(self):
         state = _make_state()

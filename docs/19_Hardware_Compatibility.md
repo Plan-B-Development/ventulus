@@ -631,7 +631,7 @@ mainline `nct6775` driver.
 
 - **RDNA3+ (RX 7000 / RX 9000 series):** Fan control uses the PMFW `fan_curve`
   sysfs interface. It needs the `amdgpu.ppfeaturemask` kernel parameter with
-  bit 14 set (e.g. `amdgpu.ppfeaturemask=0xffffffff`).
+  bit 14 set (e.g. `amdgpu.ppfeaturemask=0xfff7ffff`).
 - **RDNA2 and older (RX 6000, RX 5000, Vega, Polaris):** These expose the
   traditional `pwm1_enable=1` + `pwm1` control path. The daemon uses it for
   **Test GPU Fan Control** and **Restore GPU Fan to Automatic** only: no
@@ -655,11 +655,28 @@ To check the current value:
 cat /sys/module/amdgpu/parameters/ppfeaturemask
 ```
 
-To enable all features (including fan control), add this kernel parameter and reboot
+To enable OverDrive, add this kernel parameter and reboot
 (see [Setting a driver option or a kernel parameter](#setting-a-driver-option-or-a-kernel-parameter)):
 ```
-amdgpu.ppfeaturemask=0xffffffff
+amdgpu.ppfeaturemask=0xfff7ffff
 ```
+
+That is the kernel's default mask, `0xfff7bfff` in
+[`amdgpu_drv.c`](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c)
+("OverDrive(bit 14) disabled by default / GFX DCS(bit 19) disabled by default"), with
+bit 14 added, and the value AMD's engineers give
+([drm/amd #5514](https://gitlab.freedesktop.org/drm/amd/-/issues/5514)). Any mask with
+bit 14 set works. The `0xffffffff` that many guides use also sets bit 19, a feature the
+kernel leaves off by default; the
+[Arch Wiki](https://wiki.archlinux.org/title/AMDGPU#Boot_parameter) warns that setting
+all 32 bits "may enable unstable features". On RX 7000 and RX 9000 cards bit 19 is not
+used, so a `0xffffffff` you already set does no harm there and need not be changed.
+
+From Linux 6.13, enabling OverDrive taints the kernel and logs
+`amdgpu: Overdrive is enabled, please disable it before reporting any bugs unrelated to overdrive.`
+([commit b472b8d829c1](https://git.kernel.org/torvalds/c/b472b8d829c1562c5597c1f212957b6b2696d40e)).
+That message is expected with any mask that sets bit 14. If you report a kernel bug,
+say that the parameter is set.
 
 The daemon's hardware diagnostics endpoint reports the current
 ppfeaturemask value and whether bit 14 is set.
@@ -678,6 +695,21 @@ and unresolved; AMD advised an RMA for the original reporter's card. If an R9700
 does not follow a curve, return it to automatic (**Restore GPU Fan to Automatic**),
 compare its RPM under load, and consider a warranty claim. No pending kernel change
 addresses it.
+
+**RX 9000 fans at idle.** On at least one RX 9070 XT the firmware stops the fan while
+the hotspot is below about 50 °C, even with a curve active and zero-RPM idle turned off;
+above that the fan follows the curve exactly
+([drm/amd #5905](https://gitlab.freedesktop.org/drm/amd/-/issues/5905)). AMD has written a
+`fan_zero_rpm_stop_temperature` control for these cards, which its maintainer expects in
+Linux 7.4. Some RX 9070 XT owners also see `fan1_input` read 0 RPM while the fan spins
+([drm/amd #5514](https://gitlab.freedesktop.org/drm/amd/-/issues/5514), open). A stopped
+or 0 RPM fan on an idle RX 9000 card is therefore not a fault by itself: check it again
+with the GPU under load.
+
+**Kernel version for RX 9000 fan curves.** Use Linux 6.18.32, 7.0.9, 7.1 or later.
+Earlier kernels mishandle a firmware flag on the fan-curve and fan-minimum paths, which
+AMD's fix says "leads to disabled thermal monitoring and temperature boundary validation"
+([commit 504f0098ebd0](https://git.kernel.org/torvalds/c/504f0098ebd074ac8c0ce3471795d79f68e3d265)).
 
 ## Intel discrete GPU (Arc) monitoring
 
@@ -711,12 +743,23 @@ not affected.
 
 ### Not supported: fan control
 
-There is **no user-controllable fan interface** for Intel GPUs on Linux.
-Neither `xe` nor `i915` exposes a `pwm` attribute or a fan-write callback.
-Intel GPU fan speed is managed autonomously by on-card firmware (a
-linux-firmware blob, e.g. `fan_control_8086_e20b_8086_1100.bin` for the Arc
-B580; fan reads go through a firmware "pcode" mailbox). Userspace cannot
-override it. This is a kernel and firmware fact, not a daemon limitation.
+There is **no user-controllable fan interface** for Intel GPUs in a mainline
+kernel (checked at 7.3-rc7). Neither `xe` nor `i915` exposes a `pwm` attribute or
+a fan-write callback. Intel GPU fan speed is managed autonomously by on-card
+firmware (fan reads go through a firmware "pcode" mailbox). linux-firmware carries
+one fan-control blob, `xe/fan_control_8086_e20b_8086_1100.bin`; the kernel names the
+file after the card's PCI subsystem IDs, so it applies to Intel's own Arc B580 board
+(subsystem `8086:1100`) only. On a stock kernel userspace cannot override the
+firmware. This is a kernel and firmware fact, not a daemon limitation.
+
+Intel has posted kernel patches that add fan control to `xe`
+([series 168027](https://patchwork.freedesktop.org/series/168027/), "Add fan control
+support"), adding writable `pwm1`–`pwm3` and `pwm1_enable`–`pwm3_enable`. They were
+under review, not merged, on 2026-10-15
+([Intel on compute-runtime #885](https://github.com/intel/compute-runtime/issues/885)).
+Some users run kernels patched with them, and tools such as LACT 0.10.1 drive those
+controls. The daemon does not yet treat them as a GPU fan: on such a kernel it lists
+the Arc fan as a motherboard header on chip `xe`. Do not add that header to a profile.
 
 Consequently the daemon always reports `fan_control_method` of `"read_only"`
 (fan present) or `"none"`. Intel GPU fans are never writable and are never
@@ -728,10 +771,30 @@ AMD-only.
 
 ### Model names
 
-Only the Arc **B580** (PCI device ID `0xE20B`, vendor `0x8086`) is
-authoritatively name-mapped. All other Intel discrete GPUs display as the
-generic "Intel D-GPU" until an authoritative device-ID → name mapping is
-confirmed.
+A card is named when the PCI ID database
+([`pci.ids`](https://pci-ids.ucw.cz/), version 2026.10.14) names its device ID
+(vendor `0x8086`):
+
+| Device ID | Name |
+|---|---|
+| `0xE20B` | Arc B580 |
+| `0xE20C` | Arc B570 |
+| `0xE211` | Arc Pro B60 |
+| `0xE212` | Arc Pro B50 |
+| `0xE222` | Arc Pro B65 |
+| `0xE223` | Arc Pro B70 |
+| `0x56A0` | Arc A770 |
+| `0x56A1` | Arc A750 |
+| `0x56A2` | Arc A580 |
+| `0x56A5` | Arc A380 |
+| `0x56A6` | Arc A310 |
+| `0x56B0` | Arc Pro A30M |
+| `0x56B1` | Arc Pro A40/A50 |
+| `0x56B2` | Arc Pro A60M |
+| `0x56B3` | Arc Pro A60 |
+
+Every other Intel discrete GPU, including the Battlemage IDs `pci.ids` lists only as
+"Intel Graphics", displays as the generic "Intel D-GPU".
 
 ### Sources
 
@@ -739,6 +802,8 @@ confirmed.
 - [intel-i915-hwmon sysfs ABI](https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-driver-intel-i915-hwmon)
 - [`drivers/gpu/drm/xe/xe_hwmon.c`](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/xe/xe_hwmon.c)
 - [`include/drm/intel/pciids.h`](https://github.com/torvalds/linux/blob/master/include/drm/intel/pciids.h)
+- [`pci.ids`](https://pci-ids.ucw.cz/v2.2/pci.ids): the model names above
+- [linux-firmware `WHENCE`](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/tree/WHENCE) and [`xe_late_bind_fw.c`](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/xe/xe_late_bind_fw.c): the one fan-control blob and its subsystem-ID file name
 
 ## NVIDIA discrete GPU monitoring
 
@@ -752,16 +817,30 @@ NVIDIA GPUs live in one of two mutually-exclusive driver worlds:
 
 | Driver | Telemetry path | `driver` field | `chip_name` |
 |---|---|---|---|
-| `nouveau` (open) | Kernel DRM driver with an hwmon node (`temp1`, and on some cards fan RPM) | `"nouveau"` | `nouveau` |
-| Proprietary NVIDIA | No sysfs hwmon; temperature + measured fan **duty %** via the NVML userspace library (`libnvidia-ml.so.1`) | `"nvidia"` | `nvml` |
+| `nouveau` (open) | Kernel DRM driver with an hwmon node (`temp1`, and on some cards fan RPM) on cards **older than Turing** only; see below | `"nouveau"` | `nouveau` |
+| Proprietary NVIDIA | No sysfs hwmon; temperature + the driver's fan **duty %** and RPM via the NVML userspace library (`libnvidia-ml.so.1`) | `"nvidia"` | `nvml` |
+
+**`nouveau` publishes no sensors on Turing and newer cards.** There it runs NVIDIA's own
+GPU firmware (GSP), and with GSP its thermal code is not created (`gp100_therm_new`
+returns `-ENODEV`; the Ampere, Ada and Blackwell chipset tables have no thermal, voltage
+or current-sense unit at all), so the driver registers no hwmon device. GSP is the only
+path on Ada and later and the default on Turing and Ampere since Linux 6.18
+([commit e0ed674acbac](https://git.kernel.org/torvalds/c/e0ed674acbac5635494fc7b278abc9505eaa8e71)),
+see [`nouveau_hwmon.c`](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/nouveau/nouveau_hwmon.c).
+With `nouveau`, Ventulus therefore sees a Turing-or-newer card not at all. The opt-in
+NVML path below, with the proprietary driver, is the only way to monitor one.
 
 The `driver` field on the capability/diagnostics is always the **kernel module
 name** (`"nouveau"`/`"nvidia"`), never the `nvml` library. The proprietary NVML
 backend is **opt-in and off by default**. Turning it on takes four steps, and
 all of them are needed:
 
-1. Install `nvidia-utils`, which provides `libnvidia-ml.so.1` (it comes with the
-   proprietary driver on Arch).
+1. Have the NVIDIA userspace package that matches your driver installed; it provides
+   `libnvidia-ml.so.1`. If the proprietary driver already works, it is. On Arch that is
+   `nvidia-utils` for the current driver (Turing and newer), or
+   [`nvidia-580xx-utils`](https://aur.archlinux.org/packages/nvidia-580xx-utils) from the
+   AUR for Maxwell, Pascal and Volta cards, which the 590 driver dropped
+   ([Arch news, 2025-12-20](https://archlinux.org/news/nvidia-590-driver-drops-pascal-support-main-packages-switch-to-open-kernel-modules/)).
 2. Set the flag in `/etc/ventulus/daemon.toml` (or with the **NVIDIA telemetry**
    switch under Settings → Daemon Configuration):
    ```toml
@@ -785,19 +864,25 @@ one line and shows no NVIDIA telemetry.
 - **Temperature monitoring:** sensor source `"nvidia_gpu"`, kind `gpu_temp`
   (chip name `nouveau` or `nvml`).
 - **Fan telemetry:** one fan entity per GPU as `nvidia_gpu:{pci_bdf}`. RPM when
-  the card exposes it; the NVML path also reports a **measured fan duty %**
-  (`duty_pct`, which may exceed 100: NVML expresses it as a % of the maximum
-  noise tolerance), distinct from a commanded PWM (there is none).
+  the card exposes it; the NVML path also reports a **fan duty %** (`duty_pct`, which
+  may exceed 100: NVML expresses it as a % of the maximum noise tolerance), distinct
+  from a commanded PWM (there is none). NVML's duty and RPM are what NVIDIA's header
+  calls the **intended** fan speed, not a tachometer reading: "If the fan is physically
+  blocked and unable to spin, the output will not match the actual fan speed"
+  ([`nvml.h`](https://github.com/NVIDIA/go-nvml/blob/main/gen/nvml/nvml.h), NVIDIA's copy).
+  A stalled NVIDIA fan does not show as one.
 
 ### Not supported: fan control
 
-There is **no user-controllable fan interface** through this daemon. `nouveau`
-*does* expose a writable `pwm1`, but the daemon deliberately **excludes** it from
-discovery for safety (the GPU subsystem owns it, as with AMD); the NVML backend is
+There is **no user-controllable fan interface** through this daemon. On some cards
+older than Turing `nouveau` *does* expose a writable `pwm1`, but the daemon
+deliberately **excludes** it from discovery for safety (the GPU subsystem owns it, as with AMD); the NVML backend is
 telemetry-only (no fan-write symbol is bound). The daemon always reports
 `fan_control_method` `"read_only"` (fan present) or `"none"`. NVIDIA GPU fans are
 never writable and never offered as controllable curve members; the GPU's
-**temperatures** remain usable as curve *sensors*. Fan writes wait until they can be
+**temperatures** remain usable as curve *sensors*. NVML does have a privileged fan-write
+path (`nvmlDeviceSetFanSpeed_v2`, Maxwell and newer), which tools such as LACT and
+CoolerControl use; Ventulus does not bind it. Fan writes wait until they can be
 validated on NVIDIA hardware.
 
 ### Model names
@@ -906,7 +991,7 @@ through `/etc/modules-load.d/ventulus.conf`, and without the file above that loa
 has no option, so the problem returns on the next boot. Likewise, installing or
 updating a DKMS driver does not replace the copy already loaded: reload it or reboot.
 
-**A kernel parameter**, written `amdgpu.ppfeaturemask=0xffffffff` or
+**A kernel parameter**, written `amdgpu.ppfeaturemask=0xfff7ffff` or
 `acpi_enforce_resources=lax`, goes on the kernel command line through your
 bootloader's configuration, then takes effect at the next boot. The manual's Driver
 Setup page has the steps for GRUB, systemd-boot, rEFInd and Limine

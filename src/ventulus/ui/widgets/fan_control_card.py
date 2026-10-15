@@ -341,7 +341,7 @@ class FanControlCard(Card):
         )
 
         self._rpm_value.setText("—" if vm.rpm is None else str(vm.rpm))
-        # Commanded PWM wins over measured duty when both exist; duty is labelled
+        # Commanded PWM wins over reported duty when both exist; duty is labelled
         # so it is never misread as a value the daemon commanded (DEC-204). The
         # qualifier lives in the *caption* — the column header is what names the
         # quantity, and "37% duty" as a value was twice the width of its
@@ -356,7 +356,8 @@ class FanControlCard(Card):
             self._speed_caption.setText("SPEED")
             self._speed_value.setText("—")
         self._speed_caption.setToolTip(
-            "Measured duty cycle read back from the device — not a value the daemon commanded"
+            "Duty the GPU driver reports (NVIDIA: its intended fan speed, not a measurement)"
+            " — not a value the daemon commanded"
             if vm.pwm_pct is None and vm.duty_pct is not None
             else ""
         )

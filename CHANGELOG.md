@@ -29,6 +29,27 @@ rename. Version numbers carry on from Control-OFC.
   kernel 6.4 minimum, and the MSI EZ Conn header that `nct6687d` does not expose. Some BIOS advice
   for ASRock NCT6686D boards contradicted the read-only kernel driver; it now applies only to the
   out-of-tree drivers.
+- **GPU advice brought up to date (checked 2026-10-15).**
+  - AMD: the recommended kernel parameter is now `amdgpu.ppfeaturemask=0xfff7ffff`, the kernel's
+    default mask with the OverDrive bit added and the value AMD's engineers give; any mask with
+    that bit set still works, so a `0xffffffff` you already use can stay. The guidance also says
+    that from Linux 6.13 the kernel logs "Overdrive is enabled" and marks itself tainted when the
+    bit is set, which is expected.
+  - AMD RX 9000: the GPU fan test's "did not respond" advice and the guides say the firmware can
+    keep the fan stopped below about 50 °C hotspot even with zero-RPM idle off, and that some
+    RX 9070 XTs read 0 RPM while the fan spins, so test under load first. Fan curves on these
+    cards want Linux 6.18.32, 7.0.9, 7.1 or later.
+  - AMD RX 5000/6000: the guidance no longer says resume from suspend hands the fan back to the
+    card; only a GPU reset does.
+  - Intel Arc: B-series temperatures are now recognised by the labels the kernel gives them
+    (`pkg`, `vram` and so on), so the package temperature is shown as the package instead of
+    "Intel GPU temperature (pkg)". The guides say no mainline kernel can set an Arc fan yet,
+    that Intel's patches adding it are still under review, and that on a patched kernel the
+    Arc fan must not be added to a profile.
+  - NVIDIA: the guides say `nouveau` publishes no sensors on Turing (RTX 20) and newer cards,
+    so those are seen only through the opt-in NVML telemetry, and that Maxwell, Pascal and
+    Volta owners on Arch need `nvidia-580xx-utils`. The duty and RPM that NVML reports are now
+    described as NVIDIA's *intended* fan speed, not a measurement: a blocked fan still shows it.
 
 ## [5.0.1] — 2026-10-14
 

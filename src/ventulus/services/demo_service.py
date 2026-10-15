@@ -98,7 +98,7 @@ _DEMO_FANS: list[dict] = [
     # Intel discrete GPU (DEC-121) — read-only fan; demonstrates the
     # "(read-only)" treatment and firmware-managed messaging.
     {"id": "intel_gpu:0000:03:00.0", "source": "intel_gpu", "label": "Arc B580 Fan"},
-    # NVIDIA discrete GPU (DEC-204) — read-only fan; exercises the measured
+    # NVIDIA discrete GPU (DEC-204) — read-only fan; exercises the reported
     # duty_pct display and the read-only wizard/member exclusions.
     {"id": "nvidia_gpu:0000:01:00.0", "source": "nvidia_gpu", "label": "RTX 4080 Fan"},
 ]
@@ -141,18 +141,19 @@ _DEMO_SENSORS: list[dict] = [
         "source": "amd_gpu",
         "chip_name": "amdgpu",
     },
-    # Intel Arc (Battlemage) via the xe driver — temps start at temp2 (DEC-121).
+    # Intel Arc (Battlemage) via the xe driver — temps start at temp2 and carry
+    # the kernel's own labels (`pkg`, `vram`; DEC-121, curator GPD-09).
     {
-        "id": "hwmon:xe:0000:03:00.0:temp2",
+        "id": "hwmon:xe:0000:03:00.0:pkg",
         "kind": "gpu_temp",
-        "label": "temp2",
+        "label": "pkg",
         "source": "intel_gpu",
         "chip_name": "xe",
     },
     {
-        "id": "hwmon:xe:0000:03:00.0:temp3",
+        "id": "hwmon:xe:0000:03:00.0:vram",
         "kind": "gpu_temp",
-        "label": "temp3",
+        "label": "vram",
         "source": "intel_gpu",
         "chip_name": "xe",
     },
@@ -545,7 +546,7 @@ class DemoService:
             base_rpm = int(pwm * f.get("rpm_per_pct", 18) + random.gauss(0, 15))
             # Intel (DEC-121) + NVIDIA (DEC-204) discrete GPU fans are read-only:
             # the daemon never commands them, so report no last_commanded_pwm.
-            # NVIDIA additionally exposes a firmware-reported *measured* duty %.
+            # NVIDIA additionally reports a driver duty % (its intended speed).
             read_only = f["source"] in ("intel_gpu", "nvidia_gpu")
             duty_pct = pwm if f["source"] == "nvidia_gpu" else None
             fans.append(
@@ -598,9 +599,9 @@ class DemoService:
                 fan_control_method="read_only",
                 fan_rpm_available=True,
                 fan_control_note=(
-                    "Intel GPU fan control is managed autonomously by on-card firmware and is "
-                    "not exposed to Linux userspace (the xe/i915 drivers register no PWM "
-                    "interface). Temperature and fan RPM are read-only."
+                    "Intel GPU fan control is managed autonomously by on-card firmware: the "
+                    "mainline xe/i915 drivers register no PWM interface, so nothing can set "
+                    "the fan on a stock kernel. Temperature and fan RPM are read-only."
                 ),
             ),
             nvidia_gpu=NvidiaGpuDiagnosticsInfo(
@@ -612,9 +613,10 @@ class DemoService:
                 fan_rpm_available=True,
                 fan_control_note=(
                     "NVIDIA GPU fan control is not exposed to this daemon: the open nouveau "
-                    "driver's writable pwm1 is deliberately excluded for safety, and the "
-                    "proprietary NVML backend is read-only telemetry. Temperature and fan "
-                    "telemetry are read-only."
+                    "driver's writable pwm1 (some cards older than Turing) is deliberately "
+                    "excluded for safety, and the proprietary NVML backend is read-only "
+                    "telemetry, whose fan duty and RPM are the driver's intended speed, not "
+                    "a measurement. Temperature and fan telemetry are read-only."
                 ),
             ),
             thermal_safety=ThermalSafetyInfo(

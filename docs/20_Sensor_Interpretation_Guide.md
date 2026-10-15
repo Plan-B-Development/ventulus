@@ -350,23 +350,24 @@ exact label semantics. Junction is the hottest point on the die.
 ### xe / i915 (Intel discrete GPU driver)
 
 Read-only temperatures from Intel **discrete** GPUs (Arc). Surfaced as
-sensor source `intel_gpu`, kind `gpu_temp`. The `xe` and `i915` drivers do
-**not** expose `tempN_label` sysfs files, so labels arrive as the generic
-`tempN` channel name; the meaning is positional, taken from the kernel ABI
-docs.
+sensor source `intel_gpu`, kind `gpu_temp`.
 
-`xe` (Arc B-series "Battlemage" and later Xe2). Note that its temperatures start at
-`temp2` (there is no `temp1`):
+`xe` (Arc B-series "Battlemage" and later Xe2) **labels** its temperatures through
+`tempN_label`, so the label is what arrives (since Linux 6.15, when `xe` gained
+temperatures; the labels are set in
+[`xe_hwmon.c`](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/xe/xe_hwmon.c)).
+Its channels start at `temp2` (there is no `temp1`):
 
-| Index | Meaning |
-|---|---|
-| `temp2` | GPU package |
-| `temp3` | VRAM |
-| `temp4` | Memory controller (average) |
-| `temp5` | GPU PCIe |
-| `temp6`–`temp21` | Per-VRAM-channel |
+| Index | Label | Meaning | Since |
+|---|---|---|---|
+| `temp2` | `pkg` | GPU package | 6.15 |
+| `temp3` | `vram` | VRAM | 6.15 |
+| `temp4` | `mctrl` | Memory controller (average) | 7.0 |
+| `temp5` | `pcie` | GPU PCIe | 7.0 |
+| `temp6`–`temp21` | `vram_ch_0`… | Per-VRAM-channel | 7.0 |
 
-`i915` (Arc A-series "Alchemist"):
+`i915` (Arc A-series "Alchemist") has no `tempN_label`, so its one channel arrives as
+`temp1` (from Linux 6.13):
 
 | Index | Meaning |
 |---|---|
@@ -388,8 +389,8 @@ sensor source `nvidia_gpu`, kind `gpu_temp`, and classified `gpu_package` at
 
 | `chip_name` | Origin | Channels |
 |---|---|---|
-| `nouveau` | sysfs hwmon `name` file (open `nouveau` DRM driver) | `temp1` (GPU package); some cards also expose fan RPM |
-| `nvml` | a **daemon-synthetic** identifier for the proprietary NVML polling path (no sysfs hwmon node) | one temperature, plus a measured fan **duty %** (`duty_pct`) |
+| `nouveau` | sysfs hwmon `name` file (open `nouveau` DRM driver) | `temp1` (GPU package); some cards also expose fan RPM. Cards older than Turing only: on Turing and newer `nouveau` registers no hwmon device |
+| `nvml` | a **daemon-synthetic** identifier for the proprietary NVML polling path (no sysfs hwmon node) | one temperature, plus the driver's fan **duty %** (`duty_pct`; NVIDIA's *intended* speed, not a measurement) |
 
 All NVIDIA GPU temperatures are read-only. Fan control is unavailable through
 the daemon: `nouveau`'s writable `pwm1` is deliberately excluded and the NVML

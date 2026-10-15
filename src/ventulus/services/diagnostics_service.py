@@ -497,8 +497,10 @@ class DiagnosticsService(QObject):
             if not gpu.overdrive_enabled and not gpu.pmfw_supported:
                 lines.append("")
                 lines.append("  Note: PMFW fan control requires overdrive to be enabled.")
-                lines.append("  Add 'amdgpu.ppfeaturemask=0xffffffff' to your kernel parameters")
-                lines.append("  and reboot to enable GPU fan curve control.")
+                lines.append("  Add 'amdgpu.ppfeaturemask=0xfff7ffff' to your kernel parameters")
+                lines.append("  and reboot to enable GPU fan curve control (any mask with")
+                lines.append("  bit 0x4000 set works; from Linux 6.13 the kernel then logs")
+                lines.append("  'Overdrive is enabled' and is marked tainted, as expected).")
         else:
             lines.append("  No AMD discrete GPU detected by daemon.")
 

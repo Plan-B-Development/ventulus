@@ -550,15 +550,24 @@ def _classify_amdgpu(label: str, lower_label: str) -> SensorClassification:
 def _classify_intel_gpu(chip_name: str, label: str) -> SensorClassification:
     """Classify Intel discrete GPU temperature sensors (DEC-121).
 
-    The xe/i915 drivers expose unlabelled ``tempN_input`` files, so the GUI
-    sees generic labels like ``temp2``. The index→meaning mapping is taken
-    verbatim from the kernel ABI doc
-    ``Documentation/ABI/testing/sysfs-driver-intel-xe-hwmon`` (verified): on
-    ``xe`` temps start at ``temp2`` (package), ``temp3`` VRAM,
-    ``temp4`` memory-controller average, ``temp5`` GPU PCIe, ``temp6+`` VRAM
-    channels. The i915 driver exposes a single ``temp1`` package sensor.
+    ``xe`` labels its temperatures through ``tempN_label`` (since Linux 6.15, when
+    it gained temperatures at all), and the daemon passes the kernel label
+    through, so the GUI sees ``pkg``, ``vram`` and, from 7.0, ``mctrl``, ``pcie``
+    and ``vram_ch_N`` (strings set in ``drivers/gpu/drm/xe/xe_hwmon.c``, verified
+    at 7.3-rc7; curator GPD-09, 2026-10-15). The positional ``tempN`` keys from
+    ``Documentation/ABI/testing/sysfs-driver-intel-xe-hwmon`` stay as a fallback
+    for an unlabelled channel: temps start at ``temp2`` (package), ``temp3``
+    VRAM, ``temp4`` memory-controller average, ``temp5`` GPU PCIe, ``temp6+``
+    VRAM channels. The i915 driver has no labels and a single ``temp1`` package
+    sensor (from 6.13).
     """
-    # xe: map the documented temp index to its meaning.
+    # xe: the kernel's own labels first, then the documented temp index.
+    xe_label_map = {
+        "pkg": ("gpu_package", "GPU package temperature"),
+        "vram": ("gpu_memory", "GPU VRAM temperature"),
+        "mctrl": ("gpu_memory", "GPU memory controller temperature"),
+        "pcie": ("gpu_other", "GPU PCIe temperature"),
+    }
     xe_map = {
         "temp2": ("gpu_package", "GPU package temperature"),
         "temp3": ("gpu_memory", "GPU VRAM temperature"),
@@ -566,6 +575,20 @@ def _classify_intel_gpu(chip_name: str, label: str) -> SensorClassification:
         "temp5": ("gpu_other", "GPU PCIe temperature"),
     }
     if chip_name == "xe":
+        lower = label.lower()
+        if lower in xe_label_map:
+            source_class, desc = xe_label_map[lower]
+            return SensorClassification(
+                source_class=source_class, display_description=desc, confidence="high"
+            )
+        if lower.startswith("vram_ch_"):
+            return SensorClassification(
+                source_class="gpu_memory",
+                display_description=(
+                    f"GPU VRAM channel {lower.removeprefix('vram_ch_')} temperature"
+                ),
+                confidence="high",
+            )
         if label in xe_map:
             source_class, desc = xe_map[label]
             return SensorClassification(

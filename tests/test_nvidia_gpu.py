@@ -4,7 +4,7 @@ read-only safety.
 Covers: NvidiaGpuCapability parsing (present/absent/forward-compat/pci coalesce +
 driver_version), NvidiaGpuDiagnosticsInfo parsing, fan displayability + dedup,
 fan display name, sensor classification (nouveau/nvml), diagnostics
-control-method, the new measured ``duty_pct`` field (parse + tile display),
+control-method, the new driver-reported ``duty_pct`` field (parse + tile display),
 member-role classification, demo mode, the fan wizard exclusion, the dashboard
 GPU card title, and the read-only guarantee (NVIDIA GPU fans are never written).
 
@@ -254,7 +254,7 @@ class TestReadOnlySafety:
 
 
 # ---------------------------------------------------------------------------
-# Measured duty_pct (DEC-204) — distinct from commanded PWM
+# Driver-reported duty_pct (DEC-204, NVIDIA's intended speed) — distinct from commanded PWM
 # ---------------------------------------------------------------------------
 
 
@@ -283,7 +283,7 @@ class TestDutyPct:
         assert fans[0].duty_pct is None
 
     def test_duty_pct_flows_into_the_card_vm(self):
-        """A read-only NVIDIA fan gets its own card carrying the measured duty —
+        """A read-only NVIDIA fan gets its own card carrying the reported duty —
         it has no commanded PWM, so duty is the only speed signal it has."""
         fan = FanReading(id="nvidia_gpu:0000:01:00.0", source="nvidia_gpu", rpm=1400, duty_pct=55)
         cards = build_fan_card_vms([fan], active_profile=None, overrides=[], stalled_ids=())
@@ -297,10 +297,10 @@ class TestDutyPct:
         vm = build_fan_card_vms([fan], active_profile=None, overrides=[], stalled_ids=())[0]
         card = FanControlCard(vm)
         qtbot.addWidget(card)
-        # Measured duty is labelled so it is never read as commanded PWM. DEC-238
+        # Reported duty is labelled so it is never read as commanded PWM. DEC-238
         # moved the qualifier from the value into the column caption — the header
         # is what names the quantity — so pin both halves: a caption still
-        # reading "SPEED" here would present measured duty as commanded PWM.
+        # reading "SPEED" here would present reported duty as commanded PWM.
         assert card._speed_caption.text() == "DUTY"
         assert card._speed_value.text() == "55%"
         assert card._rpm_value.text() == "1400"
@@ -319,7 +319,7 @@ class TestDutyPct:
 
     def test_commanded_pwm_wins_over_duty(self, qtbot):
         # Precedence contract: when both are present, the daemon-commanded PWM
-        # is shown (not the measured duty) — a hypothetical future source with
+        # is shown (not the reported duty) — a hypothetical future source with
         # both must never render duty in place of the commanded value.
         from ventulus.services.fan_cards_view import FanCardVM, FanState
 
@@ -387,7 +387,7 @@ class TestDemoMode:
         fans = DemoService().fans()
         nvidia = [f for f in fans if f.source == "nvidia_gpu"]
         assert len(nvidia) == 1
-        # Read-only: no commanded PWM, but a firmware-reported measured duty.
+        # Read-only: no commanded PWM, but a driver-reported duty.
         assert nvidia[0].last_commanded_pwm is None
         assert nvidia[0].duty_pct is not None
 

@@ -322,8 +322,9 @@ never under `/sys/class/hwmon`. The daemon uses `coretemp`.
 ## Out of scope
 
 - **Intel Arc / Xe GPU fan control:** Intel Arc desktop GPUs report fan speed (`i915`
-  for Arc A-series from Linux 6.12, `xe` for Arc B-series from 6.16), but no writable
-  fan-control path exists as of 7.3. Ventulus monitors them only; see
+  for Arc A-series from Linux 6.12, `xe` for Arc B-series from 6.16), but no mainline
+  kernel has a writable fan-control path as of 7.3 (Intel's patches adding one were
+  still under review in October 2026). Ventulus monitors them only; see
   [Intel discrete GPU monitoring](19_Hardware_Compatibility.md#intel-discrete-gpu-arc-monitoring).
 - **`thermald`:** the Intel thermal daemon manages CPU frequency and turbo state
   through the thermal-zone API, not hwmon. It is independent of motherboard fan

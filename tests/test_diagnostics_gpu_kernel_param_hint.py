@@ -8,7 +8,7 @@ the readiness problem list. These tests re-vehicle onto that live pure function
 (``detect_readiness_problems``) so the fix text can't silently regress:
 
 * read-only GPU with no ppfeaturemask at all → a ``gpu_readonly`` problem whose
-  fix tells the user to add ``amdgpu.ppfeaturemask=0xffffffff``.
+  fix tells the user to add ``amdgpu.ppfeaturemask=0xfff7ffff`` (DEC-497).
 * ppfeaturemask present but bit 14 unset → a ``gpu_ppfeaturemask`` problem with
   the same actionable fix (and the read-only variant must not also fire).
 * an already-writable GPU, or a correctly-configured PMFW GPU, raises neither.
@@ -26,7 +26,7 @@ from ventulus.api.models import (
 from ventulus.services.duty_drift import NO_DRIFT
 from ventulus.ui.widgets.readiness_report import detect_readiness_problems
 
-_KERNEL_ARG = "amdgpu.ppfeaturemask=0xffffffff"
+_KERNEL_ARG = "amdgpu.ppfeaturemask=0xfff7ffff"
 
 
 def _diag(
@@ -83,6 +83,20 @@ class TestRdnaKernelParameterFix:
         assert "gpu_ppfeaturemask" in problems
         assert _KERNEL_ARG in problems["gpu_ppfeaturemask"]["fix"]
         assert "gpu_readonly" not in problems
+
+    def test_fix_recommends_minimal_mask_and_names_the_taint(self) -> None:
+        # DEC-497 (curator GPD-02/03): the fix recommends the kernel default plus
+        # bit 14, not all 32 bits, and warns that 6.13+ taints the kernel when
+        # OverDrive is on, so the critical log line is not read as a fault.
+        problems = _problems_by_key(
+            _diag(fan_control_method="read_only", ppfeaturemask="0xffff", bit14_set=False)
+        )
+        fix = problems["gpu_ppfeaturemask"]["fix"]
+        assert "0xffffffff" not in fix
+        assert "0x4000" in fix
+        assert "tainted" in fix
+        readonly = _problems_by_key(_diag(fan_control_method="read_only"))["gpu_readonly"]["fix"]
+        assert "0xffffffff" not in readonly
 
     def test_no_gpu_problem_when_mask_set_with_bit14(self) -> None:
         # Correctly configured PMFW card: neither variant of the fix fires.

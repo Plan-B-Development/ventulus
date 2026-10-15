@@ -610,6 +610,10 @@ class TestSpeedCaption:
         assert card._speed_caption.text() == "DUTY"
         assert card._speed_value.text() == "55%"
         assert "not a value the daemon commanded" in card._speed_caption.toolTip()
+        # NVML documents the duty as the *intended* fan speed (nvml.h): the tooltip
+        # must not call it a measurement (curator GPD-07, 2026-10-15).
+        assert "intended fan speed, not a measurement" in card._speed_caption.toolTip()
+        assert "Measured" not in card._speed_caption.toolTip()
 
     def test_caption_resets_when_a_commanded_value_arrives(self, qtbot):
         """Cards are reconciled in place at 1 Hz. A tile that showed duty and then

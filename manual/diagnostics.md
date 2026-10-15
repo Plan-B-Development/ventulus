@@ -43,7 +43,7 @@ reaching that hardware.
 | **hwmon** | Whether motherboard fan headers are detected, how many, and whether they are writable |
 | **AMD GPU** | Whether an AMD discrete GPU is detected, its model, PCI address, and fan control method (`pmfw`, or `pwm1` on an RX 6000 or older) |
 | **Intel GPU** | Whether an Intel Arc discrete GPU is detected, its model and PCI address. Its fan is always `read_only (firmware-managed)`: the `xe`/`i915` drivers expose no fan control |
-| **NVIDIA GPU** | Whether an NVIDIA discrete GPU is detected (through `nouveau` or the opt-in NVML backend), its model, driver and PCI address. Its fan is always `read-only`: `nouveau`'s writable `pwm1` is excluded for safety, and NVML is telemetry only |
+| **NVIDIA GPU** | Whether an NVIDIA discrete GPU is detected (through `nouveau` or the opt-in NVML backend), its model, driver and PCI address. Its fan is always `read-only`: `nouveau`'s writable `pwm1` (some cards older than Turing) is excluded for safety, and NVML is telemetry only. `nouveau` publishes no sensors on Turing and newer cards, so such a card is detected only through NVML |
 | **Liquid cooling** | Whether a liquid cooler (AIO) is detected through hwmon, and whether its pump and fan are writable, monitor-only (a read-only driver such as NZXT Kraken2), or not detected. USB-only coolers without a kernel driver show as not detected |
 | **Features** | A summary of write capabilities (OpenFan writes, hwmon writes) |
 

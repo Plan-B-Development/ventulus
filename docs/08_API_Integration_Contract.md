@@ -943,8 +943,9 @@ is already on the same response.
 DEC-095/162 30% CPU/pump floor) or *below* it on a GPU that diverges (DEC-119). Per-fan commanded
 duty is `last_commanded_pwm` on `/fans` + `/poll`, which remains the only authority on the wire for
 what any single fan was told to do, with the hwmon caveat noted under `GET /fans` below, where that
-field also carries the readback. Nor is it a *measured* value: `rpm` is the measured one, and the two must
-never be conflated.
+field also carries the readback. Nor is it a *measured* value: `rpm` is the measured one (except on an
+NVML-sourced NVIDIA fan, whose `rpm`, like its `duty_pct`, is NVIDIA's *intended* speed; see `GET /fans`),
+and the two must never be conflated.
 
 **Absence is meaningful and a client must not carry a previous value forward.** A control is absent
 whenever the engine did not evaluate it, which covers: no profile active; the control is listed in
@@ -1136,7 +1137,7 @@ Expected fields:
 - source
 - rpm (optional, omitted when unavailable)
 - last_commanded_pwm (optional, omitted until first write). **For an hwmon header this field has two producers and they mean different things**: the daemon's poll writes the sysfs *readback* here, and the engine writes the value it *commanded*, so for an uncontrolled header it reports the readback despite its name. They agree while writes are landing, which is why it went unnoticed. Where the distinction matters, read `pwm_readback_pct` (readback, one producer) and `pwm_commanded_pct` (command, one producer, DEC-318) rather than inferring either from this field. Unambiguous for OpenFAN and GPU sources, which have no readback attribute. **For an OpenFAN channel it is withdrawn when the daemon stops knowing the duty (DEC-412):** after a write whose reply failed (the frame may or may not have landed), and for every channel on a serial reconnect or a system resume (the device may have come back at its power-on default). It reappears with the next write that lands, which for a channel a profile drives is the next tick. Absent means "not known", never 0 %.
-- duty_pct (optional; DEC-204): firmware-**measured** current fan duty %, present only for sources with a duty readback (NVIDIA via NVML). Distinct from `last_commanded_pwm` (commanded), and never to be conflated with it. May exceed 100 (NVML expresses it as a % of max noise tolerance), but it is a `u8` on the wire (`responses.rs`) and so saturates at **255**: a larger reading is not representable. Omitted when absent.
+- duty_pct (optional; DEC-204): the driver-**reported** current fan duty %, present only for sources with a duty readback (NVIDIA via NVML). NVIDIA documents it as the *intended* fan speed, not a measurement: a blocked fan still reports its intended duty (`nvml.h`, `nvmlDeviceGetFanSpeed_v2`); the same holds for the NVML-sourced `rpm`. Distinct from `last_commanded_pwm` (commanded), and never to be conflated with it. May exceed 100 (NVML expresses it as a % of max noise tolerance), but it is a `u8` on the wire (`responses.rs`) and so saturates at **255**: a larger reading is not representable. Omitted when absent.
 - age_ms
 - stall_detected (optional bool): daemon-asserted; set when a fan's duty is above the daemon's `STALL_PWM_THRESHOLD` (20%, i.e. ≥21%) but measured RPM is zero. Evaluated for OpenFAN and hwmon fans only, and **never for a GPU fan, which always reports `null`**. For an OpenFAN channel the duty is `last_commanded_pwm`. **For an hwmon header (DEC-458, daemon ≥ 3.2.0) it depends on who drives the header:** one the daemon commands is measured against `pwm_commanded_pct`; one it does not command, whether never taken or given back (a hand-back, or the release of a header with no mode switch, DEC-451), is measured against `pwm_readback_pct`, **but only once the daemon has seen that header's fan spinning (RPM above 0) since it started**, and otherwise reports `null`. That is what tells a fan that stopped from a header with no fan: both read 0 RPM under a firmware duty, and only the fan ever turned. The record is never cleared, so a fan unplugged while the daemon runs reads as stalled. Older daemons read `last_commanded_pwm` for hwmon too, which for a header nothing controls is the sysfs readback (above), so there a BIOS-held or stale duty above 20 % on a header with no fan reports `true`. **A diagnostic's writes (any diagnostic holding the verify slot: verify, characterisation, stall probe, control-path discovery) are not commands (daemon ≥ 3.7.0):** a header a diagnostic has written reports `null` while that diagnostic holds the write pause (`verify_active`), and once it has ended is judged as a header the daemon does not command (the readback rule above) until the engine commands it again or the header is given back, which means the duty a test restored on a header with no mode switch is never taken for a command. Other headers keep their verdict during a diagnostic. `pwm_commanded_pct` still reports the duty the test wrote. Older daemons measured a header under test against the test's duty, and a no-mode header against the duty the test restored until a profile commanded it. Evaluated per-tick from the latest snapshot (no multi-cycle counter); `null`/omitted when RPM is not polled, and whenever the duty it is measured against is absent. So for an OpenFAN channel it is also withdrawn while that channel's duty is unknown (after a failed reply, a reconnect or a resume; DEC-412), and from daemon ≥ 4.0.0 while a firmware update suspends OpenFAN writes (DEC-481): the duty is then the update's parking 100 %, and no tach is read after it. `null` means *not evaluated*, never *not stalled*. Surfaced by the GUI as an `error`-level warning.
 - fan_alarm (optional bool, DEC-316): the driver's own `fanN_alarm` bit for an hwmon header. Carried on the **1 Hz poll** rather than on `/hwmon/headers` deliberately: it is *state*, and clients refetch headers only occasionally, so an alarm frozen into the discovery snapshot would read "clear" while a fan is failing. `null`/absent means **not known** (either the driver exposes no alarm attribute, or the cache entry was refreshed by a PWM write without re-reading it) and must never be rendered as "no alarm". Distinct from `stall_detected`, which the daemon infers; this is what the hardware itself asserts.
@@ -1236,7 +1237,7 @@ consequences a client must handle:
   active control cannot vanish this way, because every engine write refreshes its entry. Treat a fan's
   absence as "not currently readable", exactly as for a sensor.
 
-Fan `source` is `"openfan"`, `"hwmon"`, `"amd_gpu"`, `"intel_gpu"`, or `"nvidia_gpu"`. GPU fan IDs embed the PCI BDF: `amd_gpu:{bdf}`, `intel_gpu:{bdf}`, and `nvidia_gpu:{bdf}`. OpenFAN fan IDs are `openfan:ch{NN}`, where `NN` is the **zero-padded** channel index (hardware-fixed range 0–9, `NUM_CHANNELS = 10`). The GUI parses that index for tier 3 above, so the padding and decimal form are part of the contract; a non-decimal suffix falls through to the raw id rather than being guessed at. Intel (DEC-121) and NVIDIA (DEC-204) GPU fans are **read-only**: `rpm` is reported when available (and NVIDIA additionally reports a measured `duty_pct`), but `last_commanded_pwm` is always absent; the GUI must never issue a write to an `intel_gpu:`/`nvidia_gpu:` target.
+Fan `source` is `"openfan"`, `"hwmon"`, `"amd_gpu"`, `"intel_gpu"`, or `"nvidia_gpu"`. GPU fan IDs embed the PCI BDF: `amd_gpu:{bdf}`, `intel_gpu:{bdf}`, and `nvidia_gpu:{bdf}`. OpenFAN fan IDs are `openfan:ch{NN}`, where `NN` is the **zero-padded** channel index (hardware-fixed range 0–9, `NUM_CHANNELS = 10`). The GUI parses that index for tier 3 above, so the padding and decimal form are part of the contract; a non-decimal suffix falls through to the raw id rather than being guessed at. Intel (DEC-121) and NVIDIA (DEC-204) GPU fans are **read-only**: `rpm` is reported when available (and NVIDIA additionally reports `duty_pct`, NVIDIA's intended speed), but `last_commanded_pwm` is always absent; the GUI must never issue a write to an `intel_gpu:`/`nvidia_gpu:` target.
 
 ### GET /hwmon/headers
 Use to discover:
@@ -3791,13 +3792,15 @@ The daemon listens on `/run/ventulus/ventulus.sock` with mode 0666 so a non-root
 
 ### NVIDIA GPU (read-only, DEC-204)
 - **No write path exists (by design).** The open `nouveau` driver *does* expose
-  a writable `pwm1`, but the daemon deliberately excludes it from hwmon discovery
-  for safety; the opt-in proprietary NVML backend is telemetry-only. NVIDIA fans
+  a writable `pwm1` on some cards older than Turing (on Turing and newer it
+  registers no hwmon device at all), but the daemon deliberately excludes it from
+  hwmon discovery for safety; the opt-in proprietary NVML backend is telemetry-only. NVIDIA fans
   are never written.
 - `fan_control_method` is always `"read_only"` (fan present) or `"none"`.
 - Temps arrive with `source: "nvidia_gpu"`, kind `gpu_temp`, `chip_name`
   `"nouveau"` (open) or `"nvml"` (proprietary); fans as `nvidia_gpu:{bdf}` with a
-  measured `duty_pct` (may exceed 100) but no `last_commanded_pwm`.
+  driver-reported `duty_pct` (NVIDIA's *intended* speed, not a measurement; may
+  exceed 100) but no `last_commanded_pwm`.
 - The `driver` field on the capability/diagnostics is the **kernel module name**
   (`"nouveau"`/`"nvidia"`), not the `nvml` library.
 - The GUI must not offer NVIDIA GPU fans as controllable curve members and must

@@ -19,7 +19,7 @@ that belong to no control get no card at all — the Controls page owns assignin
 them, and says how many are waiting (DEC-233).
 
 Read-only fans are the one exception and get a card *each*, so a GPU whose only
-speed signal is a firmware-reported measured duty (DEC-204) still has one place
+speed signal is a driver-reported duty (DEC-204) still has one place
 that shows it; a read-only fan that a hand-edited profile placed inside a real
 control renders there instead, because the control genuinely exists.
 
@@ -135,10 +135,11 @@ class FanCardVM:
     equals ``control_id`` in every normal case; it differs only when a malformed
     profile would otherwise make two cards collide and silently drop one.
 
-    ``duty_pct`` is the firmware-reported *measured* duty (NVIDIA via NVML,
-    DEC-204) and is distinct from the daemon-commanded ``pwm_pct``. Where both
-    exist the commanded value wins on display; duty is the fallback that gives
-    read-only GPU fans a speed readout at all.
+    ``duty_pct`` is the driver-reported duty (NVIDIA via NVML, DEC-204; NVIDIA's
+    *intended* fan speed, not a measurement) and is distinct from the
+    daemon-commanded ``pwm_pct``. Where both exist the commanded value wins on
+    display; duty is the fallback that gives read-only GPU fans a speed readout
+    at all.
     """
 
     control_id: str
@@ -417,7 +418,7 @@ def build_fan_card_vms(
     # get one card each. They cannot be assigned to a control at all (the member
     # picker refuses them, DEC-102), so unlike an unassigned fan there is no page
     # that will ever account for them — and a per-fan card is the only way their
-    # reading stays attributable, since pooling a GPU's measured duty would
+    # reading stays attributable, since pooling a GPU's reported duty would
     # destroy the very number the card exists to show (DEC-204).
     unclaimed = [f for f in fans if f.id not in claimed]
     for fan in sorted(

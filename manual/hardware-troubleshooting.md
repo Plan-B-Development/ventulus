@@ -429,13 +429,22 @@ driver, Alchemist / A-series on `i915`) but cannot control its fan:
 - Its fan appears in the fan tables with the control method **read-only
   (firmware-managed)**, is never offered as a curve member, and is never written to.
 
-This is by design, not a missing driver. The `xe` and `i915` drivers expose the fan's
-RPM read-only and no write control at all: firmware on the card (shipped in
-`linux-firmware` as `fan_control_*.bin`) runs the fan by itself, and no Linux tool can
-set its speed. So `ppfeaturemask`, overdrive and the GPU fan test do not apply.
+This is by design, not a missing driver. In a mainline kernel the `xe` and `i915`
+drivers expose the fan's RPM read-only and no write control at all: firmware on the
+card runs the fan by itself, and on a stock kernel no Linux tool can set its speed. So
+`ppfeaturemask`, overdrive and the GPU fan test do not apply.
 
-Only the Arc **B580** maps to a specific model name; other Intel discrete GPUs show
-as "Intel D-GPU" until a confirmed device-ID-to-name mapping exists for them.
+Intel has posted kernel patches that add fan control to `xe`; they were still under
+review in October 2026. If you run a kernel patched with them, Ventulus lists the Arc
+fan as a motherboard header on chip `xe`: do not add that header to a profile, because
+Ventulus would then drive a GPU fan with motherboard-fan rules.
+
+An Arc fan can read 0 RPM while it spins: one B580 owner sees this with PCIe power
+saving (ASPM) on ([drm/xe #9328](https://gitlab.freedesktop.org/drm/xe/kernel/-/issues/9328),
+open). So 0 RPM on an Arc card is not proof of a stopped fan.
+
+Cards the PCI ID database names (the B580, B570, Pro B50/B60/B65/B70 and the A-series
+cards) show their model name; other Intel discrete GPUs show as "Intel D-GPU".
 
 ## NVIDIA GPUs are monitor-only
 
@@ -444,13 +453,18 @@ Ventulus **monitors** an NVIDIA discrete GPU but does not drive its fan:
 - Its temperature appears on the Dashboard and the **Overview** page, and can drive a
   curve for *other* fans.
 - Its fan appears in the fan tables as **read-only**, is never offered as a curve
-  member, and is never written to. Through NVML it also shows the firmware's
-  *measured* duty ("N% duty"), which is not a commanded value and can exceed 100 %.
+  member, and is never written to. Through NVML it also shows the duty the driver
+  reports ("N% duty"), which is not a commanded value and can exceed 100 %. NVIDIA
+  documents that duty, and the RPM NVML gives, as the fan's *intended* speed: a fan
+  that is blocked or failed still shows it.
 
 NVIDIA has two driver worlds, and Ventulus treats both as read-only:
 
-- **`nouveau`**, the open driver, publishes a writable `pwm1`, but Ventulus excludes it
-  from control: GPU fans belong to the GPU, the same rule as for AMD.
+- **`nouveau`**, the open driver, publishes a temperature (and on some cards fan RPM
+  and a writable `pwm1`, which Ventulus excludes from control: GPU fans belong to the
+  GPU, the same rule as for AMD) **only on cards older than Turing**. On Turing (RTX 20)
+  and newer it runs NVIDIA's GSP firmware and publishes no sensors at all, so Ventulus
+  cannot see such a card through `nouveau`.
 - **The proprietary driver** exposes no hwmon fan at all. Ventulus can read its
   temperature and fan telemetry through the **NVML** library. That path is **off by
   default** (`[detection] enable_nvidia_telemetry` in the daemon's configuration, plus
@@ -462,7 +476,7 @@ NVIDIA has two driver worlds, and Ventulus treats both as read-only:
 Open **System State** and look at the GPU rows on the **Safety & GPU Limits** card. If
 `amdgpu.ppfeaturemask` is missing bit `0x4000` (`PP_OVERDRIVE_MASK`), the kernel does
 not expose firmware fan curves on RX 7000 and RX 9000 cards. Add
-`amdgpu.ppfeaturemask=0xffffffff` to your kernel command line and reboot:
+`amdgpu.ppfeaturemask=0xfff7ffff` to your kernel command line and reboot:
 [Driver Setup](driver-setup.md#amd-gpu-fan-control-prerequisite-rdna3) has the steps
 for each bootloader. An RX 6000 or older card is monitored and can be tested and
 reset, but no profile drives it.
