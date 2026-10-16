@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability in Ventulus GUI, please report it privately:
 
-1. **Email:** mitchell.r.palmer@gmail.com
+1. **Email:** Mitchell.R.Palmer@gmail.com
 2. **Subject:** `[SECURITY] Ventulus GUI — <brief description>`
 
 Please include:

@@ -1,7 +1,7 @@
 Source: ventulus
 Section: admin
 Priority: optional
-Maintainer: Plan-B-Development <https://github.com/Plan-B-Development>
+Maintainer: Plan-B-Development <Mitchell.R.Palmer@gmail.com>
 Build-Depends: debhelper-compat (= 13), dh-python, python3:any
 Standards-Version: 4.7.0
 Homepage: https://github.com/Plan-B-Development/ventulus
