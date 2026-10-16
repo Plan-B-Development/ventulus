@@ -523,6 +523,19 @@ def test_the_cpu_chart_reads_only_sensors_the_trace_recorded():
 
 
 def test_history_lists_a_file_nested_too_deeply_as_unreadable(tmp_path):
+    # Whether the parser runs out of stack first depends on the interpreter and
+    # its stack limit (`json_parser_out_of_stack`); unreadable holds either way.
+    _save(complete_doc(report_id="fine"), tmp_path)
+    (tmp_path / "pwm-report-deep.json").write_text("[" * 100_000 + "]" * 100_000)
+    entries = store.list_reports(tmp_path)
+    assert {e.report_id for e in entries if not e.error} == {"fine"}
+    (bad,) = [e for e in entries if e.error]
+    assert bad.path.name == "pwm-report-deep.json"
+
+
+def test_history_says_a_file_is_nested_too_deeply_when_the_parser_runs_out_of_stack(
+    tmp_path, json_parser_out_of_stack
+):
     _save(complete_doc(report_id="fine"), tmp_path)
     (tmp_path / "pwm-report-deep.json").write_text("[" * 100_000 + "]" * 100_000)
     entries = store.list_reports(tmp_path)

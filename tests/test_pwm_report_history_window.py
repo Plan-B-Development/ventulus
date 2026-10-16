@@ -380,6 +380,20 @@ def test_a_deeply_nested_file_in_the_folder_does_not_stop_the_window_opening(
 
 
 def test_importing_a_deeply_nested_file_shows_a_message(hist, monkeypatch):
+    # Whether the parser runs out of stack first depends on the interpreter and
+    # its stack limit (`json_parser_out_of_stack`); a refusal holds either way.
+    window, _, tmp = hist
+    deep = tmp / "deep.json"
+    deep.write_text("[" * 100_000 + "]" * 100_000)
+    seen = _messages(monkeypatch)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(deep), ""))
+    window.history_page.import_btn.click()
+    assert seen and seen[0][0] == "warning" and str(deep) in seen[0][1]
+
+
+def test_importing_a_file_the_parser_runs_out_of_stack_on_says_why(
+    hist, monkeypatch, json_parser_out_of_stack
+):
     window, _, tmp = hist
     deep = tmp / "deep.json"
     deep.write_text("[" * 100_000 + "]" * 100_000)

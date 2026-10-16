@@ -12,19 +12,37 @@ passes on a combo that announces nothing useful. It shipped as one once
 from __future__ import annotations
 
 import pytest
+import shiboken6
+from PySide6.QtCore import QEvent
 from PySide6.QtGui import QAccessible
-from PySide6.QtWidgets import QComboBox, QLabel, QLineEdit, QProgressBar, QSpinBox, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QProgressBar,
+    QSpinBox,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
-from ventulus.ui.components.a11y import name_value_control
+from ventulus.ui.components.a11y import accessible_proxy, name_value_control
 from ventulus.ui.components.toggle_switch import ToggleSwitch
 
 
 def announced(widget) -> str:
-    """What assistive tech would use to say what *widget* is.
+    """What assistive tech would use to say what *widget* is, on every supported Qt.
 
     A Name distinct from the Value is a real name; otherwise fall back to the
     ``Label`` relation a ``setBuddy`` publishes, which is what AT-SPI exports as
     *labelled-by* and what Orca reads for a combo box.
+
+    Only a relation Qt before 6.11 also reports counts: a label among the
+    widget's siblings, or its titled group box. Qt 6.11 reports a buddy label
+    wherever it sits, so on 6.11 an unfiltered read passes for a label Debian 13
+    (Qt 6.8) and Ubuntu 26.04 (Qt 6.10) never announce.
     """
     iface = QAccessible.queryAccessibleInterface(widget)
     if iface is None:
@@ -33,8 +51,12 @@ def announced(widget) -> str:
     value = iface.text(QAccessible.Text.Value)
     if name and name != value:
         return name
+    parent = widget.parentWidget()
     for target, flags in iface.relations():
-        if flags & QAccessible.RelationFlag.Label:
+        if not flags & QAccessible.RelationFlag.Label:
+            continue
+        source = target.object()
+        if source is parent or (parent is not None and source.parent() is parent):
             return target.text(QAccessible.Text.Name)
     return ""
 
@@ -65,8 +87,8 @@ def test_a_string_label_still_announces_without_a_visible_label(host):
 
     ``setAccessibleName`` alone is silently discarded on a non-editable combo, so
     a control with no visible label to buddy announced nothing at all. A hidden
-    proxy label parented to the control fixes it — measured to announce
-    identically to a visible buddy.
+    proxy label kept beside the control fixes it — measured to announce
+    identically to a visible buddy (``TestProxyPlacementBeforeQt611``).
     """
     combo = QComboBox(host)
     combo.addItem("Default Dark")
@@ -164,7 +186,7 @@ def test_an_empty_label_is_a_no_op(host):
 
     name_value_control(combo, "   ")
 
-    assert not combo.findChildren(QLabel), "no proxy should be created for an empty name"
+    assert not host.findChildren(QLabel), "no proxy should be created for an empty name"
     assert combo.accessibleName() == ""
 
 
@@ -176,7 +198,7 @@ def test_a_widget_that_is_not_a_value_control_is_left_alone(host):
     name_value_control(bar, "Progress")
 
     assert bar.accessibleName() == ""
-    assert not bar.findChildren(QLabel)
+    assert not host.findChildren(QLabel)
 
 
 def test_naming_the_same_control_twice_does_not_duplicate_the_proxy(host):
@@ -192,7 +214,7 @@ def test_naming_the_same_control_twice_does_not_duplicate_the_proxy(host):
     name_value_control(edit, "Search sensors")
     name_value_control(edit, "Search sensors")
 
-    proxies = [lbl for lbl in edit.findChildren(QLabel) if lbl.objectName().endswith("_A11yLabel")]
+    proxies = [lbl for lbl in host.findChildren(QLabel) if lbl.objectName().endswith("_A11yLabel")]
     assert len(proxies) == 1, (
         f"a second call duplicated the proxy: {[p.objectName() for p in proxies]}"
     )
@@ -209,6 +231,106 @@ def test_renaming_a_control_updates_the_existing_proxy(host):
     name_value_control(combo, "Colour scheme")
 
     assert announced(combo) == "Colour scheme"
+
+
+class TestProxyPlacementBeforeQt611:
+    """The hidden label sits beside its control, wherever the control goes.
+
+    Qt before 6.11 finds a buddy label only among the control's siblings
+    (``QAccessibleWidget::relations``), so a proxy parented to the control itself
+    announced nothing on Debian 13 (Qt 6.8) and Ubuntu 26.04 (Qt 6.10) while
+    passing on 6.11. ``announced`` applies the older rule on every version.
+    """
+
+    @staticmethod
+    def _combo(parent=None) -> QComboBox:
+        combo = QComboBox(parent)
+        combo.addItem("Default Dark")
+        return combo
+
+    def test_a_combo_named_before_it_joins_a_layout_is_announced(self, host):
+        combo = self._combo()
+        name_value_control(combo, "Theme")
+        QVBoxLayout(host).addWidget(combo)
+
+        assert combo.parentWidget() is host, "precondition: addWidget reparented the combo"
+        assert announced(combo) == "Theme"
+
+    def test_the_label_follows_a_control_to_another_parent(self, host, qtbot):
+        other = QWidget()
+        qtbot.addWidget(other)
+        combo = self._combo(host)
+        name_value_control(combo, "Theme")
+
+        combo.setParent(other)
+
+        assert announced(combo) == "Theme"
+        assert not [lbl for lbl in host.findChildren(QLabel) if lbl.buddy() is combo], (
+            "the label was left behind in the old parent"
+        )
+
+    def test_a_control_without_a_parent_keeps_its_label_inside(self, qtbot):
+        combo = self._combo()
+        qtbot.addWidget(combo)
+
+        name_value_control(combo, "Theme")
+
+        proxy = accessible_proxy(combo)
+        assert proxy is not None and proxy.parentWidget() is combo, "an orphaned label leaks"
+
+    def test_the_label_is_never_shown(self, host):
+        combo = self._combo(host)
+        name_value_control(combo, "Theme")
+        proxy = accessible_proxy(combo)
+        assert proxy is not None and proxy.parentWidget() is host
+
+        host.show()
+
+        assert not proxy.isVisibleTo(host)
+
+    def test_the_label_is_deleted_with_its_control(self, host):
+        combo = self._combo(host)
+        name_value_control(combo, "Theme")
+        proxy = accessible_proxy(combo)
+        assert proxy is not None and proxy.parentWidget() is host
+
+        combo.deleteLater()
+        # Two passes: the control's deletion posts the label's.
+        for _ in range(2):
+            QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+        assert not shiboken6.isValid(combo), "precondition: the control is gone"
+        assert not shiboken6.isValid(proxy), "the label outlived its control"
+
+    def test_a_label_never_becomes_a_splitter_pane(self, host):
+        # QSplitter adopts every child widget as a pane; a hidden one would shift
+        # sizes() and the saved splitter state.
+        splitter = QSplitter(host)
+        edit = QPlainTextEdit(splitter)
+        assert splitter.count() == 1, "precondition: the edit is the splitter's one pane"
+
+        name_value_control(edit, "Full message")
+
+        assert splitter.count() == 1
+        proxy = accessible_proxy(edit)
+        assert proxy is not None and proxy.parentWidget() is edit
+
+    def test_a_focused_control_can_be_deleted(self, host):
+        """Deleting a focused control delivers FocusOut to the Python event filter
+        while the control is being destroyed; that must not crash."""
+        combo = self._combo(host)
+        name_value_control(combo, "Theme")
+        host.show()
+        combo.setFocus()
+        proxy = accessible_proxy(combo)
+        assert proxy is not None
+
+        combo.deleteLater()
+        for _ in range(2):
+            QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+        assert not shiboken6.isValid(combo)
+        assert not shiboken6.isValid(proxy)
 
 
 class TestProxyReuseAcrossDifferentText:

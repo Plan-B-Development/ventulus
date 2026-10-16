@@ -43,6 +43,16 @@ OPENFAN_RESCAN_TIMEOUT_S = 25.0
 # that lock — more than API_TIMEOUT_S can allow on a slow link.
 OPENFAN_DEVICE_TIMEOUT_S = 10.0
 
+# The oldest ventulusd this GUI supports: the release that canonicalises it87 v2.0
+# chip names (DEC-442). This GUI stores fan ids under the canonical chip name, which
+# an older daemon on a renamed chip does not publish. This is the one statement of
+# the floor: every packaging file that declares the dependency, and the README's
+# "Pairs with" line, must say the same, and tests/test_packaging_dependencies.py
+# checks them against it. A packaging floor, not a runtime gate: what a connected
+# daemon serves is decided by GET /capabilities. Bump it only when what the GUI
+# requires moves, never at every release.
+DAEMON_MINIMUM_VERSION = "3.0.0"
+
 # Contract version this GUI is built against. Compared on the first
 # /capabilities response against the daemon's reported ``api_version``; a
 # mismatch surfaces a non-fatal warning banner (the package's ``depends>=`` floor only

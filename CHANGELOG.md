@@ -11,6 +11,10 @@ rename. Version numbers carry on from Control-OFC.
   a `NAME=value` line and a bracketed `(cd … && makepkg -si)`, all parse errors in fish. They are now
   one set of commands that works as written in bash, zsh and fish, and a test parses every command
   block in the README and the manual in all three.
+- **Screen readers say what a drop-down sets on Qt 6.10 and older.** A drop-down with no visible label
+  beside it, such as the theme picker or the log source filter, was announced only by its current
+  value on Qt before 6.11 (Debian 13, Ubuntu 26.04). It is now announced by what it sets on every
+  Qt version.
 
 ### Changed
 
@@ -26,6 +30,9 @@ rename. Version numbers carry on from Control-OFC.
   (on Fedora, `make akmod` too for nct6687d if RPM Fusion is enabled), and upstream's generic steps
   elsewhere. The Hardware page's **How to enable** section lists those commands with copy buttons,
   and how to sign the driver when Secure Boot is on.
+- **pyqtgraph 0.13.7 is enough.** The minimum drops from 0.14 to 0.13.7, the version Debian 13
+  ships. The test suite now also runs on the Python, Qt and numpy packages of Debian 13,
+  Ubuntu 26.04 and Fedora 44.
 
 ## [5.1.0] — 2026-10-15
 

@@ -2168,6 +2168,11 @@ class TestAccessibleNames:
         real name; otherwise fall back to the ``Label`` relation a ``setBuddy``
         publishes, which is what AT-SPI exports as *labelled-by* and what Orca
         reads for a combo box.
+
+        Only a relation Qt before 6.11 also reports counts: a label among the
+        widget's siblings, or its titled group box. Qt 6.11 reports a buddy
+        label wherever it sits, so without this filter the sweep passes here and
+        fails on Debian 13 and Ubuntu 26.04 (see ``components/a11y.py``).
         """
         from PySide6.QtGui import QAccessible
 
@@ -2178,8 +2183,12 @@ class TestAccessibleNames:
         value = iface.text(QAccessible.Text.Value)
         if name and name != value:
             return name
+        parent = widget.parentWidget()
         for target, flags in iface.relations():
-            if flags & QAccessible.RelationFlag.Label:
+            if not flags & QAccessible.RelationFlag.Label:
+                continue
+            source = target.object()
+            if source is parent or (parent is not None and source.parent() is parent):
                 return target.text(QAccessible.Text.Name)
         return ""
 

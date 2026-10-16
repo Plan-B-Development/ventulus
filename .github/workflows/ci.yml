@@ -164,6 +164,30 @@ jobs:
           done
           exit $leaked
 
+  distro:
+    name: Tests on ${{ matrix.image }} packages
+    runs-on: ubuntu-24.04
+    # DEC-499: the supported distributions run the GUI on their own Python, Qt,
+    # pyqtgraph and numpy, not on PyPI wheels. These legs are what prove the
+    # pyproject floors (pyqtgraph 0.13.7 is Debian 13's) and catch behaviour that
+    # differs on an older Qt: before 6.11 Qt reports a buddy label only among the
+    # control's siblings, which the `test` job's current wheels cannot show.
+    # The script installs the packages, then runs the suite as an unprivileged
+    # user with the checkout's metadata installed (else the version is "dev").
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:13', 'ubuntu:26.04', 'fedora:44']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the distribution's packages
+        shell: bash
+        run: .github/ci/distro-suite.sh deps
+      - name: Test suite as an unprivileged user
+        shell: bash
+        run: .github/ci/distro-suite.sh test
+
   canary:
     name: Teardown UAF canary (py3.12, hostile allocator)
     runs-on: ubuntu-latest

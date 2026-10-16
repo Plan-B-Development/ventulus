@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import json
 from dataclasses import dataclass, field
 
 import pytest
+import shiboken6
+from pytestqt.qtbot import QtBot
 
 from ventulus.api.errors import DaemonUnavailable
 from ventulus.api.models import (
@@ -251,14 +254,65 @@ def _flush_deferred_deletes():
     so the config sandbox is torn down after this flush — meaning the widget
     destruction below runs with ``HOME``/XDG still redirected, and a settings
     write during destruction cannot reach the real config (DEC-244).
-    """
-    yield
-    from PySide6.QtCore import QEvent
-    from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance()
-    if app is not None:
-        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    It also holds a strong reference to every widget a test passes to
+    ``qtbot.addWidget`` until that flush, because pytest-qt keeps only a weakref.
+    When the test returns, a parentless widget whose only owner was a local or a
+    garbage cycle can be freed by the cyclic GC at any moment, including in the
+    middle of pytest-qt's post-call ``processEvents()``. If that moment is inside
+    the widget's own event handling, Qt resumes on freed memory: a queued
+    ``LayoutRequest`` lays out a ``TimelineChart``'s plot, the ``ViewBox`` resize
+    runs a chart slot, and the chart dies when PySide drops the bound method, taking
+    the scene and the ``ViewBox`` whose ``setGeometry`` is still on the stack.
+    valgrind showed it on Fedora 44's PySide6 6.11.2 packages, where it segfaulted
+    in ``test_dashboard_r44.py`` (DEC-499). Held, such a widget is closed by
+    pytest-qt and destroyed by the flush below, outside any event. Only registered
+    widgets are held: orphans stay with ``_reap_orphaned_top_levels`` (DEC-287).
+    A test that drops a registered widget therefore no longer sees it collected;
+    to test that production keeps a widget alive, do not register it.
+    """
+    _HELD_WIDGETS.clear()
+
+    # Patched on the class before the test's qtbot exists: QtBot.__init__ binds
+    # its ``add_widget`` alias from ``self.addWidget``, so both names hold. Always
+    # over pytest-qt's own method, so a restore skipped by an error in pytest-qt's
+    # teardown cannot leave one test's patch wrapping the next.
+    def holding_add_widget(self, widget, *, before_close_func=None):
+        _HELD_WIDGETS.append(widget)
+        return _PYTEST_QT_ADD_WIDGET(self, widget, before_close_func=before_close_func)
+
+    QtBot.addWidget = holding_add_widget
+    try:
+        yield
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    finally:
+        QtBot.addWidget = _PYTEST_QT_ADD_WIDGET
+        _HELD_WIDGETS.clear()
+
+
+#: Widgets registered with ``qtbot.addWidget`` in the running test, held by
+#: ``_flush_deferred_deletes`` until its flush.
+_HELD_WIDGETS: list = []
+_PYTEST_QT_ADD_WIDGET = QtBot.addWidget
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_teardown(item):
+    """Release held widgets the test already destroyed, before pytest-qt closes them.
+
+    pytest-qt's teardown closes every registered widget its weakref still reaches
+    and calls ``close()`` on it. The hold keeps a destroyed widget's wrapper
+    reachable, and ``close()`` on it raises "already deleted", failing the
+    teardown and the next test's setup. This wrapper runs before pytest-qt's
+    ``trylast`` one, so dropping the dead wrappers here restores pytest-qt's skip.
+    """
+    _HELD_WIDGETS[:] = [w for w in _HELD_WIDGETS if shiboken6.isValid(w)]
+    return (yield)
 
 
 @pytest.fixture(autouse=True)
@@ -526,3 +580,26 @@ def settings_service(tmp_path, monkeypatch):
     svc = AppSettingsService()
     svc.load()
     return svc
+
+
+@pytest.fixture()
+def json_parser_out_of_stack(monkeypatch):
+    """``json.loads`` fails on a deeply nested document the way a parser that runs
+    out of stack does, on every interpreter.
+
+    Whether 100 000 levels of ``[`` exhaust the parser depends on the interpreter
+    and the process's stack limit, not on the file: Python 3.12 and 3.13 stop at a
+    fixed C recursion limit, while 3.14 measures the real stack and, under a large
+    or unlimited limit (as in some CI containers), parses the whole file. A test of
+    the ``RecursionError`` handling takes this fixture; a test of a real deep file
+    asserts only what holds either way.
+    """
+    real = json.loads
+
+    def loads(s, *args, **kwargs):
+        text = s.decode("utf-8", "replace") if isinstance(s, (bytes, bytearray)) else s
+        if text.count("[") + text.count("{") > 10_000:
+            raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+        return real(s, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", loads)

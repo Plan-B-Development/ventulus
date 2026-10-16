@@ -482,28 +482,44 @@ def test_changelog_has_a_section_for_the_current_version():
     )
 
 
-def test_pkgbuild_daemon_floor_matches_readme_pairing():
-    """The daemon-version floor is stated twice; the two statements must agree.
+def _version_tuple(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in text.split("."))
 
-    `packaging/PKGBUILD` `depends=('ventulusd>=X')` is what pacman
-    actually enforces at install time. The README's "Pairs with … >= vX" line is
-    what a human reads. They are two hand-maintained statements of one fact, and
-    nothing compared them — so a floor bump in one could silently disagree with
-    the other, either blocking installs that should work or promising
-    compatibility that pacman will refuse.
+
+def test_daemon_minimum_is_a_release_version_the_guis_storage_needs():
+    """`constants.DAEMON_MINIMUM_VERSION` is X.Y.Z and is no older than the daemon
+    that publishes canonical chip names (DEC-442): this GUI stores fan ids under
+    the canonical name, so a lower floor would admit a daemon whose ids it cannot
+    match on a renamed it87 chip."""
+    from ventulus.constants import DAEMON_MINIMUM_VERSION
+    from ventulus.services.daemon_features import DAEMON_FEATURE_MINIMUMS
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", DAEMON_MINIMUM_VERSION), DAEMON_MINIMUM_VERSION
+    assert _version_tuple(DAEMON_MINIMUM_VERSION) >= _version_tuple(
+        DAEMON_FEATURE_MINIMUMS["canonical_chip_names"]
+    )
+
+
+def test_pkgbuild_daemon_floor_is_the_daemon_minimum():
+    """`packaging/PKGBUILD` `depends=('ventulusd>=X')` is what pacman enforces at
+    install time, and `release.yml` reads it for the dependency-first check. It
+    must be `constants.DAEMON_MINIMUM_VERSION`, the one statement of the floor:
+    two hand-maintained copies drifted apart unnoticed until a test compared them.
     """
+    from ventulus.constants import DAEMON_MINIMUM_VERSION
+
     deps = _parse_pkgbuild_depends(PKGBUILD.read_text(encoding="utf-8"))
-    daemon_dep = next((d for d in deps if d.startswith("ventulusd")), None)
-    assert daemon_dep is not None, (
-        f"packaging/PKGBUILD depends declares no ventulusd entry. Got: {deps!r}"
+    daemon_deps = [d for d in deps if d.startswith("ventulusd")]
+    assert daemon_deps == [f"ventulusd>={DAEMON_MINIMUM_VERSION}"], (
+        f"packaging/PKGBUILD must depend on ventulusd>={DAEMON_MINIMUM_VERSION} "
+        f"(constants.DAEMON_MINIMUM_VERSION). Got: {daemon_deps!r}"
     )
 
-    dep_match = re.search(r">=\s*v?(\d+\.\d+\.\d+)", daemon_dep)
-    assert dep_match is not None, (
-        f"ventulusd dep {daemon_dep!r} has no '>=X.Y.Z' floor. The GUI "
-        f"must declare the minimum daemon it requires."
-    )
-    pkgbuild_floor = dep_match.group(1)
+
+def test_readme_pairing_states_the_daemon_minimum():
+    """The README's "Pairs with … ≥ vX" line is what a human reads; it must state
+    `constants.DAEMON_MINIMUM_VERSION`, which pacman enforces through the PKGBUILD."""
+    from ventulus.constants import DAEMON_MINIMUM_VERSION
 
     readme_line = next(
         (ln for ln in README.read_text(encoding="utf-8").splitlines() if "Pairs with" in ln),
@@ -514,18 +530,15 @@ def test_pkgbuild_daemon_floor_matches_readme_pairing():
         "and is owned only by the release process — do not drop it."
     )
 
-    # The line names several capability-gated versions in parentheses; the FLOOR
-    # is the first one, immediately after the >= / ≥ sign.
+    # The line may name capability-gated versions later on; the FLOOR is the first
+    # one, immediately after the >= / ≥ sign.
     readme_match = re.search(r"(?:>=|≥)\s*v?(\d+\.\d+\.\d+)", readme_line)
     assert readme_match is not None, (
         f"README 'Pairs with' line states no '>= vX.Y.Z' floor:\n  {readme_line}"
     )
-    readme_floor = readme_match.group(1)
-
-    assert pkgbuild_floor == readme_floor, (
-        f"daemon floor drift: packaging/PKGBUILD requires >={pkgbuild_floor} but "
-        f"README.md advertises >= v{readme_floor}. pacman enforces the PKGBUILD "
-        f"value; the README is what users read. Bump both together."
+    assert readme_match.group(1) == DAEMON_MINIMUM_VERSION, (
+        f"README.md advertises >= v{readme_match.group(1)}, but this GUI requires "
+        f"ventulusd {DAEMON_MINIMUM_VERSION} (constants.DAEMON_MINIMUM_VERSION)."
     )
 
 

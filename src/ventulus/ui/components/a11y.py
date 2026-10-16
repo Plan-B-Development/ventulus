@@ -23,6 +23,14 @@ silently discarded. ``setBuddy`` is what survives — it publishes a
 actually reads. Set both: the name for platforms that honour it, the buddy for
 the one we run on.
 
+**Where the buddy label lives.** Before Qt 6.11, ``QAccessibleWidget::relations``
+finds a buddy label only among the control's *siblings* (the children of its
+parent widget); Qt 6.11 tracks every label whose buddy the control is, wherever
+it sits. A visible label beside its control is a sibling on every version. The
+hidden label made for a control with no visible one is kept beside the control
+too, and follows it when it is reparented, so Debian 13 (Qt 6.8) and Ubuntu 26.04
+(Qt 6.10) announce it as Qt 6.11 does.
+
 Testing this by reading back ``accessibleName()`` is a guaranteed false green for
 exactly that reason, and shipped as one once. Assert the **announced** name — see
 ``TestAccessibleNames._announced_label``.
@@ -36,6 +44,8 @@ printed one. A button whose label is a bare glyph takes ``accessible_name=`` on
 
 from __future__ import annotations
 
+import shiboken6
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import (
     QAbstractSlider,
     QAbstractSpinBox,
@@ -43,6 +53,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QSplitter,
     QTextEdit,
     QWidget,
 )
@@ -115,10 +126,11 @@ def name_value_control(control: QWidget, label: str | QLabel) -> None:
     # discarded). The first version of this helper had exactly that bug, and the
     # app-wide sweep test is what found it.
     #
-    # With no visible label to borrow, a hidden QLabel parented to the control
-    # publishes the same RelationFlag.Label that AT-SPI exports as labelled-by —
-    # verified to announce identically to a visible buddy. It is parented to the
-    # control so it shares its lifetime, and hidden so it changes no layout.
+    # With no visible label to borrow, a hidden QLabel publishes the same
+    # RelationFlag.Label that AT-SPI exports as labelled-by — verified to announce
+    # identically to a visible buddy. It is hidden so it changes no layout, kept
+    # beside the control so Qt before 6.11 finds it (`_ProxyFollower`), and
+    # deleted with the control.
     if isinstance(label, QLabel):
         label.setBuddy(control)
         return
@@ -137,10 +149,7 @@ def name_value_control(control: QWidget, label: str | QLabel) -> None:
     # exact case the text fallback exists to serve (a control with no
     # objectName), so it was the untested one: both idempotence tests set an
     # objectName first, which makes `_proxy_name` stable and hides the bug.
-    existing = next(
-        (c for c in control.findChildren(QLabel) if c.objectName().endswith(_PROXY_SUFFIX)),
-        None,
-    )
+    existing = accessible_proxy(control)
     if existing is not None:
         # Re-derive the objectName too: with no objectName on the control it is
         # derived from the text, so leaving it stale would break `findChild` on
@@ -150,10 +159,66 @@ def name_value_control(control: QWidget, label: str | QLabel) -> None:
         existing.setBuddy(control)
         return
 
-    proxy = QLabel(text, control)
+    proxy = QLabel(text)
     proxy.setObjectName(_proxy_name(control, text))
-    proxy.hide()
     proxy.setBuddy(control)
+    _ProxyFollower(control, proxy)
+
+
+def accessible_proxy(control: QWidget) -> QLabel | None:
+    """The hidden buddy label :func:`name_value_control` made for *control*, if any.
+
+    It sits beside the control (a child of its parent), or inside it while the
+    control has no parent.
+    """
+    follower = control.findChild(_ProxyFollower, options=Qt.FindChildOption.FindDirectChildrenOnly)
+    if follower is None or not shiboken6.isValid(follower.proxy):
+        return None
+    return follower.proxy
+
+
+class _ProxyFollower(QObject):
+    """Keeps a hidden buddy label beside its control, and deletes it with the control.
+
+    Qt before 6.11 looks for a buddy label only among the control's siblings, so
+    the label is parented to the control's parent. A control is often named
+    before it joins a layout, and ``addWidget`` then reparents it; this filter sees
+    that ``ParentChange`` and moves the label along. While the control has no
+    parent the label is the control's own child, so it is never orphaned.
+
+    Except in a ``QSplitter``: it makes every child widget added to it a pane,
+    so a label there would become a hidden pane and shift ``sizes()`` and the
+    saved splitter state. A control placed straight into a splitter keeps the
+    label inside it, which Qt 6.11 announces and older Qt does not; no control
+    sits in a splitter directly today.
+
+    A child of the control, so it lives exactly as long as the control does.
+    """
+
+    def __init__(self, control: QWidget, proxy: QLabel) -> None:
+        super().__init__(control)
+        self.proxy = proxy
+        # Beside the control the label would outlive it; this connection is
+        # between two C++ objects and drops itself if the label goes first.
+        control.destroyed.connect(proxy.deleteLater)
+        control.installEventFilter(self)
+        self._place(control)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.ParentChange and isinstance(watched, QWidget):
+            self._place(watched)
+        return False
+
+    def _place(self, control: QWidget) -> None:
+        if not shiboken6.isValid(self.proxy):
+            return
+        parent = control.parentWidget()
+        home = parent if parent is not None and not isinstance(parent, QSplitter) else control
+        if self.proxy.parentWidget() is not home:
+            self.proxy.setParent(home)
+        # Reparenting hides a widget, but say so explicitly: a label that was never
+        # hidden would be shown with its new parent.
+        self.proxy.hide()
 
 
 def _proxy_name(control: QWidget, text: str) -> str:
