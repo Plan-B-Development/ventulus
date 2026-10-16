@@ -5,6 +5,11 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+## [5.3.0] — 2026-10-16
+
+Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.2.0 is the current daemon release.
+A Ventulus `.rpm` for Fedora 45.
+
 ### Added
 
 - **Fedora 45.** Each Release now carries a Ventulus `.rpm` for Fedora 45
