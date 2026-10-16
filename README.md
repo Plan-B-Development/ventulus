@@ -53,7 +53,7 @@ system. The commands work as written in bash, zsh and fish.
 | --- | --- |
 | Arch Linux, CachyOS, EndeavourOS, Garuda | `sudo pacman -Syu` |
 | Debian 13, Ubuntu 26.04 LTS | `sudo apt update && sudo apt upgrade` |
-| Fedora 44 | `sudo dnf upgrade` |
+| Fedora 44, Fedora 45 | `sudo dnf upgrade` |
 
 Every repository is signed by the key with fingerprint
 `4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA`; check that it is the one your
@@ -95,7 +95,7 @@ sudo apt update
 sudo apt install ventulus   # the daemon starts as it installs
 ```
 
-**Fedora 44:**
+**Fedora 44 and 45:**
 
 ```bash
 curl -fsSL https://plan-b-development.github.io/pacman-repo/ventulus.repo \

@@ -66,6 +66,7 @@ def manifest_dict(
         f"ventulus-{gui}-1-any.pkg.tar.zst",
         f"ventulus_{gui}-1_all.deb",
         f"ventulus-{gui}-1.fc44.noarch.rpm",
+        f"ventulus-{gui}-1.fc45.noarch.rpm",
         f"ventulus-{gui}-noarch.tar.gz",
     ]
     return {

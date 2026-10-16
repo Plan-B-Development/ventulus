@@ -17,7 +17,8 @@ name: Release
 #                    a workflow artifact for github-release to attach.
 #   linux-packages — DEC-499: build the wheel once on Debian 13 and pack it as the
 #   rpm-package      Debian/Ubuntu .deb and the tarball; rpm-package packs the same
-#                    wheel as the Fedora 44 .rpm. ci.yml's package-smoke job
+#                    wheel as one .rpm per Fedora release served (44, 45), each
+#                    built in that release. ci.yml's package-smoke job
 #                    installs these packages on every distribution on every push,
 #                    and ci-green requires that to have passed.
 #   github-release — create the GitHub Release: body extracted from CHANGELOG.md
@@ -226,18 +227,21 @@ jobs:
 
       # Exactly one of each, named for this version, or nothing is published: a
       # missing format would otherwise ship a Release that silently lacks it.
-      # fc44: rpm-package builds in fedora:44. -1-: the release procedure above
-      # resets the PKGBUILD's pkgrel to 1 for every tag; change both together.
+      # fc44 fc45: rpm-package's matrix, one build per Fedora release. -1-: the
+      # release procedure above resets the PKGBUILD's pkgrel to 1 for every tag;
+      # change both together.
       - name: Write SHA256SUMS
         run: |
           set -euo pipefail
           v="${RELEASE_TAG#v}"
           cd dist
-          expected="ventulus-$v-1-any.pkg.tar.zst ventulus_$v-1_all.deb ventulus-$v-1.fc44.noarch.rpm ventulus-$v-noarch.tar.gz"
+          expected="ventulus-$v-1-any.pkg.tar.zst ventulus_$v-1_all.deb ventulus-$v-1.fc44.noarch.rpm ventulus-$v-1.fc45.noarch.rpm ventulus-$v-noarch.tar.gz"
+          n=0
           for f in $expected; do
             [ -f "$f" ] || { echo "::error::$f was not built"; ls -l; exit 1; }
+            n=$((n + 1))
           done
-          [ "$(ls | wc -l)" -eq 4 ] || { echo "::error::unexpected files in dist/"; ls -l; exit 1; }
+          [ "$(ls | wc -l)" -eq "$n" ] || { echo "::error::unexpected files in dist/"; ls -l; exit 1; }
           sha256sum $expected > SHA256SUMS
           cat SHA256SUMS
 
@@ -277,7 +281,9 @@ jobs:
               gh api -H 'Accept: application/octet-stream' \
                 "repos/$REPO/releases/assets/$asset" > "$check/$name"
             done
-          (cd "$check" && [ "$(ls | wc -l)" -eq 5 ] && sha256sum -c SHA256SUMS)
+          # Exactly what was uploaded: the packages and SHA256SUMS in dist/.
+          uploaded=$(ls dist | wc -l)
+          (cd "$check" && [ "$(ls | wc -l)" -eq "$uploaded" ] && sha256sum -c SHA256SUMS)
           cmp dist/SHA256SUMS "$check/SHA256SUMS"
           # By id: the draft checked above, never another Release with this tag.
           gh api -X PATCH "repos/$REPO/releases/$id" -F draft=false -f make_latest=true > /dev/null
@@ -440,14 +446,21 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # One .rpm per Fedora release served, built in that release: its modules sit
+  # in the release's site-packages, so python(abi) differs (3.14 on 44, 3.15 on
+  # 45). github-release expects exactly these .fcN names, and ci.yml's rpm job
+  # builds the same list; change all three together.
   rpm-package:
-    name: Fedora package
+    name: Fedora ${{ matrix.fedora }} package
     needs: linux-packages
     runs-on: ubuntu-24.04
     # Tag pushes only: the manual AUR run needs neither.
     if: github.event_name == 'push'
-    # github-release expects .fc44 in the file name; change both together.
-    container: fedora:44
+    container: fedora:${{ matrix.fedora }}
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora: [44, 45]
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
@@ -469,7 +482,7 @@ jobs:
           ls -l out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rpm-release-package
+          name: rpm-fc${{ matrix.fedora }}-release-package
           path: out/
           if-no-files-found: error
           retention-days: 7

@@ -178,7 +178,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ['debian:13', 'ubuntu:26.04', 'fedora:44']
+        image: ['debian:13', 'ubuntu:26.04', 'fedora:44', 'fedora:45']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the distribution's packages
@@ -231,11 +231,18 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+  # One .rpm per Fedora release served: its modules sit in that release's
+  # site-packages (python(abi) differs). release.yml's rpm-package builds the
+  # same list.
   rpm:
-    name: Fedora package
+    name: Fedora ${{ matrix.fedora }} package
     needs: packages
     runs-on: ubuntu-24.04
-    container: fedora:44
+    container: fedora:${{ matrix.fedora }}
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora: [44, 45]
     steps:
       - name: Install build tools
         run: dnf -y -q install rpm-build python3-devel git findutils
@@ -253,7 +260,7 @@ jobs:
           ls -l out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rpm-packages
+          name: rpm-fc${{ matrix.fedora }}-packages
           path: out/
           if-no-files-found: error
           retention-days: 3
@@ -300,9 +307,11 @@ jobs:
           - { image: 'debian:13', format: deb }
           - { image: 'ubuntu:26.04', format: deb }
           - { image: 'fedora:44', format: rpm }
+          - { image: 'fedora:45', format: rpm }
           - { image: 'debian:13', format: tarball }
           - { image: 'ubuntu:26.04', format: tarball }
           - { image: 'fedora:44', format: tarball }
+          - { image: 'fedora:45', format: tarball }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

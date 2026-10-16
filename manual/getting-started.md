@@ -2,7 +2,7 @@
 
 ## What you need
 
-- **x86_64 Linux**: Arch Linux or a distribution built on it such as CachyOS, Debian 13, Ubuntu 26.04 LTS, or Fedora 44 (see [Installation](#installation), which also lists the distributions that are not supported). Ventulus runs on the distribution's own Python (3.12 or newer), Qt and numpy.
+- **x86_64 Linux**: Arch Linux or a distribution built on it such as CachyOS, Debian 13, Ubuntu 26.04 LTS, or Fedora 44 or 45 (see [Installation](#installation), which also lists the distributions that are not supported). Ventulus runs on the distribution's own Python (3.12 or newer), Qt and numpy.
 - **ventulusd**, the service that does the hardware work, running under systemd. Installing the `ventulus` package pulls it in.
 - A supported fan controller: an OpenFAN controller, motherboard fan headers, or an AMD GPU.
 
@@ -62,7 +62,7 @@ fish (CachyOS's default shell).
 | --- | --- | --- |
 | Arch Linux, CachyOS, EndeavourOS, Garuda | the [pacman repository](#arch-linux-and-cachyos) | `sudo pacman -Syu` |
 | Debian 13, Ubuntu 26.04 LTS | the [APT repository](#debian-13-and-ubuntu-2604) | `sudo apt update && sudo apt upgrade` |
-| Fedora 44 | the [DNF repository](#fedora-44) | `sudo dnf upgrade` |
+| Fedora 44, Fedora 45 | the [DNF repository](#fedora) | `sudo dnf upgrade` |
 | any of the three above, without a repository | the [tarball](#the-tarball) | Settings ▸ [Updates](updates.md) |
 
 [Not supported](#distributions-that-are-not-supported): Manjaro, Debian 12,
@@ -163,7 +163,9 @@ while. apt then keeps the package lists it had and changes nothing; run
 [pacman-repo README](https://github.com/Plan-B-Development/pacman-repo#debian-and-ubuntu)
 covers removing the repository.
 
-### Fedora 44
+### Fedora
+
+Fedora 44 and 45.
 
 ```bash
 curl -fsSL https://plan-b-development.github.io/pacman-repo/ventulus.repo \
@@ -180,15 +182,18 @@ Ventulus opens to a "Disconnected" screen. A machine with no desktop needs only
 `sudo dnf install ventulusd`.
 
 The repository is built per Fedora release, so after a Fedora upgrade it serves
-packages only once a build for the new release is published; until then dnf
-cannot download its metadata. dnf reuses the repository's metadata for up to six
+packages only once a build for the new release is published. Until then dnf
+skips it with a warning and leaves Ventulus as it is; everything else upgrades as
+usual. An older `ventulus.repo`, one without the line `skip_if_unavailable=True`,
+stops every dnf command instead: fetch it again with the first command above.
+dnf reuses the repository's metadata for up to six
 hours: if it reports a missing package or a checksum error right after a new
 Ventulus release, `sudo dnf upgrade --refresh` fetches it again.
 
 ### The tarball
 
 Each release also carries a tarball of each component, for a Debian 13,
-Ubuntu 26.04 or Fedora 44 machine where you would rather not add a repository.
+Ubuntu 26.04 or Fedora 44 or 45 machine where you would rather not add a repository.
 `ventulusd` installs to the same paths as its packages (`/usr/bin`,
 `/usr/lib/systemd/system`, `/etc/ventulus`), and Ventulus under `/usr/local`.
 Ventulus runs on the distribution's own Python, Qt and numpy, so their packages
@@ -256,9 +261,10 @@ sudo systemctl enable --now ventulusd
 ```
 
 On Debian 13 and Ubuntu 26.04, download `--pattern '*.deb'` and install with
-`sudo apt install ./ventulusd_*_amd64.deb ./ventulus_*_all.deb`. On Fedora 44,
+`sudo apt install ./ventulusd_*_amd64.deb ./ventulus_*_all.deb`. On Fedora,
 download `--pattern '*.rpm'` and install with
-`sudo dnf install ./ventulusd-*.x86_64.rpm ./ventulus-*.fc44.noarch.rpm`, then
+`sudo dnf install ./ventulusd-*.x86_64.rpm ./ventulus-*.fcN.noarch.rpm`, where N
+is your Fedora release (`rpm -E %fedora` prints it), then
 `sudo systemctl enable --now ventulusd`. Upgrading then means repeating the
 downloads, which is the chore the repositories exist to remove. Settings ▸
 [Updates](updates.md) can tell you when a new release is out.

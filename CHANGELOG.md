@@ -5,6 +5,13 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Added
+
+- **Fedora 45.** Each Release now carries a Ventulus `.rpm` for Fedora 45
+  (`ventulus-X-1.fc45.noarch.rpm`, on its Python 3.15) beside the Fedora 44 one, and the DNF
+  repository serves both releases. The update check offers each machine the build for its own
+  Fedora release.
+
 ## [5.2.0] — 2026-10-16
 
 Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.2.0 is the current daemon release.

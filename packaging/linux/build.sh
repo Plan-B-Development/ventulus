@@ -10,7 +10,8 @@
 #
 # One wheel serves all three formats, laid out by packaging/linux/stage.sh. The
 # .rpm carries the Fedora release in its name because its modules sit in that
-# release's site-packages (python3.14 on Fedora 44); the .deb and the tarball
+# release's site-packages (python3.14 on Fedora 44, python3.15 on 45), so each
+# Fedora release served gets its own build; the .deb and the tarball
 # keep theirs in a private directory and suit any Python 3 from 3.12.
 set -euo pipefail
 

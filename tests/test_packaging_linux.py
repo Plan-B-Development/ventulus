@@ -547,11 +547,22 @@ def _workflow(name: str) -> dict:
     return yaml.safe_load((REPO / ".github/workflows" / name).read_text(encoding="utf-8"))
 
 
+def _fedora_releases(job: dict) -> list[int]:
+    """The Fedora releases an rpm job builds for: its matrix, in its container."""
+    assert job["container"] == "fedora:${{ matrix.fedora }}"
+    releases = job["strategy"]["matrix"]["fedora"]
+    assert releases and all(type(n) is int for n in releases)
+    return sorted(releases)
+
+
 def test_ci_smoke_tests_every_format_on_every_distribution_it_serves():
     """A format the Release ships with no smoke leg could ship a package that
     misses a dependency, its version metadata or its icon, and nothing would
-    notice until a user installed it."""
+    notice until a user installed it. Every Fedora release the .rpm is built for
+    gets its own .rpm and tarball smoke leg, and runs the suite on its own Python."""
     jobs = _workflow("ci.yml")["jobs"]
+    fedora = _fedora_releases(jobs["rpm"])
+    assert len(fedora) >= 2  # the GA release and the one before it
     legs = {
         (leg["format"], leg["image"])
         for leg in jobs["package-smoke"]["strategy"]["matrix"]["include"]
@@ -559,28 +570,41 @@ def test_ci_smoke_tests_every_format_on_every_distribution_it_serves():
     assert legs == {
         ("deb", "debian:13"),
         ("deb", "ubuntu:26.04"),
-        ("rpm", "fedora:44"),
         ("tarball", "debian:13"),
         ("tarball", "ubuntu:26.04"),
-        ("tarball", "fedora:44"),
-    }
+    } | {(fmt, f"fedora:{n}") for n in fedora for fmt in ("rpm", "tarball")}
     assert set(jobs["package-smoke"]["needs"]) == {"packages", "rpm", "released-daemon"}
-    assert jobs["rpm"]["container"] == "fedora:44"
+    distro = set(jobs["distro"]["strategy"]["matrix"]["image"])
+    assert {img for img in distro if img.startswith("fedora:")} == {f"fedora:{n}" for n in fedora}
+    # Each release's build is its own artifact, and the smoke job downloads them all.
+    upload = next(
+        s for s in jobs["rpm"]["steps"] if s.get("uses", "").startswith("actions/upload-artifact")
+    )
+    pattern = next(
+        s["with"]["pattern"]
+        for s in jobs["package-smoke"]["steps"]
+        if s.get("uses", "").startswith("actions/download-artifact") and "pattern" in s["with"]
+    )
+    names = {upload["with"]["name"].replace("${{ matrix.fedora }}", str(n)) for n in fedora}
+    assert len(names) == len(fedora)
+    assert all(re.fullmatch(pattern.replace("*", ".*"), n) for n in names)
 
 
 def test_the_release_waits_for_and_attaches_every_format():
     """The Release needs every package job, attests and attaches everything it
-    downloaded, and the .rpm it expects is the Fedora release it builds on."""
+    downloaded, and the .rpms it expects are the Fedora releases it builds on,
+    the same ones CI smoke-tests."""
     jobs = _workflow("release.yml")["jobs"]
     needs = set(jobs["github-release"]["needs"])
     assert {"build-test", "linux-packages", "rpm-package", "ci-green"} <= needs
-    fedora = jobs["rpm-package"]["container"].split(":")[1]
+    fedora = _fedora_releases(jobs["rpm-package"])
+    assert fedora == _fedora_releases(_workflow("ci.yml")["jobs"]["rpm"])
     sums = next(s for s in jobs["github-release"]["steps"] if s.get("name") == "Write SHA256SUMS")
     expected = re.search(r'expected="([^"]*)"', sums["run"]).group(1).split()
     assert expected == [
         "ventulus-$v-1-any.pkg.tar.zst",
         "ventulus_$v-1_all.deb",
-        f"ventulus-$v-1.fc{fedora}.noarch.rpm",
+        *(f"ventulus-$v-1.fc{n}.noarch.rpm" for n in fedora),
         "ventulus-$v-noarch.tar.gz",
     ]
     uploads = {
@@ -589,6 +613,7 @@ def test_the_release_waits_for_and_attaches_every_format():
         for s in jobs[job]["steps"]
         if s.get("uses", "").startswith("actions/upload-artifact")
     }
+    uploads = {u.replace("${{ matrix.fedora }}", str(n)) for u in uploads for n in fedora}
     pattern = next(
         s["with"]["pattern"]
         for s in jobs["github-release"]["steps"]
@@ -596,5 +621,5 @@ def test_the_release_waits_for_and_attaches_every_format():
     )
     assert {u for u in uploads if re.fullmatch(pattern.replace("*", ".*"), u)} == {
         "linux-release-package",
-        "rpm-release-package",
+        *(f"rpm-fc{n}-release-package" for n in fedora),
     }

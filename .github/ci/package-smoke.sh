@@ -5,7 +5,8 @@
 # it runs unchanged in a VM.
 #
 #   deb      <dir> holds ventulus_<version>-1_all.deb and -2_all.deb
-#   rpm      <dir> holds ventulus-<version>-1.fcN.noarch.rpm and -2
+#   rpm      <dir> holds ventulus-<version>-1.fcN.noarch.rpm and -2 for this
+#            Fedora release N (builds for other releases may sit beside them)
 #   tarball  <dir> holds ventulus-<version>-noarch.tar.gz
 #   ventulusd  the daemon binary from ventulusd's latest Release
 #
@@ -96,7 +97,8 @@ rpm_names() {
 package_file() {
     case "$format" in
         deb) echo "$dir/ventulus_${version}-${1}_all.deb" ;;
-        rpm) ls "$dir"/ventulus-"$version"-"$1".*noarch.rpm ;;
+        # The build for this Fedora release: <dir> holds one per release served.
+        rpm) echo "$dir/ventulus-${version}-${1}.fc$(rpm -E %fedora).noarch.rpm" ;;
     esac
 }
 
@@ -118,10 +120,13 @@ install_dependencies() {
     esac
 }
 
+# --nosignature: the package is this run's own unsigned build. rpm 6.1
+# (Fedora 45) refuses an unsigned package by default (%_pkgverify_level all);
+# dnf, which users install with, warns and installs it.
 install_rev() {
     case "$format" in
         deb) dpkg --ignore-depends=ventulusd -i "$(package_file "$1")" ;;
-        rpm) rpm -U --nodeps "$(package_file "$1")" ;;
+        rpm) rpm -U --nodeps --nosignature "$(package_file "$1")" ;;
         tarball) "$tardir/install.sh" ;;
     esac
 }
@@ -129,7 +134,7 @@ install_rev() {
 # rpm itself, with the dependencies above installed, must miss nothing but the daemon.
 rpm_unmet_is_only_ventulusd() {
     local unmet
-    unmet=$(rpm -U --test "$1" 2>&1 | grep 'is needed by' | sed 's/ is needed by.*//; s/^[[:space:]]*//')
+    unmet=$(rpm -U --test --nosignature "$1" 2>&1 | grep 'is needed by' | sed 's/ is needed by.*//; s/^[[:space:]]*//')
     [ "$unmet" = "ventulusd >= $floor" ] || { echo "unmet: $unmet"; return 1; }
 }
 
@@ -147,7 +152,7 @@ declares_daemon_floor() {
     case "$format" in
         deb) dpkg-deb -f "$dir/ventulus_${version}-1_all.deb" Depends | tr ',' '\n' |
             grep -qx " *ventulusd (>= $floor)" ;;
-        rpm) rpm -qp --requires "$(ls "$dir"/ventulus-"$version"-1.*noarch.rpm)" |
+        rpm) rpm -qp --requires "$(package_file 1)" |
             grep -qx "ventulusd >= $floor" ;;
     esac
 }

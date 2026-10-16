@@ -168,11 +168,16 @@ def test_another_architecture_gets_the_gui_but_no_daemon(manifest):
 
 
 def test_the_gui_rpm_is_per_fedora_release_and_the_daemon_rpm_is_not(manifest):
-    choice, asset = select_asset(manifest.gui, AssetFormat.RPM, machine="x86_64", fedora=44)
-    assert choice is AssetChoice.FOUND and asset is not None and asset.fedora == 44
-    choice, asset = select_asset(manifest.gui, AssetFormat.RPM, machine="x86_64", fedora=45)
+    builds = sorted(a.fedora for a in manifest.gui.assets if a.format is AssetFormat.RPM)
+    assert len(builds) >= 2  # one per Fedora release served
+    for fedora in builds:
+        choice, asset = select_asset(manifest.gui, AssetFormat.RPM, machine="x86_64", fedora=fedora)
+        assert choice is AssetChoice.FOUND and asset is not None and asset.fedora == fedora
+        assert asset.name.endswith(f".fc{fedora}.noarch.rpm")
+    unbuilt = builds[-1] + 1
+    choice, asset = select_asset(manifest.gui, AssetFormat.RPM, machine="x86_64", fedora=unbuilt)
     assert (choice, asset) == (AssetChoice.NO_FEDORA_BUILD, None)
-    choice, asset = select_asset(manifest.daemon, AssetFormat.RPM, machine="x86_64", fedora=45)
+    choice, asset = select_asset(manifest.daemon, AssetFormat.RPM, machine="x86_64", fedora=unbuilt)
     assert choice is AssetChoice.FOUND and asset is not None and asset.fedora is None
 
 

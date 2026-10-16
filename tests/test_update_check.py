@@ -278,10 +278,10 @@ def test_a_fedora_release_without_a_gui_build(update_signer, cache):
     report, _ = run_check(
         Server(update_signer),
         cache,
-        inst=installed(gui=InstallMethod.RPM, daemon=InstallMethod.RPM, fedora=45),
+        inst=installed(gui=InstallMethod.RPM, daemon=InstallMethod.RPM, fedora=46),
     )
     assert report.gui.asset is None
-    assert any("Fedora 45" in note for note in report.gui.notes)
+    assert any("Fedora 46" in note for note in report.gui.notes)
     assert report.daemon.asset is not None  # the daemon .rpm serves every Fedora
 
 
