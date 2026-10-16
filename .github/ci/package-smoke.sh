@@ -52,19 +52,22 @@ echo "== ventulus $version package smoke: $format ($PRETTY_NAME)"
 case "$format" in
     deb)
         prefix=/usr libdir=/usr/share/ventulus
+        # The Ubuntu image's dpkg drops /usr/share/man; a real system keeps it.
+        rm -f /etc/dpkg/dpkg.cfg.d/excludes
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -q
         apt-get install -y -q --no-install-recommends desktop-file-utils procps
         ;;
     rpm)
         prefix=/usr libdir=
-        dnf -y -q install --setopt=install_weak_deps=False desktop-file-utils procps-ng
+        # util-linux: su, which the minimal fedora image lacks (as_user).
+        dnf -y -q install --setopt=install_weak_deps=False desktop-file-utils procps-ng util-linux
         ;;
     tarball)
         prefix=/usr/local libdir=/usr/local/lib/ventulus
         case " $ID ${ID_LIKE:-} " in
             *" fedora "*) dnf -y -q install --setopt=install_weak_deps=False \
-                desktop-file-utils procps-ng tar gzip ;;
+                desktop-file-utils procps-ng util-linux tar gzip ;;
             *)
                 export DEBIAN_FRONTEND=noninteractive
                 apt-get update -q
