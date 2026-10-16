@@ -30,7 +30,7 @@ manifest=$libdir/tarball-manifest
 deb_deps="python3 python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets
 python3-pyside6.qtnetwork python3-pyside6.qtopengl python3-pyside6.qtopenglwidgets
 qt6-svg-plugins python3-pyqtgraph python3-numpy python3-httpx python3-colorama gpg
-hicolor-icon-theme"
+gpg-agent hicolor-icon-theme"
 rpm_deps="python3 python3-pyside6 python3-pyqtgraph python3-numpy python3-httpx
 python3-colorama gnupg2 hicolor-icon-theme"
 
@@ -44,7 +44,7 @@ deps_command() {
         *" debian "* | *" ubuntu "*) echo "sudo apt install" $deb_deps ;;
         *" fedora "*) echo "sudo dnf install" $rpm_deps ;;
         *) echo "Install Python 3.12 or newer and, from your distribution, PySide6, pyqtgraph," \
-            "numpy, httpx, colorama, Qt's SVG image plugin, gpg and the hicolor icon theme." ;;
+            "numpy, httpx, colorama, Qt's SVG image plugin, gpg with gpg-agent and the hicolor icon theme." ;;
     esac
 }
 

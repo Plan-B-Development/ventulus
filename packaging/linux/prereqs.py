@@ -117,9 +117,11 @@ def problems(libdir: Path) -> list[str]:
     except ImportError as exc:
         found.append(f"PySide6 cannot load: {exc}")
 
-    # The update check verifies the signed release manifest with gpg.
-    if shutil.which("gpg") is None:
-        found.append("gpg is not installed")
+    # The update check verifies the signed release manifest with gpg, whose
+    # --import fails without gpg-agent on Debian and Ubuntu.
+    for tool in ("gpg", "gpg-agent"):
+        if shutil.which(tool) is None:
+            found.append(f"{tool} is not installed")
     return found
 
 

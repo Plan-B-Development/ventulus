@@ -12,13 +12,16 @@ Architecture: all
 # The floors are pyproject.toml's (tests/test_packaging_linux.py holds them
 # equal); ventulusd's is constants.DAEMON_MINIMUM_VERSION. pyqtgraph imports
 # QtOpenGL, and without qt6-svg-plugins the app icon is blank (DEC-499 phase 0).
-# gpg verifies the signed update manifest.
+# gpg verifies the signed update manifest. gpg-agent too: Debian's gpg 2.4
+# exits 2 on --import when it cannot start the agent, even though the key
+# imported, and the update check refuses any non-zero exit.
 Depends: ${misc:Depends}, ${python3:Depends}, python3 (>= 3.12),
  ventulusd (>= 3.0.0),
  python3-pyside6.qtcore (>= 6.6), python3-pyside6.qtgui, python3-pyside6.qtwidgets,
  python3-pyside6.qtnetwork, python3-pyside6.qtopengl, python3-pyside6.qtopenglwidgets,
  qt6-svg-plugins, python3-pyqtgraph (>= 0.13.7), python3-numpy (>= 1:2.0),
- python3-httpx (>= 0.27), python3-colorama (>= 0.4), gpg, hicolor-icon-theme
+ python3-httpx (>= 0.27), python3-colorama (>= 0.4), gpg, gpg-agent,
+ hicolor-icon-theme
 Description: Desktop GUI for the Ventulus fan control daemon
  Ventulus shows the fans and temperatures ventulusd reads and edits the
  fan profiles it runs: curves, roles, overrides and fan tests. It talks only

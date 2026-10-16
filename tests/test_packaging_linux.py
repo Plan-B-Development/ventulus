@@ -440,8 +440,8 @@ def test_prerequisite_check_passes_here_and_names_what_is_missing(tmp_path):
     script = str(REPO / "packaging/linux/prereqs.py")
     env = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
     proc = _run([sys.executable, "-I", "-B", script, str(lib)], env=env)
-    if "gpg is not installed" in proc.stdout:
-        pytest.skip("no gpg on this machine")
+    if "gpg is not installed" in proc.stdout or "gpg-agent is not installed" in proc.stdout:
+        pytest.skip("no gpg or gpg-agent on this machine")
     _ok(proc, "prereqs.py")
 
     meta = next(lib.glob("ventulus-*.dist-info")) / "METADATA"
