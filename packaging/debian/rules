@@ -1,0 +1,27 @@
+#!/usr/bin/make -f
+# Packs the wheel packaging/linux/build.sh built; nothing is compiled here.
+# build.sh sets VENTULUS_REPO (the source tree), VENTULUS_WHEEL and VENTULUS_MAN.
+
+%:
+	dh $@ --with python3
+
+override_dh_auto_configure override_dh_auto_build override_dh_auto_test override_dh_auto_clean:
+
+override_dh_auto_install:
+	cd "$(VENTULUS_REPO)" && packaging/linux/stage.sh deb \
+		"$(VENTULUS_WHEEL)" "$(VENTULUS_MAN)" "$(CURDIR)/debian/ventulus"
+
+# The modules live in a private directory: dh_python3 byte-compiles them on
+# install and removes the bytecode on removal. Dependencies are the ones
+# debian/control names, not guesses from the wheel's metadata.
+override_dh_python3:
+	dh_python3 --no-guessing-deps /usr/share/ventulus
+
+# The documentation stays at the paths the manual and the man page name.
+override_dh_compress:
+	dh_compress -X.md
+
+# CHANGELOG.md stays CHANGELOG.md, at the path the documentation names; the
+# Debian changelog is installed beside it as changelog.Debian.
+override_dh_installchangelogs:
+	dh_installchangelogs -XCHANGELOG.md

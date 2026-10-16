@@ -5,6 +5,16 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Added
+
+- **Packages for Debian 13, Ubuntu 26.04 and Fedora 44, and a tarball.** Each Release now carries
+  `ventulus_X-1_all.deb`, `ventulus-X-1.fc44.noarch.rpm` and `ventulus-X-noarch.tar.gz` beside the
+  Arch package, with a `SHA256SUMS` file and a build attestation for every asset. They run on the
+  distribution's own Python, Qt and numpy, and need `ventulusd` 3.0.0 or newer. The tarball
+  installs under `/usr/local`, first checks that the system has everything Ventulus needs
+  (`./install.sh --deps` prints the command that installs it), and is removed with
+  `sudo /usr/local/lib/ventulus/uninstall`.
+
 ### Fixed
 
 - **The install commands work in fish, CachyOS's default shell.** The documented steps used a heredoc,

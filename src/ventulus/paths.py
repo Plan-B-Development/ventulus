@@ -128,11 +128,14 @@ def app_settings_path() -> Path:
 def assets_dir() -> Path:
     """Return the branding assets directory.
 
-    Checks: dev layout (relative to package), installed layout (/opt/ventulus),
-    and CWD fallback.
+    Checks: the source tree, beside a private module directory (the Debian
+    package's ``/usr/share/ventulus``, the tarball's ``/usr/local/lib/ventulus``),
+    the Arch and Fedora packages' ``/usr/share/ventulus``, and a CWD fallback.
     """
+    package = Path(__file__).parent
     candidates = [
-        Path(__file__).parent.parent.parent / "assets" / "branding",
+        package.parent.parent / "assets" / "branding",
+        package.parent / "assets" / "branding",
         Path("/usr/share/ventulus/assets/branding"),
         Path("assets/branding"),
     ]

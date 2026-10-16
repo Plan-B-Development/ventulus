@@ -207,10 +207,14 @@ def test_release_attaches_package_files():
     release_step = _step_using(jobs["github-release"], "softprops/action-gh-release")
     assert release_step is not None, "github-release must create the GitHub Release"
     files = release_step["with"].get("files")
-    assert files and "pkg.tar.zst" in files, (
-        "the Release step must attach the built *.pkg.tar.zst (DEC-239); "
-        f"got files={files!r}. Without it the one-off install path in "
-        "manual/getting-started.md is a dead link."
+    assert files == "dist/*", (
+        "the Release step must attach everything in dist/, the built *.pkg.tar.zst "
+        f"included (DEC-239); got files={files!r}. Without it the one-off install "
+        "path in manual/getting-started.md is a dead link."
+    )
+    sums = next(s for s in _steps(jobs["github-release"]) if s.get("name") == "Write SHA256SUMS")
+    assert "ventulus-$v-1-any.pkg.tar.zst" in sums["run"].split('expected="')[1].split('"')[0], (
+        "dist/ must be required to hold the Arch package before the Release is created"
     )
 
 
@@ -270,8 +274,10 @@ def test_release_attests_build_provenance_with_required_permissions():
     job = _release_workflow()["jobs"]["github-release"]
     attest = _step_using(job, "actions/attest-build-provenance")
     assert attest is not None, "github-release must attest the package's build provenance (DEC-239)"
-    assert "pkg.tar.zst" in attest["with"]["subject-path"], (
-        f"attestation must cover the package; got {attest['with']['subject-path']!r}"
+    release_step = _step_using(job, "softprops/action-gh-release")
+    assert attest["with"]["subject-path"] == release_step["with"]["files"], (
+        "attestation must cover every asset the Release attaches; got "
+        f"{attest['with']['subject-path']!r} for {release_step['with']['files']!r}"
     )
 
     perms = job.get("permissions", {})

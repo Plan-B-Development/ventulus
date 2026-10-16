@@ -26,7 +26,8 @@ deps() {
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -q
             # python3-pyside6.qtopengl/.qtopenglwidgets: pyqtgraph imports
-            # QtOpenGL. qt6-svg-plugins: without it the app icon is null.
+            # QtOpenGL. qt6-svg-plugins: without it the app icon is null. gpg:
+            # the tarball's prerequisite check wants it (test_packaging_linux.py).
             apt-get install -y -q --no-install-recommends \
                 python3 python3-venv python3-setuptools \
                 python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets \
@@ -34,7 +35,7 @@ deps() {
                 python3-pyside6.qtopengl python3-pyside6.qtopenglwidgets qt6-svg-plugins \
                 python3-pyqtgraph python3-numpy python3-httpx python3-colorama \
                 python3-pytest python3-pytestqt python3-pytest-timeout python3-yaml \
-                libegl1 libgl1 libxkbcommon0 fonts-dejavu-core fish zsh
+                libegl1 libgl1 libxkbcommon0 fonts-dejavu-core fish zsh gpg
             ;;
         *" fedora "*)
             dnf -y -q install --setopt=install_weak_deps=False \
