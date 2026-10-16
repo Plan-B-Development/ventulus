@@ -217,6 +217,18 @@ _PREREQUISITES: dict[InstallFamily, str] = {
     InstallFamily.FEDORA: "sudo dnf install git make gcc dkms kernel-devel-$(uname -r)",
 }
 
+# Measured on Debian 13 and Ubuntu 26.04 (2026-10-17): it87's dkms-install.sh
+# builds for the running kernel only, so a kernel installed but not yet booted
+# came up with the in-kernel it87. Debian's dkms hooks rebuild on a later kernel
+# or headers install; nothing rebuilds at boot (Fedora's dkms.service does).
+_DEBIAN_KERNEL_NOTE = (
+    "Kernel updates: also install the headers metapackage (linux-headers-amd64 on "
+    "Debian, linux-headers-generic on Ubuntu) so DKMS rebuilds the driver for every "
+    "new kernel. If a kernel update is installed but not yet booted, reboot before "
+    "you build: the build may cover only the kernel you are running. Fans gone after "
+    "a reboot into a new kernel? 'sudo dkms autoinstall' builds the driver for it."
+)
+
 _OTHER_PREREQUISITES_NOTE = (
     "First install git, make, a C compiler, dkms and the headers for the kernel you "
     "are running; the package names depend on your distribution. On an image-based "
@@ -306,6 +318,8 @@ def install_guide(module: str, family: InstallFamily | None = None) -> InstallGu
     install_notes: list[str] = [*_after_install_notes(driver)]
     if not prerequisite:
         install_notes.insert(0, _OTHER_PREREQUISITES_NOTE)
+    if family is InstallFamily.DEBIAN:
+        install_notes.append(_DEBIAN_KERNEL_NOTE)
     if family is InstallFamily.FEDORA and driver.module == "nct6687":
         install_notes.append(_AKMOD_NOTE)
     return InstallGuide(

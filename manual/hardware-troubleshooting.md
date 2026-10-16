@@ -263,7 +263,7 @@ Something else is still writing the unlock before `it87` reads. Check, in this o
 - a Super-I/O module baked into your initramfs
   (on Arch, `for i in /boot/initramfs-*.img; do echo "$i"; lsinitcpio "$i" | grep -E 'nct6775|w83627|it87'; done`,
   and CachyOS names its images `initramfs-linux-cachyos*.img`; on Debian and Ubuntu,
-  `lsinitramfs /boot/initrd.img-$(uname -r) | grep -E 'nct6775|w83627|it87'`; on Fedora,
+  `sudo lsinitramfs /boot/initrd.img-$(uname -r) | grep -E 'nct6775|w83627|it87'`; on Fedora,
   `sudo lsinitrd | grep -E 'nct6775|w83627|it87'`);
 - any other tool that probes Super-I/O ports.
 

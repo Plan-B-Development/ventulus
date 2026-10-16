@@ -5,6 +5,19 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Driver steps on Debian and Ubuntu now cover kernel updates.** The Hardware page's install
+  steps and the Driver Setup guide say to install the headers metapackage, to reboot into a kernel
+  update that is waiting before building the driver, and that `sudo dkms autoinstall` rebuilds it
+  if fans disappear after a new kernel. On a real Ubuntu 26.04 install, the it87 driver was built
+  only for the running kernel, and the waiting kernel booted with the in-kernel driver instead.
+- **Docs checked on real Debian 13, Ubuntu 26.04 and Fedora 44/45 installs.** The initramfs check
+  in Hardware Troubleshooting now runs `lsinitramfs` with `sudo` (Ubuntu's initramfs is readable
+  only by root); Driver Setup notes that a file under `/etc/default/grub.d/` can override the
+  kernel command line in `/etc/default/grub`; Getting Started explains dnf's "Signing key not
+  found" line on a first install.
+
 ## [5.3.0] — 2026-10-16
 
 Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.2.0 is the current daemon release.

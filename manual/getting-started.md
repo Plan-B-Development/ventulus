@@ -175,7 +175,9 @@ sudo systemctl enable --now ventulusd
 ```
 
 On the first install, dnf asks to import the signing key and prints its
-fingerprint: check it against the one above. dnf then checks the signature of the
+fingerprint: check it against the one above. The line before it,
+`repomd.xml GPG signature verification error: Signing key not found`, only
+means the key is not imported yet. dnf then checks the signature of the
 repository's metadata and of every package. Fedora leaves a newly installed
 service disabled, so the `systemctl enable --now` line is needed; without it
 Ventulus opens to a "Disconnected" screen. A machine with no desktop needs only

@@ -80,7 +80,7 @@ sudo apt install git build-essential dkms linux-headers-$(uname -r)
 sudo dnf install git make gcc dkms kernel-devel-$(uname -r)
 ```
 
-To confirm the headers match, compare `uname -r` against `pacman -Q | grep -- -headers` (Arch), `dpkg -l 'linux-headers-*'` (Debian, Ubuntu) or `rpm -q kernel-devel` (Fedora). A mismatch (e.g. headers for `linux` while booting `linux-cachyos`) is the single most common reason a DKMS build "succeeds" but the module never loads. On Debian and Ubuntu, the lines above install headers for the running kernel only; so that DKMS can also rebuild the driver for the next kernel, install the headers metapackage that follows your kernel (`linux-headers-amd64` on Debian, `linux-headers-generic` on Ubuntu's standard kernel).
+To confirm the headers match, compare `uname -r` against `pacman -Q | grep -- -headers` (Arch), `dpkg -l 'linux-headers-*'` (Debian, Ubuntu) or `rpm -q kernel-devel` (Fedora). A mismatch (e.g. headers for `linux` while booting `linux-cachyos`) is the single most common reason a DKMS build "succeeds" but the module never loads. On Debian and Ubuntu, the lines above install headers for the running kernel only; so that DKMS can also rebuild the driver for the next kernel, install the headers metapackage that follows your kernel (`linux-headers-amd64` on Debian, `linux-headers-generic` on Ubuntu's standard kernel). If a kernel update is installed but you have not rebooted into it yet, reboot before Step 3: the it87 script builds only for the kernel you are running, so the waiting kernel would boot with the in-kernel driver. If fans disappear after a reboot into a new kernel anyway, `sudo dkms autoinstall` builds the driver for it. (Fedora rebuilds at boot by itself.)
 
 > **CachyOS-LTS / Tumbleweed path quirk:** the it87 DKMS config has a known module-install-path bug on some kernels: the module builds but lands in a directory the kernel does not search ([frankcrawford/it87 issue #94](https://github.com/frankcrawford/it87/issues/94)). If `modprobe` says *module not found* right after a clean DKMS build, run `dkms status` and check where the module was installed versus `/lib/modules/$(uname -r)/`.
 
@@ -373,6 +373,8 @@ How to add a kernel parameter, per bootloader, with the same steps as `man ventu
 | **systemd-boot** | append to the `options` line of the active entry under `/boot/loader/entries/` | — |
 | **rEFInd** | append to the options in `/boot/refind_linux.conf` (or the kernel argument list in `refind.conf`) | — |
 | **Limine** (as set up on CachyOS) | append to `KERNEL_CMDLINE` in `/etc/default/limine` | `sudo limine-mkinitcpio` |
+
+On Debian and Ubuntu, a file under `/etc/default/grub.d/` that also sets `GRUB_CMDLINE_LINUX_DEFAULT` replaces the line in `/etc/default/grub`; `grep -r GRUB_CMDLINE_LINUX_DEFAULT /etc/default/` shows every place it is set.
 
 Reboot, confirm the parameter took effect with `cat /proc/cmdline`, then run **Test GPU Fan Control** (on the **System State** page) to verify end-to-end. A wrong kernel command line can prevent the system from booting. The warning at the top of this page applies here in full.
 

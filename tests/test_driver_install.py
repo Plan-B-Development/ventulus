@@ -190,6 +190,19 @@ def test_prerequisites_follow_the_family():
     assert any("package names depend on your distribution" in n for n in other.install_notes)
 
 
+@pytest.mark.parametrize("module", sorted(OUT_OF_TREE_DRIVERS))
+def test_debian_family_is_told_how_the_driver_follows_kernel_updates(module):
+    # A real Ubuntu 26.04 install booted a pending kernel without the it87 build.
+    notes = " ".join(install_guide(module, InstallFamily.DEBIAN).install_notes)
+    assert "linux-headers-amd64" in notes
+    assert "linux-headers-generic" in notes
+    assert "sudo dkms autoinstall" in notes
+    # The note is the Debian family's alone (Fedora's dkms.service rebuilds at boot).
+    for family in (InstallFamily.FEDORA, InstallFamily.ARCH, InstallFamily.OTHER):
+        guide = install_guide(module, family)
+        assert not any("dkms autoinstall" in n for n in (*guide.install_notes, *guide.notes))
+
+
 def test_nct6687_debian_builds_upstreams_deb():
     guide = install_guide("nct6687", InstallFamily.DEBIAN)
     assert "make deb" in guide.install[-1]
