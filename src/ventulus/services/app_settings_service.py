@@ -73,6 +73,9 @@ MACHINE_SPECIFIC_KEYS = frozenset(
         # claims to a splitter it does not have.
         "hardware_notes",
         "cooler_notes",
+        # DEC-499: consent to contact the update server is given on this machine.
+        # An imported settings file must not switch a network connection on.
+        "update_check_auto",
     }
 )
 
@@ -349,6 +352,9 @@ class AppSettings:
     # reintroduce a field for a setting the daemon is the source of truth for.
     hide_igpu_sensors: bool = True  # Auto-hide iGPU sensors when dGPU present
     hide_unused_fan_headers: bool = True  # Auto-hide fan headers with 0 RPM
+    # DEC-499: the opt-in daily update check. Off by default: with it off the GUI
+    # makes no internet connection unless the user presses "Check for updates".
+    update_check_auto: bool = False
 
     # DEC-128: Controls-page card density tier — "compact" | "comfortable" |
     # "large". Cards auto-scale with the theme font size; this tier multiplies
@@ -533,6 +539,7 @@ class AppSettings:
             wizard_spindown_seconds=_as_int(data.get("wizard_spindown_seconds"), 8, lo=5, hi=12),
             hide_igpu_sensors=_as_bool(data.get("hide_igpu_sensors"), True),
             hide_unused_fan_headers=_as_bool(data.get("hide_unused_fan_headers"), True),
+            update_check_auto=_as_bool(data.get("update_check_auto"), False),
             card_size=_as_enum(data.get("card_size"), _CARD_SIZES, "comfortable"),
             controls_card_sizes=_as_card_sizes(data.get("controls_card_sizes"), {}),
             acknowledged_kernel_warnings=_as_str_list(data.get("acknowledged_kernel_warnings"), []),

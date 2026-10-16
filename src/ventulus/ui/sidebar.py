@@ -11,6 +11,7 @@ lives in the top ``StatusRibbon``, so the sidebar no longer renders one.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from PySide6.QtCore import Signal
@@ -86,10 +87,13 @@ class Sidebar(QWidget):
     """Grouped 8-entry navigation + a bottom active-profile selector."""
 
     nav_activated = Signal(int, int)  # (page_id, sub_tab)
+    #: The About dialog's "Check for updates" (DEC-499).
+    check_updates_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("Sidebar")
+        self._daemon_version_provider: Callable[[], str | None] | None = None
         self.setFixedWidth(190)
 
         layout = QVBoxLayout(self)
@@ -194,10 +198,20 @@ class Sidebar(QWidget):
         if item is not None:
             self.nav_activated.emit(item.page_id, item.sub_tab)
 
+    def set_daemon_version_provider(self, provider: Callable[[], str | None]) -> None:
+        """What the About dialog asks for the connected daemon's version (DEC-499)."""
+        self._daemon_version_provider = provider
+
     def _show_about(self) -> None:
         from ventulus.ui.about_dialog import AboutDialog
 
-        exec_dialog(AboutDialog(self))
+        provider = self._daemon_version_provider
+        dialog = AboutDialog(
+            self,
+            daemon_version=provider() if provider is not None else None,
+            on_check_updates=self.check_updates_requested.emit,
+        )
+        exec_dialog(dialog)
 
     def activate_nav(self, nav_id: int) -> None:
         """Select a nav entry AND guarantee ``nav_activated`` fires, even if the

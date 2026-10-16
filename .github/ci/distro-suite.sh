@@ -27,7 +27,8 @@ deps() {
             apt-get update -q
             # python3-pyside6.qtopengl/.qtopenglwidgets: pyqtgraph imports
             # QtOpenGL. qt6-svg-plugins: without it the app icon is null. gpg:
-            # the tarball's prerequisite check wants it (test_packaging_linux.py).
+            # the tarball's prerequisite check wants it (test_packaging_linux.py),
+            # and the update-check tests sign and verify with it (gnupg2 on Fedora).
             apt-get install -y -q --no-install-recommends \
                 python3 python3-venv python3-setuptools \
                 python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets \
@@ -42,7 +43,7 @@ deps() {
                 python3 python3-setuptools python3-pyside6 \
                 python3-pyqtgraph python3-numpy python3-httpx python3-colorama \
                 python3-pytest python3-pytest-qt python3-pytest-timeout python3-pyyaml \
-                mesa-libEGL mesa-libGL libxkbcommon dejavu-sans-fonts fish zsh
+                mesa-libEGL mesa-libGL libxkbcommon dejavu-sans-fonts fish zsh gnupg2
             ;;
         *)
             echo "distro-suite.sh: no package list for $ID" >&2

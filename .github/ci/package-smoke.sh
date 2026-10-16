@@ -176,6 +176,19 @@ reports_version() {
     [ "$got" = "$version" ] || { echo "APP_VERSION is $got"; return 1; }
 }
 
+# DEC-499: the update check verifies its manifest with gpg against this key.
+ships_update_key() {
+    gui_python "
+import subprocess, tempfile
+from ventulus.services.signature import REPOSITORY_KEY_FINGERPRINT, bundled_key_path
+with tempfile.TemporaryDirectory() as home:
+    out = subprocess.run(['gpg', '--homedir', home, '--batch', '--with-colons', '--show-keys',
+                          str(bundled_key_path())], capture_output=True, text=True, check=True).stdout
+fprs = [line.split(':')[9] for line in out.splitlines() if line.startswith('fpr:')]
+assert fprs and fprs[0] == REPOSITORY_KEY_FINGERPRINT, fprs
+"
+}
+
 icon_renders() {
     gui_python "
 from PySide6.QtGui import QGuiApplication, QIcon
@@ -279,6 +292,7 @@ fi
 check "install revision 1" install_rev 1
 check "the program is on the PATH" on_path
 check "reports version $version (its .dist-info is installed)" reports_version
+check "ships the update-check key, and gpg to check it with" ships_update_key
 check "the desktop entry is valid" desktop-file-validate "$prefix/share/applications/ventulus.desktop"
 check "the menu and window icons render" icon_renders
 check "the man page is installed" test -s "$prefix/share/man/man1/ventulus.1.gz" -o -s "$prefix/share/man/man1/ventulus.1"

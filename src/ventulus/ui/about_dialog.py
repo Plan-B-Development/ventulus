@@ -1,6 +1,8 @@
-"""About dialog — brand, version, credits."""
+"""About dialog — brand, versions, credits, and the update check's entry point."""
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -12,12 +14,19 @@ from PySide6.QtWidgets import (
 )
 
 from ventulus.constants import APP_NAME, APP_VERSION
+from ventulus.services.update_view import about_versions
 
 
 class AboutDialog(QDialog):
     """About dialog with version info and credits."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        daemon_version: str | None = None,
+        on_check_updates: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"About {APP_NAME}")
         # DEC-258: was setFixedSize, which cannot hold its own content once the
@@ -39,6 +48,13 @@ class AboutDialog(QDialog):
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version_label.setProperty("class", "PageSubtitle")
         layout.addWidget(version_label)
+
+        # DEC-499: both components' versions, the pair an update check compares.
+        versions = QLabel(" · ".join(about_versions(APP_VERSION, daemon_version)))
+        versions.setObjectName("About_Label_versions")
+        versions.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        versions.setProperty("class", "PageSubtitle")
+        layout.addWidget(versions)
 
         # Tagline
         tagline = QLabel("Fan control for Linux")
@@ -62,6 +78,13 @@ class AboutDialog(QDialog):
 
         # Close button
         btn_row = QHBoxLayout()
+        if on_check_updates is not None:
+            check_btn = QPushButton("Check for updates")
+            check_btn.setObjectName("About_Btn_checkUpdates")
+            check_btn.setToolTip("Open Settings ▸ Updates and check now")
+            check_btn.clicked.connect(self.accept)
+            check_btn.clicked.connect(on_check_updates)
+            btn_row.addWidget(check_btn)
         btn_row.addStretch()
         close_btn = QPushButton("Close")
         close_btn.setObjectName("About_Btn_close")

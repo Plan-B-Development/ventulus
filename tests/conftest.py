@@ -603,3 +603,122 @@ def json_parser_out_of_stack(monkeypatch):
         return real(s, *args, **kwargs)
 
     monkeypatch.setattr(json, "loads", loads)
+
+
+@pytest.fixture(autouse=True)
+def _no_update_server(monkeypatch):
+    """No test reaches the update server unless it set that up (DEC-499).
+
+    Every update-check client takes ``update_check.TRANSPORT``. Here it records
+    whatever a test sends without arranging a transport of its own, and the test
+    fails at teardown, so a widget that checks by itself, or a click that reaches
+    the network, cannot pass by accident. A test that wants responses installs its
+    own transport over this one.
+    """
+    import httpx
+
+    from ventulus.services import update_check
+
+    stray: list[str] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        stray.append(f"{request.method} {request.url}")
+        return httpx.Response(599)
+
+    monkeypatch.setattr(update_check, "TRANSPORT", httpx.MockTransport(record))
+    yield
+    assert not stray, f"the test sent requests it did not set up: {stray}"
+
+
+@dataclass
+class UpdateSigner:
+    """Test-only OpenPGP keys standing in for the repository key (DEC-499).
+
+    ``key_file``/``fingerprint`` replace the bundled key and the pin;
+    ``other_*`` is a second key whose signatures must be refused.
+    """
+
+    home: object
+    key_file: object
+    fingerprint: str
+    other_key_file: object
+    other_fingerprint: str
+    both_keys_file: object
+
+    def sign(self, data: bytes, *, other: bool = False, detached: bool = True) -> bytes:
+        import subprocess
+
+        user = "other@invalid" if other else "test@invalid"
+        proc = subprocess.run(
+            [
+                "gpg",
+                "--homedir",
+                str(self.home),
+                "--batch",
+                "--no-tty",
+                "--local-user",
+                user,
+                "--detach-sign" if detached else "--sign",
+                "--output",
+                "-",
+            ],
+            input=data,
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        return proc.stdout
+
+
+@pytest.fixture(scope="session")
+def update_signer(tmp_path_factory):
+    """Two throwaway ed25519 keys, generated per session: no secret key is committed."""
+    import subprocess
+
+    root = tmp_path_factory.mktemp("update-keys")
+    home = root / "gnupg"
+    home.mkdir(mode=0o700)
+
+    def gpg(*args: str) -> str:
+        return subprocess.run(
+            ["gpg", "--homedir", str(home), "--batch", "--no-tty", *args],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=60,
+        ).stdout
+
+    fingerprints = {}
+    for user in ("test@invalid", "other@invalid"):
+        gpg(
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-gen-key",
+            f"Ventulus update-check TEST ONLY <{user}>",
+            "ed25519",
+            "sign",
+            "never",
+        )
+        listing = gpg("--with-colons", "--fingerprint", user)
+        fingerprints[user] = next(
+            line.split(":")[9] for line in listing.splitlines() if line.startswith("fpr:")
+        )
+    key_file = root / "test.asc"
+    key_file.write_text(gpg("--armor", "--export", "test@invalid"))
+    other_key_file = root / "other.asc"
+    other_key_file.write_text(gpg("--armor", "--export", "other@invalid"))
+    both = root / "both.asc"
+    both.write_text(gpg("--armor", "--export", "test@invalid", "other@invalid"))
+    yield UpdateSigner(
+        home=home,
+        key_file=key_file,
+        fingerprint=fingerprints["test@invalid"],
+        other_key_file=other_key_file,
+        other_fingerprint=fingerprints["other@invalid"],
+        both_keys_file=both,
+    )
+    subprocess.run(
+        ["gpgconf", "--homedir", str(home), "--kill", "all"], capture_output=True, check=False
+    )

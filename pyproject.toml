@@ -122,8 +122,9 @@ show_missing = true
 [tool.setuptools.package-data]
 # Ship bundled theme presets + OFL fonts inside the wheel so first-run install
 # can copy the presets into the user's themes_dir and register_bundled_fonts()
-# can load the fonts at startup (DEC-208).
-"ventulus" = ["ui/presets/*.json", "ui/fonts/*.ttf", "ui/fonts/*.txt"]
+# can load the fonts at startup (DEC-208). data/*.asc is the repository key the
+# update check verifies the signed manifest against (DEC-499), in every format.
+"ventulus" = ["ui/presets/*.json", "ui/fonts/*.ttf", "ui/fonts/*.txt", "data/*.asc"]
 
 [build-system]
 # DEC-258: 77.0.0, not 68.0. `license = "MIT"` above is PEP 639's bare SPDX

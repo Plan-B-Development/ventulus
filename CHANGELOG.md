@@ -14,6 +14,13 @@ rename. Version numbers carry on from Control-OFC.
   installs under `/usr/local`, first checks that the system has everything Ventulus needs
   (`./install.sh --deps` prints the command that installs it), and is removed with
   `sudo /usr/local/lib/ventulus/uninstall`.
+- **An update check, off unless you ask for it.** Settings ▸ Updates has a "Check for updates" button
+  and a switch for a daily check, which is off by default; About shows both versions and the same
+  button. Nothing is sent until you check. A check fetches release information signed by the
+  repository key and refuses anything it cannot verify. It compares Ventulus and ventulusd
+  separately and says how to upgrade each the way it was installed: with pacman, apt or dnf, or, for
+  the tarball, a download it checks against the signed SHA-256 before keeping, plus the commands that
+  install it. Ventulus never runs a privileged command itself.
 
 ### Fixed
 

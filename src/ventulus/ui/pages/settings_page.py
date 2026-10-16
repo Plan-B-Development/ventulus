@@ -9,13 +9,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QStandardPaths, Qt, Signal
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ventulus.api.client import DaemonClient
     from ventulus.services.series_selection import SeriesSelectionModel
+    from ventulus.services.update_check import ComponentStatus, UpdateReport
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -60,6 +61,12 @@ from ventulus.services.daemon_features import (
 from ventulus.services.orphan_prune import OrphanReport, find_orphans, live_series_keys
 from ventulus.services.profile_import_service import import_profiles
 from ventulus.services.profile_service import ImportCollection, collect_local_profiles_for_import
+from ventulus.services.update_check import default_download_dir, tarball_install_commands
+from ventulus.services.update_view import (
+    detail_lines,
+    download_button_text,
+    status_line,
+)
 from ventulus.ui.components.a11y import name_value_control
 from ventulus.ui.components.buttons import make_button
 from ventulus.ui.components.cards import Card, SectionHeader
@@ -68,6 +75,7 @@ from ventulus.ui.components.toggle_switch import ToggleSwitch
 from ventulus.ui.components.transient import exec_dialog
 from ventulus.ui.qt_util import set_chip_class
 from ventulus.ui.theme import ThemeTokens
+from ventulus.ui.update_controller import UpdateController
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +127,8 @@ SETTINGS_FIELD_WIDGETS: dict[str, str] = {
     "chart_series_seeded": "Settings_Btn_reseedSeries",
     # Card Layout
     "controls_card_sizes": "Settings_Btn_resetCardSizes",
+    # Updates (DEC-499)
+    "update_check_auto": "Settings_Check_updateAuto",
 }
 
 
@@ -226,6 +236,28 @@ _PAGE_NAMES = {
 }
 
 
+def _download_dir() -> Path:
+    """The user's download folder (XDG user dirs, localised names included)."""
+    location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+    if location and Path(location).is_dir():
+        return Path(location)
+    return default_download_dir()
+
+
+def _selectable_label(object_name: str) -> QLabel:
+    """A hidden, word-wrapped label whose text the user can select and copy."""
+    label = QLabel("")
+    label.setObjectName(object_name)
+    label.setWordWrap(True)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setTextInteractionFlags(
+        Qt.TextInteractionFlag.TextSelectableByMouse
+        | Qt.TextInteractionFlag.TextSelectableByKeyboard
+    )
+    label.setVisible(False)
+    return label
+
+
 class SettingsPage(QWidget):
     """Application settings, path management, preferred sensors, and backup/restore.
 
@@ -248,10 +280,18 @@ class SettingsPage(QWidget):
         settings_service: AppSettingsService | None = None,
         client: DaemonClient | None = None,
         series_selection: SeriesSelectionModel | None = None,
+        update_controller: UpdateController | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._state = state
+        # DEC-499: the window's update check, or the page's own when built alone.
+        # Its thread starts only on the first check, so an unused one costs nothing.
+        self._updates = update_controller or UpdateController(
+            settings_service=settings_service, state=state, parent=self
+        )
+        #: The commands that install the last verified download, for "Copy".
+        self._install_commands = ""
         self._settings_svc = settings_service or AppSettingsService()
         self._client = client
         # DEC-237: the live chart-series model. "Show all series" has to go
@@ -345,6 +385,7 @@ class SettingsPage(QWidget):
         col2.addWidget(self._build_preferred_sensors_group())
         col2.addWidget(self._build_daemon_config_card())
         col2.addWidget(self._build_sync_backup_card())
+        col2.addWidget(self._build_updates_card())
         col2.addStretch()
         cols.addLayout(col1, 1)
         cols.addLayout(col2, 1)
@@ -2450,6 +2491,152 @@ class SettingsPage(QWidget):
         v.addWidget(self._export_result_label)
         return card
 
+    def _build_updates_card(self) -> QWidget:
+        """Updates card (DEC-499): the opt-in check and what it found.
+
+        The only place the GUI contacts the internet. With the switch off,
+        nothing is sent until "Check for updates" is pressed, and nothing is
+        downloaded or installed unless asked; a package-managed install is handed
+        to its package manager.
+        """
+        card = Card()
+        self._updates_card = card
+        v = QVBoxLayout(card)
+        v.setSpacing(8)
+        v.addWidget(SectionHeader("Updates"))
+
+        self._update_auto_cb = ToggleSwitch()
+        self._update_auto_cb.setObjectName("Settings_Check_updateAuto")
+        v.addLayout(
+            self._setting_row(
+                "Check for updates automatically",
+                "At most once a day, from plan-b-development.github.io",
+                self._update_auto_cb,
+            )
+        )
+
+        self._update_status = QLabel(status_line(None))
+        self._update_status.setObjectName("Settings_Label_updateStatus")
+        self._update_status.setWordWrap(True)
+        self._update_status.setProperty("class", "CardMeta")
+        v.addWidget(self._update_status)
+
+        self._update_details = _selectable_label("Settings_Label_updateDetails")
+        v.addWidget(self._update_details)
+
+        btn_row = QHBoxLayout()
+        self._check_updates_btn = make_button(
+            "Check for updates", "secondary", object_name="Settings_Btn_checkUpdates"
+        )
+        self._check_updates_btn.setToolTip(
+            "Fetch the signed release information and compare it with what is installed"
+        )
+        self._check_updates_btn.clicked.connect(self._updates.check_now)
+        btn_row.addWidget(self._check_updates_btn)
+        btn_row.addStretch()
+        v.addLayout(btn_row)
+
+        # A tarball install gets a verified download, one button per component.
+        self._download_btns: dict[str, QPushButton] = {}
+        for project, name in (("ventulus", "Gui"), ("ventulusd", "Daemon")):
+            btn = make_button(
+                "Download and verify", "secondary", object_name=f"Settings_Btn_download{name}"
+            )
+            btn.clicked.connect(lambda _=False, p=project: self._download_update(p))
+            btn.setVisible(False)
+            self._download_btns[project] = btn
+            v.addWidget(btn)
+
+        self._update_download_result = _selectable_label("Settings_Label_updateDownload")
+        v.addWidget(self._update_download_result)
+        self._copy_install_btn = make_button(
+            "Copy install commands", "secondary", object_name="Settings_Btn_copyInstallCommands"
+        )
+        self._copy_install_btn.clicked.connect(self._copy_install_commands)
+        self._copy_install_btn.setVisible(False)
+        v.addWidget(self._copy_install_btn)
+
+        self._updates.check_started.connect(self._on_update_check_started)
+        self._updates.report_ready.connect(self._render_update_report)
+        self._updates.download_started.connect(self._on_update_download_started)
+        self._updates.download_finished.connect(self._on_update_download_finished)
+        if self._updates.last_report is not None:
+            self._render_update_report(self._updates.last_report)
+        return card
+
+    def focus_updates(self) -> None:
+        """Scroll the Updates card into view and focus its check button."""
+        self._app_scroll.ensureWidgetVisible(self._updates_card)
+        self._check_updates_btn.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _on_update_check_started(self) -> None:
+        self._check_updates_btn.setEnabled(False)
+        self._update_status.setText(status_line(None, checking=True))
+
+    def _render_update_report(self, report: UpdateReport) -> None:
+        self._check_updates_btn.setEnabled(True)
+        self._update_status.setText(status_line(report))
+        details = "\n".join(detail_lines(report))
+        self._update_details.setText(details)
+        self._update_details.setVisible(bool(details))
+        for project, btn in self._download_btns.items():
+            status = next((c for c in report.components if c.project == project), None)
+            offer = status is not None and status.can_download
+            btn.setVisible(offer)
+            if offer:
+                btn.setText(download_button_text(status))
+                btn.setEnabled(not self._updates.downloading)
+
+    def _status_for(self, project: str) -> ComponentStatus | None:
+        report = self._updates.last_report
+        if report is None:
+            return None
+        return next((c for c in report.components if c.project == project), None)
+
+    def _download_update(self, project: str) -> None:
+        status = self._status_for(project)
+        if status is None:
+            return
+        self._updates.download(status, _download_dir())
+
+    def _on_update_download_started(self, project: str) -> None:
+        for btn in self._download_btns.values():
+            btn.setEnabled(False)
+        self._copy_install_btn.setVisible(False)
+        self._install_commands = ""
+        status = self._status_for(project)
+        name = status.asset.name if status is not None and status.asset else project
+        self._update_download_result.setText(f"Downloading {name}…")
+        self._update_download_result.setVisible(True)
+
+    def _on_update_download_finished(self, project: str, saved: str, error: str) -> None:
+        for btn in self._download_btns.values():
+            btn.setEnabled(True)
+        status = self._status_for(project)
+        if error or not saved or status is None or status.asset is None:
+            self._update_download_result.setText(
+                f"Download refused: {error or 'nothing was saved'}. Nothing was kept."
+            )
+            return
+        command = tarball_install_commands(status.asset, Path(saved))
+        if command is None:
+            self._update_download_result.setText(
+                f"Saved and verified: {saved}\nIts folder's name cannot be written safely as "
+                "a command. Open a terminal there, check the file with sha256sum, unpack it "
+                "and run install.sh from the folder it creates with sudo."
+            )
+            return
+        self._install_commands = command
+        self._update_download_result.setText(
+            f"Saved and verified: {saved}\nInstall it from a terminal:\n{command}"
+        )
+        self._copy_install_btn.setVisible(True)
+
+    def _copy_install_commands(self) -> None:
+        if self._install_commands:
+            QApplication.clipboard().setText(self._install_commands)
+            self._set_status("Install commands copied")
+
     # ─── Logic ───────────────────────────────────────────────────────
 
     def _apply_openfan_presence_annotation(self) -> None:
@@ -2550,6 +2737,7 @@ class SettingsPage(QWidget):
             ),
             "hide_igpu_sensors": toggle(self._hide_igpu_cb),
             "hide_unused_fan_headers": toggle(self._hide_unused_fans_cb),
+            "update_check_auto": toggle(self._update_auto_cb),
             "export_default_dir": (
                 read_export_dir,
                 lambda v: self._export_dir_label.setText(str(v) or str(Path.home())),

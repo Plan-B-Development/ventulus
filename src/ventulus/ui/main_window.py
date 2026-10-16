@@ -39,6 +39,7 @@ from ventulus.services.profile_service import ProfileService
 from ventulus.services.series_selection import SeriesSelectionModel
 from ventulus.services.shared_fan_switch import SharedSwitchRuleError
 from ventulus.services.system_state_view import gui_meets_daemon_floor
+from ventulus.services.update_view import notice_text as update_notice_text
 from ventulus.ui.components.footer import StatusFooter
 from ventulus.ui.components.transient import exec_dialog
 from ventulus.ui.pages.controls_page import ControlsPage
@@ -54,7 +55,9 @@ from ventulus.ui.sidebar import Sidebar
 from ventulus.ui.splitter_persistence import SplitterPersistence
 from ventulus.ui.status_banner import THERMAL_STATES, StatusBanner
 from ventulus.ui.status_ribbon import StatusRibbon
+from ventulus.ui.update_controller import UpdateController
 from ventulus.ui.widgets.error_banner import ErrorBanner
+from ventulus.ui.widgets.update_notice import UpdateNotice
 
 log = logging.getLogger(__name__)
 
@@ -220,11 +223,17 @@ class MainWindow(QWidget):
             client=self._client,
             settings_service=self._settings_service,
         )
+        # DEC-499: the opt-in update check. Off by default; its thread starts on
+        # the first check, and the daily timer does nothing while it is off.
+        self.update_controller = UpdateController(
+            settings_service=self._settings_service, state=self._state, parent=self
+        )
         self.settings_page = SettingsPage(
             state=self._state,
             settings_service=self._settings_service,
             client=self._client,
             series_selection=self._series_selection,
+            update_controller=self.update_controller,
         )
         # DEC-209: Overview is its own page (merged Diagnostics Overview/Fans/
         # Sensors). DEC-216 retired the legacy Diagnostics page entirely.
@@ -301,6 +310,8 @@ class MainWindow(QWidget):
         content_layout.addWidget(self._gui_floor_banner)
         content_layout.addWidget(self.status_banner)
         content_layout.addWidget(self.error_banner)
+        self.update_notice = UpdateNotice()
+        content_layout.addWidget(self.update_notice)
         content_layout.addWidget(self.page_stack, 1)
 
         content_container = QWidget()
@@ -322,6 +333,12 @@ class MainWindow(QWidget):
 
         # --- Signals ---
         self.sidebar.nav_activated.connect(self._on_nav_activated)
+        self.sidebar.set_daemon_version_provider(self.update_controller.daemon_version)
+        self.sidebar.check_updates_requested.connect(self._check_updates_from_about)
+        self.update_controller.report_ready.connect(self._on_update_report)
+        self.update_notice.details_requested.connect(self._open_updates)
+        self.update_notice.dismissed.connect(self.update_controller.dismiss_notice)
+        self.update_controller.start_automatic()
         self.theme_page.theme_changed.connect(self._on_theme_changed)  # DEC-215
 
         # State → status banner
@@ -1124,6 +1141,25 @@ class MainWindow(QWidget):
         self._open_system_state()
         self.system_state_page.run_hwmon_rescan()
 
+    def _open_updates(self) -> None:
+        """Settings ▸ Updates, from the update notice or the About dialog."""
+        from ventulus.constants import NAV_SETTINGS
+
+        self.sidebar.activate_nav(NAV_SETTINGS)
+        self.settings_page.focus_updates()
+
+    def _check_updates_from_about(self) -> None:
+        self._open_updates()
+        self.update_controller.check_now()
+
+    def _on_update_report(self, report) -> None:
+        """Show the notice for an offered update the user has not dismissed."""
+        text = update_notice_text(report)
+        if text and not self.update_controller.notice_dismissed(report):
+            self.update_notice.show_notice(text)
+        else:
+            self.update_notice.show_notice("")
+
     def _open_preferred_sensors(self, role: str) -> None:
         """DEC-207: a Cooling Hardware Readiness action deep-links to Settings ▸
         Preferred sensors (``role`` is "cpu" | "mb") so the user can pick a sensor."""
@@ -1508,6 +1544,8 @@ class MainWindow(QWidget):
         # footer every second, and a tick landing mid-teardown would touch an
         # already-deleted widget (DEC-222).
         self._poll_age_timer.stop()
+        # DEC-499: cancel a download and let a check in flight finish or time out.
+        self.update_controller.shutdown()
         if hasattr(self, "_demo_timer") and self._demo_timer is not None:
             self._demo_timer.stop()
         if hasattr(self, "_demo_controller") and self._demo_controller is not None:
