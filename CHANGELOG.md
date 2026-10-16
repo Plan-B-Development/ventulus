@@ -5,6 +5,10 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+## [5.3.1] — 2026-10-17
+
+Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.2.0 is the current daemon release.
+
 ### Fixed
 
 - **Driver steps on Debian and Ubuntu now cover kernel updates.** The Hardware page's install
