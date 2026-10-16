@@ -47,6 +47,14 @@ rename. Version numbers carry on from Control-OFC.
   (on Fedora, `make akmod` too for nct6687d if RPM Fusion is enabled), and upstream's generic steps
   elsewhere. The Hardware page's **How to enable** section lists those commands with copy buttons,
   and how to sign the driver when Secure Boot is on.
+- **The manual covers Debian, Ubuntu and Fedora.** Getting Started has the install steps for each
+  supported distribution (the APT and DNF repositories, the tarball, one-off release installs) and
+  lists the distributions that are not supported and why. Driver Setup and Hardware Troubleshooting
+  give the driver prerequisites, build, update, Secure Boot and removal steps for each, and the
+  kernel-parameter step for GRUB on Debian, Ubuntu and Fedora. The hardware reference guides name
+  the out-of-tree drivers by their upstream projects. A new [Updates](manual/updates.md) page
+  explains the update check: what it sends and to whom, what it trusts, and what it tells you to do
+  for each way of installing.
 - **pyqtgraph 0.13.7 is enough.** The minimum drops from 0.14 to 0.13.7, the version Debian 13
   ships. The test suite now also runs on the Python, Qt and numpy packages of Debian 13,
   Ubuntu 26.04 and Fedora 44.

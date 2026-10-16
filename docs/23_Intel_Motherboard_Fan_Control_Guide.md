@@ -32,9 +32,9 @@ path, which is always `coretemp` on Intel.
 
 | Intel Platform | Typical Boards | Common Linux Driver Path | Notes |
 |---|---|---|---|
-| **LGA1700 600-series** (Z690, B660, H670, H610) | ASUS ROG STRIX / TUF GAMING / PRIME Z690; MSI MAG/MEG/MPG Z690; Gigabyte Z690 AORUS; ASRock Z690 Steel Legend/Extreme | `nct6775` (mainline) on NCT6798D / NCT6796D-E boards; `nct6687d-dkms-git` on MSI Z690 (NCT6687D, default register map: no module parameter; blacklist the read-only in-kernel `nct6683`); `it87-dkms-git` on Gigabyte IT8689E (+ IT87952E on the PRO / MASTER); `asus_ec_sensors` (mainline) for extra ASUS Z690 sensors | Strong mainline coverage. Z690 has the only LGA1700-era ASRock board with an upstream lm-sensors config (Z690 Extreme). |
+| **LGA1700 600-series** (Z690, B660, H670, H610) | ASUS ROG STRIX / TUF GAMING / PRIME Z690; MSI MAG/MEG/MPG Z690; Gigabyte Z690 AORUS; ASRock Z690 Steel Legend/Extreme | `nct6775` (mainline) on NCT6798D / NCT6796D-E boards; `Fred78290/nct6687d` on MSI Z690 (NCT6687D, default register map: no module parameter; blacklist the read-only in-kernel `nct6683`); `frankcrawford/it87` on Gigabyte IT8689E (+ IT87952E on the PRO / MASTER); `asus_ec_sensors` (mainline) for extra ASUS Z690 sensors | Strong mainline coverage. Z690 has the only LGA1700-era ASRock board with an upstream lm-sensors config (Z690 Extreme). |
 | **LGA1700 700-series** (Z790, B760, H770, H610 refresh) | ASUS ROG STRIX Z790-E/-H/-I; MSI MAG Z790 TOMAHAWK / MPG Z790 EDGE WIFI; Gigabyte Z790 AORUS ELITE/MASTER/XTREME; ASRock Z790 Steel Legend/Taichi | Similar to Z690. MSI Z790 ships the NCT6687D with the default map. Gigabyte Z790 AORUS MASTER / XTREME / PRO X are dual-chip (IT8689E + IT87952E); the Z790 AORUS ELITE / ELITE AX has the IT8689E only. ASRock's Z790 Taichi puts five headers on an NCT6686D, read-only in the kernel driver. | The kernel `asus_ec_sensors` list includes ROG STRIX Z790-E GAMING WIFI II, Z790-H and Z790-I GAMING WIFI and ROG MAXIMUS Z790 EXTREME (7.3 adds Z790 HERO). |
-| **LGA1851 800-series** (Z890, B860, H810) | MSI MAG/MEG/MPG Z890; ASUS ROG STRIX Z890; Gigabyte Z890 AORUS; ASRock Z890 Taichi/Steel Legend | MSI Z890 ships the NCT6687D with the alternate "msi_alt1" EC map (monitoring tools call it *NCT6687DR*), which **requires `fan_config=msi_alt1`**, set automatically for boards on the upstream list. ASUS Z890 / B860 carry an NCT6701D, bound as `nct6799`. Gigabyte Z890 AORUS MASTER uses IT8696E + IT87952E, as, per the it87 SIV catalogue, do the XTREME AI TOP, PRO ICE, ELITE X ICE, TACHYON ICE and TACHYON DUO X ICE, the Z890 AI TOP, the Z890 AERO D and the W880 AI TOP; the Z890 AORUS ELITE WIFI7 has the IT8696E only. `it87-dkms-git` builds from 2026-09-09 to 2026-10-01 can fail to load on these Gigabyte boards; rebuild. ASRock Z890 fans sit on an NCT6686D, read-only in the kernel driver; ASRock's B860 Pro RS / Pro-A boards carry a plain NCT6796D for mainline `nct6775`. | The newest platform: treat upstream support as still settling. |
+| **LGA1851 800-series** (Z890, B860, H810) | MSI MAG/MEG/MPG Z890; ASUS ROG STRIX Z890; Gigabyte Z890 AORUS; ASRock Z890 Taichi/Steel Legend | MSI Z890 ships the NCT6687D with the alternate "msi_alt1" EC map (monitoring tools call it *NCT6687DR*), which **requires `fan_config=msi_alt1`**, set automatically for boards on the upstream list. ASUS Z890 / B860 carry an NCT6701D, bound as `nct6799`. Gigabyte Z890 AORUS MASTER uses IT8696E + IT87952E, as, per the it87 SIV catalogue, do the XTREME AI TOP, PRO ICE, ELITE X ICE, TACHYON ICE and TACHYON DUO X ICE, the Z890 AI TOP, the Z890 AERO D and the W880 AI TOP; the Z890 AORUS ELITE WIFI7 has the IT8696E only. it87 driver builds from 2026-09-09 to 2026-10-01 can fail to load on these Gigabyte boards; rebuild. ASRock Z890 fans sit on an NCT6686D, read-only in the kernel driver; ASRock's B860 Pro RS / Pro-A boards carry a plain NCT6796D for mainline `nct6775`. | The newest platform: treat upstream support as still settling. |
 
 The mainline `coretemp` driver reports CPU temperature on all of these generations
 (per-core + `Package id 0`). It is **not** a fan-control driver: it provides the
@@ -119,7 +119,7 @@ ports directly.
 reports `0xd592`), with the **default** EC register map. The in-kernel `nct6683`
 driver enumerates the chip and reads sensors, but publishes every `pwmN` read-only on
 MSI boards (and names its device `nct6687`, the same as the out-of-tree driver). Fan
-control needs `nct6687d-dkms-git`, with `nct6683` blacklisted, then a reboot (a
+control needs the out-of-tree `Fred78290/nct6687d` driver, with `nct6683` blacklisted, then a reboot (a
 blacklist does not unload a module already loaded). The manual's
 [Driver Setup](../manual/driver-setup.md#step-3--install-the-driver) has the steps.
 
@@ -168,7 +168,7 @@ System State page shows this guidance on MSI boards whose `board_name` contains
 ### LGA1700 (Z690 / Z790 AORUS)
 
 **Primary chip:** the ITE **IT8689E** on Z690 / Z790 AORUS boards. The out-of-tree
-`it87-dkms-git` (frankcrawford fork) is recommended. Mainline `it87` gained IT8689E fan
+`frankcrawford/it87` driver (DKMS) is recommended. Mainline `it87` gained IT8689E fan
 *control* in kernel 7.1 (commit `66b8eaf`), but the DKMS build stays the safe choice on
 the 6.12 / 6.18 LTS kernels most distributions ship, and only it handles the extra
 curve vectors that overrode manual mode before its PR #128.
@@ -202,7 +202,7 @@ fix and its hardware reports, including a Z790 AORUS MASTER with an IT8689E revi
 ### LGA1851 (Z890 AORUS)
 
 **Primary chip:** the ITE **IT8696E** (as on the AMD X870E AORUS boards). It needs
-`it87-dkms-git`.
+the out-of-tree `frankcrawford/it87` driver.
 
 **Secondary chip:** an **IT87952E** on the Z890 AORUS MASTER (an owner's kernel log:
 IT8696E at `0xa40`, IT87952E at `0xb10`,
@@ -219,7 +219,7 @@ MASTER `modprobe it87` failed with *Invalid argument* after
 `H2RAM set_slot(1,…) failed: -22`, so neither chip registered (#139); on a B860I AORUS
 PRO ICE the driver printed *Found IT8696E chip* and registered nothing (#138). The
 fork's [PR #140](https://github.com/frankcrawford/it87/pull/140) fixed both on
-2026-10-02: rebuild `it87-dkms-git` and reboot. If you must stay on such a build,
+2026-10-02: rebuild the it87 driver and reboot. If you must stay on such a build,
 `options it87 mmio=off` (plus `ignore_resource_conflict=1` if the bind is then refused)
 lets the module load, but the IT87952E loses its extra headers (SYS_FAN7/8_PUMP on the
 Z890 AORUS MASTER). `mmio=on` is already the default and does not help. This is a
@@ -313,7 +313,7 @@ never under `/sys/class/hwmon`. The daemon uses `coretemp`.
    missing IT87952E is most likely a blocked Super-I/O (see Gigabyte above).
 4. **Watch for BIOS reclaim:** the daemon's `pwm_enable` watchdog detects firmware
    switching a header out of manual mode and re-asserts it. The remedy is per vendor:
-   on Gigabyte, a current `it87-dkms-git` (Full Speed is a fail-safe, not a fix);
+   on Gigabyte, a current it87 driver build (Full Speed is a fail-safe, not a fix);
    `msi_fan_brute_force=1` on MSI Z890; on ASUS and ASRock no BIOS setting is known to
    stop it. Read-only headers are a different problem: the driver, not the BIOS.
 5. **Z890:** if PWM writes are accepted but fans do not change speed, try

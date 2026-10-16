@@ -16,7 +16,11 @@ API. It provides real-time monitoring of temperatures and fan speeds, fan
 curve editing, profile management, and manual fan override.
 
 The GUI is a daemon API client only -- all hardware access is performed by
-the daemon.
+the daemon. Its one other connection is the update check, which is off by
+default: only when you press *Check for updates* in Settings, or have turned
+on the daily check, does it fetch the signed release information from
+https://plan-b-development.github.io/pacman-repo/ventulus-updates.json.
+It never installs an update itself.
 
 # OPTIONS
 
@@ -48,6 +52,10 @@ _~/.local/share/ventulus/reports/_
 
 _~/.cache/ventulus/_
 	Generated theme images. Safe to delete; it is recreated.
+
+_~/.cache/ventulus/updates/_
+	The update check's last verified release information, the time of the
+	last check, and the update notice you dismissed. Safe to delete.
 
 _~/.cache/ventulus/firmware/_
 	Checked copies of OpenFAN firmware files, made for a firmware update.

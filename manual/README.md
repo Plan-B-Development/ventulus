@@ -15,6 +15,7 @@ This manual covers every page, setting, and feature of the application.
 3. [Dashboard](dashboard.md): Real-time overview of fans, sensors, and system health
 4. [Controls](controls.md): Profiles, fan roles, curves, and manual override
 5. [Settings](settings.md): Application preferences, themes, and backup/restore
+   - [Updates](updates.md): The opt-in update check: what it sends, what it trusts, and how it hands each install method its upgrade
 6. [System Health](diagnostics.md): The Overview, System State, Hardware and Logs pages, section by section
 7. [Fan Tests and Reports](fan-tests.md): Test PWM Control, Characterise, Discover Control Path, OpenFAN calibration, the GPU fan test, the PWM Test Report and the recording sessions
 8. [Fan Wizard](fan-wizard.md): Guided fan identification and labelling

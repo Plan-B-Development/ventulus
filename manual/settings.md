@@ -1,6 +1,6 @@
 # Settings
 
-The Settings page collects the application's own preferences: startup, behaviour, file locations, preferred sensors, and backup. It is a single scrolling surface of **cards** laid out in two columns; boolean options are shown as iOS-style **toggle switches**. The switches, choices and the default export folder are batched: change as many as you like, then click **Save Changes** in the page header to persist them all at once, to `~/.config/ventulus/app_settings.json`. Save writes only what you changed on the page, so a popup you turned off with *don't show again* stays off; if the settings file cannot be written, the status line says so and your changes stay pending for another Save. Everything else acts the moment you use it, with no Save step: **Daemon Configuration** and **Preferred Sensors**, because their values live on the daemon; a name edited in **Fan Names**; the **Profiles** and **Themes** folders; and every reset, clear and restore button on the maintenance cards (see [Resets & maintenance](#resets--maintenance)). The switches on the **Prompts & Dismissals** card are switches like any other and wait for **Save Changes**.
+The Settings page collects the application's own preferences: startup, behaviour, file locations, preferred sensors, backup, and the update check. It is a single scrolling surface of **cards** laid out in two columns; boolean options are shown as iOS-style **toggle switches**. The switches, choices and the default export folder are batched: change as many as you like, then click **Save Changes** in the page header to persist them all at once, to `~/.config/ventulus/app_settings.json`. Save writes only what you changed on the page, so a popup you turned off with *don't show again* stays off; if the settings file cannot be written, the status line says so and your changes stay pending for another Save. Everything else acts the moment you use it, with no Save step: **Daemon Configuration** and **Preferred Sensors**, because their values live on the daemon; a name edited in **Fan Names**; the **Profiles** and **Themes** folders; and every reset, clear and restore button on the maintenance cards (see [Resets & maintenance](#resets--maintenance)). The switches on the **Prompts & Dismissals** card are switches like any other and wait for **Save Changes**.
 
 Visual appearance (themes, fonts, colours) has its own **[Theme page](#theme-page)**, and export, import and the automatic settings backup live in the **Sync & Backup** card below.
 
@@ -170,6 +170,14 @@ profiles it offers this automatically; you can also run it any time from this ca
   the report, without stopping the rest of the import.
 - Re-running is safe: profiles already imported are matched by id and skipped.
 
+
+## Updates
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Check for updates automatically** | Off | Check for a newer Ventulus or `ventulusd` at most once a day while the app runs. Saved with **Save Changes**, and never carried by an export or import |
+
+**Check for updates** checks once, now. With the switch off, the app contacts the update server only when you press it, here or in **About**. The card then says how each component is installed, whether a newer release is out, and how to install it: the pacman, apt or dnf command, or for a tarball install a **Download and verify** button and the line that installs the checked file. [Updates](updates.md) explains what a check sends, what it trusts and every result.
 
 ## Theme page
 

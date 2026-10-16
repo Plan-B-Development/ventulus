@@ -45,9 +45,21 @@ guide covers chips and boards.
 
 ## Install
 
-Ventulus is packaged for Arch Linux and CachyOS (x86_64) in a signed pacman
-repository. Add it once, and both packages then upgrade with your normal
-`sudo pacman -Syu`. The commands work as written in bash, zsh and fish:
+Ventulus is packaged for x86_64 Linux in signed repositories. Add the one for
+your distribution once, and both packages then upgrade with the rest of your
+system. The commands work as written in bash, zsh and fish.
+
+| Distribution | Upgrades with |
+| --- | --- |
+| Arch Linux, CachyOS, EndeavourOS, Garuda | `sudo pacman -Syu` |
+| Debian 13, Ubuntu 26.04 LTS | `sudo apt update && sudo apt upgrade` |
+| Fedora 44 | `sudo dnf upgrade` |
+
+Every repository is signed by the key with fingerprint
+`4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA`; check that it is the one your
+package manager or `gpg` shows you.
+
+**Arch Linux and CachyOS:**
 
 ```bash
 # 1. trust the signing key
@@ -66,9 +78,39 @@ sudo pacman -Syu ventulus
 sudo systemctl enable --now ventulusd
 ```
 
-[Getting Started](manual/getting-started.md#installation) also has a signed script
-that does all of this in one step, a one-off install from a release, and building
-the packages yourself.
+**Debian 13 and Ubuntu 26.04:**
+
+```bash
+sudo apt install ca-certificates curl gpg
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://raw.githubusercontent.com/Plan-B-Development/pacman-repo/main/keys/ventulus.gpg \
+  | sudo tee /etc/apt/keyrings/ventulus.asc > /dev/null
+gpg --show-keys /etc/apt/keyrings/ventulus.asc
+printf '%s\n' 'Types: deb' \
+  'URIs: https://github.com/Plan-B-Development/pacman-repo/releases/download/repo/' \
+  'Suites: ./' \
+  'Signed-By: /etc/apt/keyrings/ventulus.asc' \
+  | sudo tee /etc/apt/sources.list.d/ventulus.sources
+sudo apt update
+sudo apt install ventulus   # the daemon starts as it installs
+```
+
+**Fedora 44:**
+
+```bash
+curl -fsSL https://plan-b-development.github.io/pacman-repo/ventulus.repo \
+  | sudo tee /etc/yum.repos.d/ventulus.repo
+sudo dnf install ventulus
+sudo systemctl enable --now ventulusd
+```
+
+[Getting Started](manual/getting-started.md#installation) also has a signed
+bootstrap script for Arch, a tarball for Debian, Ubuntu and Fedora without a
+repository, one-off installs from a release, building the packages yourself,
+and the distributions that are not supported (among them Manjaro, Debian 12 and
+Ubuntu 24.04). Ventulus can also tell you when a new release is out: the
+[update check](manual/updates.md) is off until you turn it on or press
+**Check for updates**.
 
 ## Quick start
 
@@ -84,7 +126,9 @@ The app never touches hardware. It talks only to `ventulusd`, through an HTTP AP
 on the Unix socket `/run/ventulus/ventulus.sock`. The daemon evaluates the active
 profile once a second, writes every fan, and owns thermal safety, so closing or
 crashing the app changes nothing about cooling. The app is where you edit
-profiles, see what the daemon reports, and run tests through it.
+profiles, see what the daemon reports, and run tests through it. Its only other
+connection is the opt-in update check, which fetches signed release information
+from the project's GitHub Pages site; the daemon never connects to the network.
 
 ## Documentation
 
@@ -93,6 +137,7 @@ profiles, see what the daemon reports, and run tests through it.
 [Setup Checklist](manual/setup-checklist.md) ·
 [Understanding Motherboard Fan Control](manual/understanding-fan-control.md) ·
 [Driver Setup](manual/driver-setup.md) ·
+[Updates](manual/updates.md) ·
 [OpenFAN Controller](manual/openfan-controller.md) ·
 [Hardware Troubleshooting](manual/hardware-troubleshooting.md)
 

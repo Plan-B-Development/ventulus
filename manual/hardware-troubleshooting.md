@@ -102,7 +102,8 @@ Open the **System State** page:
 
 - If the **Hardware Registry** lists the expected chip but its **Driver Status** is
   *not loaded*, the kernel module is missing. The row names the module to install
-  (for example `it87-dkms-git` from the AUR for Gigabyte AM5 boards).
+  (for example the out-of-tree `frankcrawford/it87` driver for Gigabyte AM5 boards), and
+  the Hardware page's **How to enable** section gives the steps for your distribution.
 - If the driver is loaded but the summary line says **0 writable**, the bound driver
   publishes the pwm files read-only. On MSI and ASRock Nuvoton boards that usually
   means the in-kernel `nct6683` is bound; it never makes PWM writable outside Mitac
@@ -128,7 +129,7 @@ Z790 AORUS MASTER and others), and one of them did not appear.
 `Found IT8696E chip at 0xa40 … revision 0`. If there are no `it87` lines at all, or
 `modprobe` says "module not found":
 
-1. Install `it87-dkms-git` (see [Driver Setup](driver-setup.md)). Current builds reach
+1. Install the `frankcrawford/it87` driver (see [Driver Setup](driver-setup.md#step-3--install-the-driver)). Current builds reach
    the secondary chip's extra headers through MMIO, which is on by default.
 2. Reboot, then click **Rescan Hardware**.
 
@@ -140,8 +141,8 @@ B860 boards ([it87 #139](https://github.com/frankcrawford/it87/issues/139),
 [#138](https://github.com/frankcrawford/it87/issues/138)). It was fixed on
 2026-10-02 ([PR #140](https://github.com/frankcrawford/it87/pull/140)):
 
-1. Rebuild the driver: `yay -S it87-dkms-git`, or without an AUR helper the
-   [rebuild commands in Driver Setup](driver-setup.md#without-an-aur-helper).
+1. Rebuild the driver from current source, with the
+   [update commands in Driver Setup](driver-setup.md#updating-the-driver) for your distribution.
 2. Reboot, then click **Rescan Hardware**.
 
 Do not go on to Case B for this. `options it87 mmio=off` also gets such a build to
@@ -238,7 +239,7 @@ change, the fix has not failed. Go on to the power cut.*
    **Controls** page.
 
 **Optional: the ID the driver read, for a bug report.** On kernels built with dynamic
-debug (Arch's and CachyOS's are), you can make the driver print it:
+debug (the Arch, CachyOS, Debian, Ubuntu and Fedora kernels are), you can make the driver print it:
 
 ```
 echo 'options it87 dyndbg=+p' | sudo tee /etc/modprobe.d/it87-debug.conf
@@ -255,18 +256,21 @@ ladder above clears both
 
 Something else is still writing the unlock before `it87` reads. Check, in this order:
 
-- another `modules-load.d` file, `/etc/conf.d/lm_sensors`, or a distribution default,
+- another `modules-load.d` file, the module list `sensors-detect` saved (`/etc/conf.d/lm_sensors`
+  on Arch, `/etc/modules` on Debian and Ubuntu, `/etc/sysconfig/lm_sensors` on Fedora), or a distribution default,
   loading `nct6775` where the guard has not acted;
 - `sensors-detect`, run by hand or by a script;
 - a Super-I/O module baked into your initramfs
-  (`for i in /boot/initramfs-*.img; do echo "$i"; lsinitcpio "$i" | grep -E 'nct6775|w83627|it87'; done`;
-  CachyOS names its images `initramfs-linux-cachyos*.img`);
+  (on Arch, `for i in /boot/initramfs-*.img; do echo "$i"; lsinitcpio "$i" | grep -E 'nct6775|w83627|it87'; done`,
+  and CachyOS names its images `initramfs-linux-cachyos*.img`; on Debian and Ubuntu,
+  `lsinitramfs /boot/initrd.img-$(uname -r) | grep -E 'nct6775|w83627|it87'`; on Fedora,
+  `sudo lsinitrd | grep -E 'nct6775|w83627|it87'`);
 - any other tool that probes Super-I/O ports.
 
 **Do not** reach for these. They are known not to help, and one makes things worse:
 
 - **`mmio=on`**: already the driver default; setting it changes nothing.
-- **Reinstalling `it87-dkms-git`**: the block is not a driver bug, and it reproduces
+- **Reinstalling or rebuilding the it87 driver**: the block is not a driver bug, and it reproduces
   on the current upstream code.
 - **`force_id`**: the reporter on
   [issue #81](https://github.com/frankcrawford/it87/issues/81) forced the ID and still
@@ -312,7 +316,7 @@ Because the daemon takes the header back each time, control still works in the W
 and HIGH bands, but the fix is per vendor, and the board notes on System State carry
 it for your chip:
 
-- **Gigabyte:** an `it87-dkms-git` build from 2026-08-24 or later carries the fixes
+- **Gigabyte:** a `frankcrawford/it87` build from 2026-08-24 or later carries the fixes
   for the firmware logic that retakes headers
   ([PR #128](https://github.com/frankcrawford/it87/pull/128)). If yours is older,
   rebuild it.

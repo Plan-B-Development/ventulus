@@ -76,7 +76,7 @@ driver, not the board:
   systems and has no `pwmN_enable` at all, so no BIOS setting unlocks it.
   `ls -l /sys/class/hwmon/hwmon*/device/driver` shows which driver is bound; the
   device name does not, because the out-of-tree drivers use the same names.
-  - **MSI (NCT6687D):** install `nct6687d-dkms-git` and blacklist `nct6683`, then
+  - **MSI (NCT6687D):** install the out-of-tree `Fred78290/nct6687d` driver and blacklist `nct6683`, then
     reboot. With both loaded they can bind the same chip and garble readings.
   - **ASRock (NCT6686D / NCT6683D):** the fans on that chip need a board-specific
     out-of-tree driver, for example `asrock-nct6683` for the boards it lists, or
@@ -166,10 +166,10 @@ sudo modprobe nct6775
 
 Some chips (notably several Gigabyte ITE variants) are not supported by the mainline
 `it87` driver on common LTS kernels and need an out-of-tree build such as
-`it87-dkms-git`. The page marks these as **needs out-of-tree (DKMS) driver** and shows
-the driver, but installing a DKMS package is a system change you should make
+`frankcrawford/it87`. The page marks these as **needs out-of-tree (DKMS) driver** and shows
+the driver, but installing a DKMS driver is a system change you should make
 deliberately, after checking it matches your chip. Never pass `force_id`: it can
-misconfigure the chip. **`it87-dkms-git` builds from 2026-09-09 (the driver's v2.0)
+misconfigure the chip. **it87 driver builds from 2026-09-09 (the driver's v2.0)
 rename Gigabyte chips**, e.g. `it8696_a008090a`. The daemon strips that suffix, so no
 fan header's id changes; an `/etc/sensors.d` block written for the old name stops
 matching ([Driver Setup](../manual/driver-setup.md#it87-v20-renames-your-chips)).

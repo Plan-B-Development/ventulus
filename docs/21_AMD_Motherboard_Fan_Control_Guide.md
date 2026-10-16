@@ -30,10 +30,10 @@ quirks.
 
 | AMD Platform | Typical Boards | Common Linux Driver Path | Notes |
 |---|---|---|---|
-| **AM4 400-series** (B450, X470) | ASUS PRIME X470-PRO, ROG STRIX B450/X470 -E/-F/-I; MSI B450/X470; Gigabyte AORUS B450/X470; ASRock B450/X470 | `nct6775` (mainline) on the MSI and ASRock boards (NCT6779D / NCT6792D / NCT6795D / NCT6797D); `it87-dkms-git` on Gigabyte (IT8686E + IT8792E) **and on ASUS**, whose AM4 300/400-series boards carry an ITE IT8665E; `asus_wmi_sensors` / `asus_ec_sensors` for extra ASUS sensors (read-only) | The hazards are the NCT6797D-vs-`nct6687` [chip-ID collision](19_Hardware_Compatibility.md#the-nct679x-chip-id-collision) on MSI and the [ASUS WMI firmware bug](#sensor-drivers-are-not-the-control-path) |
-| **AM4 500-series** (X570, B550, A520) | ASUS X570/B550, MSI B550/X570, Gigabyte X570/B550, ASRock X570/B550 | `nct6775` (ASUS, ASRock, MSI's original X570 boards); `nct6687d-dkms-git` on MSI B550 and X570S boards; `it87-dkms-git` on Gigabyte; `nct6683` (read-only) for the B550 Taichi's EC | All four Super-I/O families ship in this generation, and each vendor uses a different one |
-| **AM5 600-series** (X670E, X670, B650E, B650, A620) | ASUS X670/B650, MSI B650/X670, ASRock A620/B650/X670, Gigabyte X670/B650 | `nct6775` (ASUS NCT6799D, ASRock NCT6796D-S); `nct6687d-dkms-git` (MSI); `it87-dkms-git` (Gigabyte); ASRock NCT6686D boards need `asrock-nct6683` or `nct6687d` for PWM; plus ASUS EC helpers | Out-of-tree drivers become near-mandatory; monitoring often works before control does |
-| **AM5 800-series** (X870E, X870, B850, B840) | ASUS X870/B850, MSI X870/B850, Gigabyte X870/B850, ASRock X870/B850 | `nct6775` (ASUS NCT6701D, reported as `nct6799`); `nct6687d-dkms-git` with the msi_alt1 map (MSI); `it87-dkms-git` (Gigabyte); ASRock mixes NCT6796D-S and NCT6686D | The hardest generation on Linux: expect model-specific exceptions |
+| **AM4 400-series** (B450, X470) | ASUS PRIME X470-PRO, ROG STRIX B450/X470 -E/-F/-I; MSI B450/X470; Gigabyte AORUS B450/X470; ASRock B450/X470 | `nct6775` (mainline) on the MSI and ASRock boards (NCT6779D / NCT6792D / NCT6795D / NCT6797D); `frankcrawford/it87` on Gigabyte (IT8686E + IT8792E) **and on ASUS**, whose AM4 300/400-series boards carry an ITE IT8665E; `asus_wmi_sensors` / `asus_ec_sensors` for extra ASUS sensors (read-only) | The hazards are the NCT6797D-vs-`nct6687` [chip-ID collision](19_Hardware_Compatibility.md#the-nct679x-chip-id-collision) on MSI and the [ASUS WMI firmware bug](#sensor-drivers-are-not-the-control-path) |
+| **AM4 500-series** (X570, B550, A520) | ASUS X570/B550, MSI B550/X570, Gigabyte X570/B550, ASRock X570/B550 | `nct6775` (ASUS, ASRock, MSI's original X570 boards); `Fred78290/nct6687d` on MSI B550 and X570S boards; `frankcrawford/it87` on Gigabyte; `nct6683` (read-only) for the B550 Taichi's EC | All four Super-I/O families ship in this generation, and each vendor uses a different one |
+| **AM5 600-series** (X670E, X670, B650E, B650, A620) | ASUS X670/B650, MSI B650/X670, ASRock A620/B650/X670, Gigabyte X670/B650 | `nct6775` (ASUS NCT6799D, ASRock NCT6796D-S); `Fred78290/nct6687d` (MSI); `frankcrawford/it87` (Gigabyte); ASRock NCT6686D boards need `asrock-nct6683` or `nct6687d` for PWM; plus ASUS EC helpers | Out-of-tree drivers become near-mandatory; monitoring often works before control does |
+| **AM5 800-series** (X870E, X870, B850, B840) | ASUS X870/B850, MSI X870/B850, Gigabyte X870/B850, ASRock X870/B850 | `nct6775` (ASUS NCT6701D, reported as `nct6799`); `Fred78290/nct6687d` with the msi_alt1 map (MSI); `frankcrawford/it87` (Gigabyte); ASRock mixes NCT6796D-S and NCT6686D | The hardest generation on Linux: expect model-specific exceptions |
 
 ## ASUS
 
@@ -48,7 +48,7 @@ kernel documentation lists many boards by name.
   same on the ROG STRIX X470-F / X470-I and B450-F; a B450-I owner's `sensors-detect`
   found chip ID `0x8665` too
   ([lm-sensors #195](https://github.com/lm-sensors/lm-sensors/issues/195)). Mainline has no IT8665E driver, so
-  fan control needs the out-of-tree `it87-dkms-git`. Use a build from 2026-07-22 or
+  fan control needs the out-of-tree `frankcrawford/it87` driver. Use a build from 2026-07-22 or
   later: older builds mangled IT8665E writes under the MMIO default
   ([issue #106](https://github.com/frankcrawford/it87/issues/106)).
 - **AM4 500-series** (TUF GAMING X570-PLUS, ROG STRIX X570 / B550, PRIME X570-PRO): an
@@ -172,7 +172,7 @@ the two NCT6687D drivers apart, because the in-kernel `nct6683` also names the d
 
 **Read-only headers mean the wrong driver.** On an NCT6687D board the in-kernel
 `nct6683` may load and show sensors, but it publishes every `pwmN` read-only (it
-enables writes only on Mitac OEM systems). Install `nct6687d-dkms-git` and blacklist
+enables writes only on Mitac OEM systems). Install the out-of-tree `Fred78290/nct6687d` driver and blacklist
 `nct6683`: with both loaded they can bind the same chip at once, which garbles readings
 and makes writes fail ([nct6687d #204](https://github.com/Fred78290/nct6687d/issues/204),
 B550-A PRO). No BIOS setting is involved. The commands are in
@@ -184,7 +184,7 @@ map ([nct6687d #3](https://github.com/Fred78290/nct6687d/issues/3)).
 
 The AM5 600-series boards (MAG B650 TOMAHAWK WIFI, MAG X670E TOMAHAWK WIFI, MPG X670E
 CARBON WIFI, MPG B650 CARBON WIFI, PRO X670-P WIFI) use the NCT6687D's **default**
-register map. Use `nct6687d-dkms-git`, blacklist `nct6683`, and **never** force
+register map. Use the out-of-tree `Fred78290/nct6687d` driver, blacklist `nct6683`, and **never** force
 `fan_config=msi_alt1` here: it makes every SYS_FAN read 0 RPM
 ([nct6687d #167](https://github.com/Fred78290/nct6687d/issues/167)). The chip-ID
 collision does not apply to these boards: their chip reports `0xd592`, and the brick
@@ -361,8 +361,8 @@ Gigabyte is the vendor where ITE chip quirks matter most and where the gap betwe
 ### Which chips
 
 Gigabyte AMD boards use ITE chips, most of which the mainline `it87` driver does not
-support, so they need the out-of-tree `it87-dkms-git`
-([frankcrawford/it87](https://github.com/frankcrawford/it87)). Many AORUS boards pair
+support, so they need the out-of-tree
+[`frankcrawford/it87`](https://github.com/frankcrawford/it87) driver. Many AORUS boards pair
 a primary chip with a secondary that carries extra headers:
 
 | Generation | Dual-chip boards | Single-chip boards |
@@ -377,7 +377,7 @@ The Threadripper boards (X399, TRX40, TRX50) are in the
 
 ### Driver, BIOS and the IT8689E
 
-On a current `it87-dkms-git` build usually **no BIOS change is needed**: the driver
+On a current it87 driver build usually **no BIOS change is needed**: the driver
 takes each header over from Smart Fan. Never give the BIOS curve a 0% point, because
 it runs the fans whenever the daemon is not in control. For a 4-pin fan set **FAN
 Control Mode** to PWM, and treat *Full Speed* as a fail-safe, not a fix. The
@@ -389,7 +389,7 @@ AORUS MASTER) accepted PWM writes with no effect while a normal BIOS curve was a
 although Windows tools could control the fans. The fork's PR #128 fixes this, with
 positive IT8689E reports including Rev 1, but none since the merge on a dual-chip
 IT8689E board.
-So update `it87-dkms-git`, then verify with Test PWM Control. If a header still cannot
+So update the it87 driver, then verify with Test PWM Control. If a header still cannot
 be controlled on a current build, use a different header, move the fan to an external
 controller such as the OpenFAN controller, or let the BIOS curve drive that header,
 keeping the curve free of 0% points. The fix's status and the old BIOS stopgap are in
@@ -493,14 +493,14 @@ sources; both are PUMP labels, so the floor is the same either way. No upstream
 since 2023); the GUI ships a fallback label table aligned with the #103 mapping.
 
 **The secondary can be masked by a latched bridge, and it is recoverable (measured
-2026-09-05).** On BIOS **F14c** with `it87-dkms-git` **349.c567739** (upstream HEAD),
+2026-09-05).** On BIOS **F14c** with the it87 driver built from upstream HEAD **`c567739`** (Arch package `it87-dkms-git` 349.c567739),
 the kernel finds `IT8696E chip at 0xa40 [MMIO at 0xfe100000]` and then gets device-ID
 `0x8883` from the secondary address (visible only with it87 dynamic debug on). One
 `it87` hwmon device enumerates and exactly **five** `pwm` files exist, the primary's.
 Suppressing `nct6775` and `w83627ehf` and then cutting mains power restored the
 secondary as `it87952-isa-0a60`: 3 fans, 3 PWMs, 3 thermistor temps, 8 of 8 headers.
 
-An earlier report, on `it87-dkms-git` 332.20f2f2f+ and BIOS **F13a** (2026-03), saw
+An earlier report, on the it87 driver at upstream `20f2f2f` or later (Arch package `it87-dkms-git` 332.20f2f2f+) and BIOS **F13a** (2026-03), saw
 both chips. Both observations are recorded because they differ in board firmware *and*
 driver revision, and nobody has bisected which change matters. Treat the 8-header
 figure as the board's **physical** layout, not as what Linux reaches on every boot.
@@ -537,7 +537,7 @@ results.
 [k10temp](https://docs.kernel.org/hwmon/k10temp.html)
 
 **Out-of-tree drivers:**
-- [frankcrawford/it87](https://github.com/frankcrawford/it87) (AUR `it87-dkms-git`).
+- [frankcrawford/it87](https://github.com/frankcrawford/it87) (packaged for Arch in the AUR as `it87-dkms-git`).
   The PRs and issues cited here: #27 (the PRIME X470-PRO is an IT8665E), #64 (secondary
   chip, closed 2025-12), #70, #79 and #115 (BIOS Full Speed), #81, #89 (X870E AORUS
   ELITE X3D, closed 2026-01-13), #96 (IT8689E Rev 1), #99 (IT8792 suspend/resume,
@@ -545,6 +545,6 @@ results.
   by #120), PR #128 (Gigabyte control fixes, merged 2026-08-24), PR #132 (v2.0, chip
   rename, 2026-09-09). The [Hardware Compatibility Guide](19_Hardware_Compatibility.md#sources)
   lists them with dates.
-- [Fred78290/nct6687d](https://github.com/Fred78290/nct6687d) (AUR `nct6687d-dkms-git`)
+- [Fred78290/nct6687d](https://github.com/Fred78290/nct6687d) (packaged for Arch in the AUR as `nct6687d-dkms-git`)
 - [branchmispredictor/asrock-nct6683](https://github.com/branchmispredictor/asrock-nct6683)
 - [s25g5d4/nct6686d](https://github.com/s25g5d4/nct6686d)

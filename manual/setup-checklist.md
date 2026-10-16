@@ -1,6 +1,6 @@
 # Setup Checklist — Sensors & Fan Control
 
-This page is the **ordered path** from a fresh install to verified, working fan control: install → sensors → readiness → drivers/BIOS → verify → first profile. Do the steps in order. Each one links to a deeper page for the detail. Commands target **Arch Linux and CachyOS** (the platforms Ventulus is packaged for); the concepts carry to other distributions but the commands will differ.
+This page is the **ordered path** from a fresh install to verified, working fan control: install → sensors → readiness → drivers/BIOS → verify → first profile. Do the steps in order. Each one links to a deeper page for the detail. Ventulus is packaged for Arch Linux and its derivatives, Debian 13, Ubuntu 26.04 and Fedora 44; where a command differs between them, the linked page gives each one.
 
 New to how Linux fan control works? [Understanding Motherboard Fan Control](understanding-fan-control.md) is a short, plain-English primer on the concepts this checklist puts into practice (hwmon, Super I/O chips, drivers, and BIOS settings). It is optional background: you can follow the steps below without it.
 
@@ -23,10 +23,12 @@ You are done when all of these are true:
 
 ## Step 1 — Install the daemon and GUI
 
-Add the signed `[ventulus]` pacman repository, install `ventulus` (it pulls in
-`ventulusd`), and enable the daemon. [Getting Started](getting-started.md#installation)
-has the commands, a signed script that does it all in one step, and the other ways
-to install. From then on both packages upgrade with your normal `sudo pacman -Syu`.
+Add the signed repository for your distribution (pacman, APT or DNF), install
+`ventulus` (it pulls in `ventulusd`), and make sure the daemon is enabled and
+running. [Getting Started](getting-started.md#installation) has the commands for
+each distribution, and the other ways to install. From then on both packages
+upgrade with the rest of your system (`sudo pacman -Syu`, `sudo apt upgrade` or
+`sudo dnf upgrade`).
 
 ## Step 2 — Verify sensors first
 
@@ -91,7 +93,7 @@ Also worth knowing:
 |---|---|---|
 | **Kernel update** | The DKMS module silently fails to rebuild when the installed headers don't match the new kernel, so motherboard fans/sensors vanish | [Driver Setup § Step 2](driver-setup.md#step-2--prerequisites-dkms--kernel-headers) and [Staying current](driver-setup.md#staying-current) |
 | **BIOS update or settings reset** | Firmware usually restores its fan-curve defaults. Check the BIOS curve has no 0% point, and re-run Test PWM Control in case the firmware now takes headers back | [Driver Setup § Step 5 (BIOS)](driver-setup.md#step-5--bios-settings-the-half-people-skip), then re-run the readiness check |
-| **Fan regression with a driver installed months ago** | `-git` AUR drivers only pick up upstream fixes when reinstalled | [Staying current](driver-setup.md#staying-current) |
+| **Fan regression with a driver installed months ago** | An out-of-tree driver picks up upstream fixes only when you rebuild it | [Staying current](driver-setup.md#staying-current) |
 | **Bootloader change / kernel command-line edit** | `amdgpu.ppfeaturemask` falls off the command line, so GPU fan writes stop working | [AMD GPU prerequisite](driver-setup.md#amd-gpu-fan-control-prerequisite-rdna3); check with `cat /proc/cmdline` |
 
 ## Where to go next

@@ -49,7 +49,7 @@ The vendor-by-vendor specifics live in their own reference pages, so this page d
 
 Super I/O chips sit on an old-style bus with no automatic "plug-and-play" announcement, so the kernel cannot always load the right driver by itself. If no driver is bound to your chip, hwmon simply does not show your motherboard fans, or shows their RPM but no writable `pwmN`.
 
-Mainline Linux already includes drivers for many chips (for example `nct6775` covers a lot of ASUS boards). Newer boards (most 2022-and-later Gigabyte and MSI, some ASRock) use chips whose driver is **out-of-tree**: not shipped with the kernel, installed separately from the AUR and rebuilt for your kernel by **DKMS**.
+Mainline Linux already includes drivers for many chips (for example `nct6775` covers a lot of ASUS boards). Newer boards (most 2022-and-later Gigabyte and MSI, some ASRock) use chips whose driver is **out-of-tree**: not shipped with the kernel, installed separately from its upstream project (on Arch, from the AUR) and rebuilt for your kernel by **DKMS**.
 
 So "my motherboard fans don't show up" usually means the driver for your Super I/O chip is not loaded yet, not that your board is unsupported. The **Hardware** page identifies your chip and names the package to install. Installing a driver changes how your system loads modules, and some steps change how it boots: [Driver Setup](driver-setup.md) has each step, what it risks, and how to undo it.
 
