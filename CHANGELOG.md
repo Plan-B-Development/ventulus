@@ -5,6 +5,12 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+## [5.2.0] — 2026-10-16
+
+Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.2.0 is the current daemon release.
+Packages for Debian, Ubuntu and Fedora and a tarball, an opt-in signed update check, and driver guidance for every
+supported distribution.
+
 ### Added
 
 - **Packages for Debian 13, Ubuntu 26.04 and Fedora 44, and a tarball.** Each Release now carries
