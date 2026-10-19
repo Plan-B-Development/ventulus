@@ -5,10 +5,16 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+## [5.4.0] — 2026-10-19
+
+Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.3.0 is the current daemon
+release, and the board names, the Board layout panel and the module-signing and expected-chip
+warnings below need it. With an older daemon those parts stay hidden.
+
 ### Added
 
 - **Gigabyte fan headers and temperatures show their board names.** With a daemon that reads
-  the board's firmware layout (ventulusd's next release) on a Gigabyte board running the out-of-tree
+  the board's firmware layout (ventulusd 5.3.0) on a Gigabyte board running the out-of-tree
   it87 driver, a header the driver leaves as `pwm1` is named from the it87 project's Gigabyte
   configurations: `CPU_FAN`, `SYS_FAN5_PUMP`. Temperatures get names the same way (`VRM MOS`,
   `PCIEX16`). Your own name, the driver's label, `/etc/sensors.d` and
@@ -24,7 +30,7 @@ rename. Version numbers carry on from Control-OFC.
   with its chip channel. An `EC_TEMP` temperature notes that it reads only with a probe fitted.
 - **A catalogue-named supply rail far from nominal says so.** A `+12V`, `+5V` or `+3.3V` rail
   reading more than 10 % off is marked "reading out of range" in the Voltages table. Display only.
-- **The missing-chip warning covers more Gigabyte boards.** With the next ventulusd, a board
+- **The missing-chip warning covers more Gigabyte boards.** With ventulusd 5.3.0, a board
   that Ventulus's own list does not include is checked against the chips its firmware layout
   expects. The warning appears once, says when the layout was the source, and the Board layout
   panel shows which expected chips were found.
