@@ -45,13 +45,17 @@ from ventulus.ui.hwmon_guidance import (
     detect_module_conflicts,
     dual_chip_firmware_counts,
     dual_chip_warning_html,
+    expected_board_chips,
     format_bound_driver_status,
     format_driver_status,
+    in_tree_cannot_drive,
+    it87_state,
     lookup_vendor_quirks,
     missing_chips_cost_fans,
     missing_dual_chips,
     quirk_key,
     severity_display,
+    signing_applies,
 )
 from ventulus.ui.theme import active_theme
 
@@ -145,17 +149,27 @@ def reclaims_are_historic(hw) -> bool:
     return all(h in ages and ages[h] >= RECLAIM_HISTORIC_AFTER_MS for h in hot)
 
 
+def _signed_modules_only(diag: HardwareDiagnosticsResult) -> bool | None:
+    ks = getattr(diag, "kernel_security", None)
+    return ks.signed_modules_only if ks is not None else None
+
+
 def dual_chip_warning_for(diag: HardwareDiagnosticsResult) -> str | None:
     """The dual-chip warning for *diag* (DEC-101), or ``None`` — the one place
     its inputs are gathered, for the readiness condition and its issue card."""
     firmware_fans, reachable = dual_chip_firmware_counts(diag)
+    expected = expected_board_chips(diag)
     return dual_chip_warning_html(
         diag.board.name,
-        list(diag.expected_chips),
+        expected.chips,
         [c.chip_name for c in diag.hwmon.chips_detected],
         firmware_fan_count=firmware_fans,
         reachable_fan_count=reachable,
-        fanless_chips=list(diag.expected_fanless_chips),
+        fanless_chips=expected.fanless,
+        layout_siv=expected.layout_siv,
+        it87=it87_state(diag.kernel_modules),
+        kernel_release=diag.kernel_release,
+        signed_modules_only=_signed_modules_only(diag),
     )
 
 
@@ -163,14 +177,48 @@ def dual_chip_costs_fans(diag: HardwareDiagnosticsResult) -> bool:
     """Whether the chips missing on *diag* cost fan headers (`BRD-j`), from the
     same inputs as :func:`dual_chip_warning_for`."""
     firmware_fans, reachable = dual_chip_firmware_counts(diag)
+    expected = expected_board_chips(diag)
     return missing_chips_cost_fans(
-        missing_dual_chips(
-            list(diag.expected_chips), [c.chip_name for c in diag.hwmon.chips_detected]
-        ),
-        list(diag.expected_fanless_chips),
+        missing_dual_chips(expected.chips, [c.chip_name for c in diag.hwmon.chips_detected]),
+        expected.fanless,
         firmware_fan_count=firmware_fans,
         reachable_fan_count=reachable,
     )
+
+
+def _dual_chip_driver_fix(diag: HardwareDiagnosticsResult) -> str:
+    """The dual-chip condition's one-line fix for the driver it finds (DEC-500):
+    the kernel's own it87 that cannot drive a missing chip gets the missed-rebuild
+    cause, anything else the latch ladder; a kernel that refuses unsigned drivers
+    is named where the out-of-tree it87 is not the one running."""
+    expected = expected_board_chips(diag)
+    missing = missing_dual_chips(expected.chips, [c.chip_name for c in diag.hwmon.chips_detected])
+    it87 = it87_state(diag.kernel_modules)
+    if in_tree_cannot_drive(missing, it87, diag.kernel_release):
+        fix = (
+            "The it87 loaded is the kernel's own, and it cannot drive the missing chip: "
+            "it needs the out-of-tree driver. After a kernel update, 'dkms status' shows "
+            "whether it was built for this kernel and 'sudo dkms autoinstall' builds it "
+            "(the kernel's headers must be installed); then reboot. Never installed? "
+            f"Install {package_hint('it87')}. Full steps in the guide below."
+        )
+    else:
+        fix = (
+            "Work down this list, re-checking after each step: keep "
+            "sensors-detect and the nct6775/w83627ehf modules away from "
+            "the Super-I/O; reboot; if the chip is still missing, power "
+            "down fully at the wall (PSU switch off or unplugged), "
+            "because the latched bridge keeps standby power and a reboot "
+            "may not clear it. If 'sudo dmesg | grep -i it87' shows no "
+            "it87 lines at all, the driver is not loaded — install "
+            f"{package_hint('it87')} first. Full steps in the guide below."
+        )
+    if signing_applies(missing, it87, diag.kernel_release, _signed_modules_only(diag)):
+        fix += (
+            " This kernel only loads signed drivers, so the out-of-tree it87 must be "
+            "signed with a key enrolled with 'sudo mokutil --import'."
+        )
+    return fix
 
 
 def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
@@ -264,16 +312,7 @@ def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
                     "none on this board, so only its temperatures and voltages are "
                     "missing. To get them back: "
                 )
-                + (
-                    "Work down this list, re-checking after each step: keep "
-                    "sensors-detect and the nct6775/w83627ehf modules away from "
-                    "the Super-I/O; reboot; if the chip is still missing, power "
-                    "down fully at the wall (PSU switch off or unplugged), "
-                    "because the latched bridge keeps standby power and a reboot "
-                    "may not clear it. If 'sudo dmesg | grep -i it87' shows no "
-                    "it87 lines at all, the driver is not loaded — install "
-                    f"{package_hint('it87')} first. Full steps in the guide below."
-                ),
+                + _dual_chip_driver_fix(diag),
                 "doc_url": _MISSING_HEADERS_URL,
                 "doc_title": "Manual: recovering missing fan headers",
                 # Still `warn` when no fan is lost: a chip that did not
@@ -863,10 +902,12 @@ def chip_rows(diag: HardwareDiagnosticsResult) -> list[ChipRow]:
             driver=c.bound_driver or c.expected_driver,
             status=(
                 format_bound_driver_status(
-                    c.chip_name, c.bound_driver, c.in_mainline_kernel, loaded
+                    c.chip_name, c.bound_driver, c.in_mainline_kernel, loaded, diag.kernel_release
                 )
                 if c.bound_driver
-                else format_driver_status(c.chip_name, c.expected_driver in loaded)
+                else format_driver_status(
+                    c.chip_name, c.expected_driver in loaded, in_mainline=c.in_mainline_kernel
+                )
             ),
             mainline="Yes" if c.in_mainline_kernel else "No (out-of-tree)",
             headers=str(c.header_count),
@@ -885,6 +926,35 @@ def module_rows(diag: HardwareDiagnosticsResult) -> list[ModuleRow]:
         )
         for m in diag.kernel_modules
     ]
+
+
+def module_signing_line(diag: HardwareDiagnosticsResult) -> str | None:
+    """One line on whether this kernel loads unsigned drivers (DEC-500), or
+    ``None`` when the daemon read nothing (an older daemon included).
+
+    The facts first, then the daemon's verdict, which is what decides: Secure
+    Boot alone refuses nothing (Arch kernels load unsigned modules with it on).
+    """
+    ks = getattr(diag, "kernel_security", None)
+    if ks is None:
+        return None
+    facts: list[str] = []
+    if ks.secure_boot is not None:
+        facts.append(f"Secure Boot {'on' if ks.secure_boot else 'off'}")
+    if ks.lockdown:
+        facts.append(f"lockdown: {ks.lockdown}")
+    if ks.module_sig_enforce is not None:
+        facts.append(f"module.sig_enforce: {'on' if ks.module_sig_enforce else 'off'}")
+    if ks.signed_modules_only is True:
+        verdict = (
+            "This kernel only loads signed drivers: an out-of-tree driver must be signed "
+            "with a key enrolled on this machine."
+        )
+    elif ks.signed_modules_only is False:
+        verdict = "This kernel loads unsigned drivers."
+    else:
+        verdict = "Whether this kernel loads unsigned drivers could not be read."
+    return f"{' · '.join(facts)}. {verdict}" if facts else verdict
 
 
 def severity_hex(css_class: str, t) -> str:
@@ -1053,6 +1123,11 @@ def build_readiness_report_html(
                 f"<td>{escape(r.mainline)}</td></tr>"
             )
         out.append(f'<table cellpadding="4">{"".join(rows)}</table>')
+
+    signing = module_signing_line(diag)
+    if signing:
+        out.append(h("Module signing"))
+        out.append(f"<div>{escape(signing)}</div>")
 
     # Thermal + GPU
     thermal = thermal_line(diag.thermal_safety, live_thermal_state)

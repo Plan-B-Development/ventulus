@@ -349,12 +349,17 @@ def test_loaded_it87_leads_with_the_update():
     """Contract review, XD-1: the daemon recommends for a loaded driver that
     bound nothing, and says reinstalling the same build changes nothing.
     A loaded it87 may still be the in-kernel one, so the install block stays,
-    second and labelled for that case."""
+    second and labelled for that case. DEC-500: between them, the rebuild for
+    the running kernel — the in-kernel one is loaded after a kernel update
+    whose DKMS build did not follow, which a first install does not fix."""
     set_install_family(InstallFamily.DEBIAN)
     assert [b.key for b in _row("it87").command_blocks] == ["Install", "Update"]  # contrast
-    update, install = _row("it87", module_loaded=True).command_blocks
-    assert (update.key, install.key) == ("Update", "Install")
+    update, rebuild, install = _row("it87", module_loaded=True).command_blocks
+    assert (update.key, rebuild.key, install.key) == ("Update", "Rebuild", "Install")
     assert update.title == "Already running frankcrawford/it87? Update it:"
+    assert rebuild.commands == "dkms status\nsudo dkms autoinstall"
+    assert rebuild.commands == install_guide("it87", InstallFamily.DEBIAN).rebuild_text
+    assert "kernel update" in rebuild.title
     assert install.title.startswith("Still on the in-kernel it87? ")
 
 

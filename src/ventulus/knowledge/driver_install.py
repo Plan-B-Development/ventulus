@@ -147,6 +147,11 @@ OUT_OF_TREE_DRIVERS: dict[str, OutOfTreeDriver] = {
 }
 
 
+#: List the kernels an installed DKMS driver is built for, then build it for the
+#: running one (the running kernel's headers must be installed).
+REBUILD_FOR_RUNNING_KERNEL: tuple[str, ...] = ("dkms status", "sudo dkms autoinstall")
+
+
 @dataclass(frozen=True)
 class InstallGuide:
     """Copyable steps for one driver on one family. Every line is a shell
@@ -159,6 +164,11 @@ class InstallGuide:
     after: tuple[str, ...] = ()  # once, after the first install
     install_notes: tuple[str, ...] = ()  # about the first install only
     notes: tuple[str, ...] = ()  # about installing and updating alike
+    #: Build an installed driver for the running kernel (DEC-500): DKMS builds
+    #: one module per kernel, so a kernel whose rebuild failed, or whose headers
+    #: were missing, boots with the kernel's own driver. Every family here
+    #: installs through DKMS.
+    rebuild: tuple[str, ...] = REBUILD_FOR_RUNNING_KERNEL
 
     @property
     def title(self) -> str:
@@ -171,6 +181,10 @@ class InstallGuide:
     @property
     def update_text(self) -> str:
         return "\n".join(self.update)
+
+    @property
+    def rebuild_text(self) -> str:
+        return "\n".join(self.rebuild)
 
 
 # ── Arch: the AUR packages (the only place they are named) ──────────────────
@@ -239,8 +253,9 @@ _OTHER_PREREQUISITES_NOTE = (
 # DKMS chooses the key in `prepare_mok` (dkms-project/dkms): Ubuntu's
 # shim-signed MOK, else /var/lib/dkms/mok.pub, and prints the one it used.
 _SECURE_BOOT_NOTE = (
-    "Secure Boot: when 'mokutil --sb-state' says it is enabled, the kernel loads only "
-    "signed modules, and an unsigned driver fails with 'Key was rejected by service'. "
+    "Secure Boot: when 'mokutil --sb-state' says it is enabled, this distribution's "
+    "kernel loads only signed modules, and an unsigned driver fails with 'Key was "
+    "rejected by service' (or 'Operation not permitted' under lockdown). "
     "DKMS signs the driver as it builds it and prints the certificate it used "
     "('Public certificate (MOK): …' — /var/lib/dkms/mok.pub, or "
     "/var/lib/shim-signed/mok/MOK.der on Ubuntu). Enrol that file once with "

@@ -33,6 +33,7 @@ from ventulus.api.models import (
     IntelGpuCapability,
     IntelGpuDiagnosticsInfo,
     KernelModuleInfo,
+    KernelSecurityInfo,
     NvidiaGpuCapability,
     NvidiaGpuDiagnosticsInfo,
     OpenfanCapability,
@@ -412,6 +413,7 @@ def _demo_board_layout() -> BoardLayout:
             "X870E AORUS PRO ICE",
         ],
         board_listed=True,
+        expected_chips=["it8696", "it87952"],
         channels=[
             BoardLayoutChannel(
                 id=f"hwmon:it8696:{_IT8696_DEVICE}:temp1", kind="temp", board_label="System 1"
@@ -667,6 +669,13 @@ class DemoService:
             ),
             voltages=_demo_voltages(),
             board_layout=_demo_board_layout(),
+            # DEC-500: this host's reading — nothing refuses an unsigned module.
+            kernel_security=KernelSecurityInfo(
+                secure_boot=False,
+                lockdown="none",
+                module_sig_enforce=False,
+                signed_modules_only=False,
+            ),
         )
 
     def set_fan_pwm(self, fan_id: str, pwm_percent: int) -> None:

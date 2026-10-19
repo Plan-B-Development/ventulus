@@ -383,7 +383,14 @@ class OverviewPage(QWidget):
         headers = self._state.hwmon_headers if self._state else []
         caps = self._state.capabilities if self._state else None
         name_fn = self._state.fan_display_name if self._state else (lambda x: x)
-        rows = build_fan_rows(fans, headers, caps, name_fn, freshness=self._freshness_judge())
+        rows = build_fan_rows(
+            fans,
+            headers,
+            caps,
+            name_fn,
+            freshness=self._freshness_judge(),
+            kernel_release=self._state.kernel_release if self._state else None,
+        )
         self._clear_cell_widgets(self._fan_table, _FAN_FRESH_COL)
         self._fan_table.setRowCount(len(rows))
         for r, vm in enumerate(rows):

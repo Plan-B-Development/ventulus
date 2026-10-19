@@ -1803,8 +1803,11 @@ class HardwarePage(QWidget):
         _clear_layout(self._board_layout_layout)
         diag = getattr(self._diag, "last_hw_diagnostics", None)
         board = getattr(diag, "board", None)
+        hwmon = getattr(diag, "hwmon", None)
         panel = build_board_layout_panel(
-            getattr(diag, "board_layout", None), board_name=getattr(board, "name", "") or ""
+            getattr(diag, "board_layout", None),
+            board_name=getattr(board, "name", "") or "",
+            detected_chips=[c.chip_name for c in getattr(hwmon, "chips_detected", None) or ()],
         )
         self._board_layout_card.setVisible(panel.has_layout)
         if not panel.has_layout:
@@ -1813,6 +1816,7 @@ class HardwarePage(QWidget):
             (panel.title_text, "Hardware_Label_boardLayoutTitle"),
             (panel.listing_text, "Hardware_Label_boardLayoutListing"),
             (panel.coverage_text, "Hardware_Label_boardLayoutCoverage"),
+            (panel.chips_text, "Hardware_Label_boardLayoutChips"),
             (panel.source_text, "Hardware_Label_boardLayoutSource"),
         ):
             if text:

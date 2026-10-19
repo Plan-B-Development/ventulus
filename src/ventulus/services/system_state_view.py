@@ -39,6 +39,7 @@ from ventulus.services.health_ack import Occurrence
 from ventulus.ui.hwmon_guidance import (
     advisory_detail_html,
     detect_module_conflicts,
+    expected_board_chips,
     localise_it87_rename_note,
     lookup_chip_guidance,
     severity_display,
@@ -655,7 +656,7 @@ def condition_fingerprint(diag: HardwareDiagnosticsResult, key: str) -> str:
         )
     if key == "dual_chip":
         detected = {c.chip_name for c in hw.chips_detected}
-        return health_ack.fingerprint(set(diag.expected_chips) - detected)
+        return health_ack.fingerprint(set(expected_board_chips(diag).chips) - detected)
     if key == "acpi":
         return health_ack.fingerprint(
             f"{c.io_range}:{c.claimed_by}:{c.conflicts_with_driver}" for c in diag.acpi_conflicts

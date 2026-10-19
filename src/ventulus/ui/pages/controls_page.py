@@ -2167,6 +2167,7 @@ class ControlsPage(QWidget):
                 capabilities=self._state.capabilities,
                 display_name=self._state.fan_display_name,
                 fallback_name=self._state.fan_fallback_name,
+                kernel_release=self._state.kernel_release,
             )
 
         assigned_elsewhere = assigned_elsewhere_map(profile.controls, control_id)

@@ -24,11 +24,29 @@ rename. Version numbers carry on from Control-OFC.
   with its chip channel. An `EC_TEMP` temperature notes that it reads only with a probe fitted.
 - **A catalogue-named supply rail far from nominal says so.** A `+12V`, `+5V` or `+3.3V` rail
   reading more than 10 % off is marked "reading out of range" in the Voltages table. Display only.
+- **The missing-chip warning covers more Gigabyte boards.** With the next ventulusd, a board
+  that Ventulus's own list does not include is checked against the chips its firmware layout
+  expects. The warning appears once, says when the layout was the source, and the Board layout
+  panel shows which expected chips were found.
+- **The warning names a kernel that refuses unsigned drivers.** When the daemon reports that
+  your kernel loads only signed modules and the out-of-tree it87 is not running, the warning
+  and its readiness condition say so, with *Key was rejected by service* / *Operation not
+  permitted* and the MOK enrolment. The full report gains a **Module signing** line.
 
 ### Changed
 
 - **"Not used by this board" is now "Not mapped for this board"** in the Voltages table: the
   board's layout does not map the input, which does not mean nothing is connected.
+- **The kernel's own it87 gets its likely cause.** When the it87 loaded is the kernel's own and
+  cannot drive the missing chip, the warning says a kernel update the out-of-tree DKMS build did
+  not follow is the usual cause, with `dkms status` and `sudo dkms autoinstall`, instead of the
+  power-off ladder. The Hardware page's driver steps add a *Rebuild* block for it.
+- **IT8689E advice follows your kernel.** On Linux 7.1 or later the chip reads as supported by
+  the kernel's own driver, and the out-of-tree driver as optional (it adds the board layout ID
+  that board names need, and the fixes for boards where fan writes have no effect). Debian 13
+  and Ubuntu 26.04 keep the out-of-tree advice.
+- **The Secure Boot note in the driver steps names both refusals:** *Key was rejected by
+  service*, and *Operation not permitted* under lockdown.
 
 ## [5.3.1] — 2026-10-17
 

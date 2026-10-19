@@ -1967,7 +1967,34 @@ class BoardLayout:
     listed_boards: list[str] = field(default_factory=list)
     #: Whether this board's DMI name is one of :attr:`listed_boards`.
     board_listed: bool = False
+    #: The chips this layout expects the board to expose, in ``chip_name`` form
+    #: (DEC-500 Phase 2). Where the layout has blocks for two primaries, only the
+    #: bound one is listed. Read through
+    #: ``ui.hwmon_guidance.expected_board_chips``, which prefers the
+    #: curated :attr:`HardwareDiagnosticsResult.expected_chips`.
+    expected_chips: list[str] = field(default_factory=list)
     channels: list[BoardLayoutChannel] = field(default_factory=list)
+
+
+@dataclass
+class KernelSecurityInfo:
+    """Whether the kernel refuses unsigned modules, and the facts that decide it
+    (DEC-500 Phase 2, ``/diagnostics/hardware .kernel_security``).
+
+    Every field is ``None`` where the daemon could not read it; the object is
+    absent (``None`` on the result) when it read none, and on older daemons.
+    """
+
+    #: Whether the firmware booted with Secure Boot on. Secure Boot refuses
+    #: nothing itself; :attr:`signed_modules_only` is what refuses.
+    secure_boot: bool | None = None
+    #: ``"none"`` / ``"integrity"`` / ``"confidentiality"`` (an opaque token).
+    lockdown: str | None = None
+    #: The ``module.sig_enforce`` parameter.
+    module_sig_enforce: bool | None = None
+    #: The daemon's verdict: an unsigned module, or one signed with a key this
+    #: machine has not enrolled, is refused. The only field wording keys on.
+    signed_modules_only: bool | None = None
 
 
 @dataclass
@@ -2049,6 +2076,9 @@ class HardwareDiagnosticsResult:
     # names for its unlabelled channels. `None` without an SIV, and on older
     # daemons.
     board_layout: BoardLayout | None = None
+    # DEC-500 Phase 2 (daemon >= 5.3.0): whether the kernel refuses unsigned
+    # modules. `None` when the daemon read nothing, and on older daemons.
+    kernel_security: KernelSecurityInfo | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -3520,6 +3550,29 @@ def parse_hardware_diagnostics(data: dict) -> HardwareDiagnosticsResult:
         amdgpu_module_loaded=bool(data.get("amdgpu_module_loaded", False)),
         voltages=voltages,
         board_layout=_parse_board_layout(data.get("board_layout")),
+        kernel_security=_parse_kernel_security(data.get("kernel_security")),
+    )
+
+
+def _parse_kernel_security(raw: object) -> KernelSecurityInfo | None:
+    """Parse the DEC-500 ``kernel_security`` object, or ``None``.
+
+    A fact of the wrong type is dropped to ``None`` (unknown), never coerced: a
+    string ``"false"`` must not read as a verdict.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    def flag(key: str) -> bool | None:
+        value = raw.get(key)
+        return value if isinstance(value, bool) else None
+
+    lockdown = raw.get("lockdown")
+    return KernelSecurityInfo(
+        secure_boot=flag("secure_boot"),
+        lockdown=lockdown if isinstance(lockdown, str) and lockdown else None,
+        module_sig_enforce=flag("module_sig_enforce"),
+        signed_modules_only=flag("signed_modules_only"),
     )
 
 
@@ -3548,6 +3601,7 @@ def _parse_board_layout(raw: object) -> BoardLayout | None:
             )
         )
     listed = raw.get("listed_boards")
+    expected = raw.get("expected_chips")
     return BoardLayout(
         siv=str(raw.get("siv") or ""),
         platform=str(raw.get("platform") or ""),
@@ -3555,6 +3609,7 @@ def _parse_board_layout(raw: object) -> BoardLayout | None:
         catalogue_commit=str(raw.get("catalogue_commit") or ""),
         listed_boards=[str(b) for b in listed if b] if isinstance(listed, list) else [],
         board_listed=raw.get("board_listed") is True,
+        expected_chips=[str(c) for c in expected if c] if isinstance(expected, list) else [],
         channels=channels,
     )
 

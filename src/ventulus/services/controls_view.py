@@ -41,7 +41,7 @@ from ventulus.ui.fan_presence import (
     FanPresence,
     classify_fan_presence,
 )
-from ventulus.ui.hwmon_guidance import lookup_chip_guidance
+from ventulus.ui.hwmon_guidance import driver_line
 
 # The renew timer never fires slower than this floor, so the daemon deadman is
 # honoured even for a grant advising a sub-second cadence.
@@ -554,6 +554,7 @@ def build_member_candidates(
     capabilities: Capabilities | None,
     display_name,
     fallback_name,
+    kernel_release: str | None = None,
 ) -> list[dict]:
     """Rows for the member-picker: every fan output that may be controlled.
 
@@ -687,10 +688,9 @@ def build_member_candidates(
         tip_parts = [f"ID: {header.id}"]
         if header.chip_name:
             tip_parts.append(f"Chip: {header.chip_name}")
-            g = lookup_chip_guidance(header.chip_name)
-            if g:
-                st = "mainline" if g.in_mainline else g.driver_source
-                tip_parts.append(f"Driver: {g.driver_name} ({st})")
+            driver = driver_line(header.chip_name, kernel_release)
+            if driver:
+                tip_parts.append(f"Driver: {driver}")
         if presence != FanPresence.PRESENT:
             tip_parts.append(PRESENCE_TOOLTIP.get(presence, ""))
 

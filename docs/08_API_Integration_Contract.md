@@ -1510,6 +1510,15 @@ per-chip split stands), except where `bound_driver` is a different module the da
 own answer then replaces the guess (the NCT6687D above reads `true`; an `nct6683` chip bound by
 `nct6687` reads `false`).
 
+**`in_mainline_kernel` follows the running kernel for a chip mainline gained recently
+(DEC-500, daemon ≥ 5.3.0).** One chip has a first mainline release in the daemon's table
+(`chip_db::mainline_since`): the IT8689E, from Linux 7.1. It reads `true` where
+`kernel_release` parses to 7.1 or later and `false` below, so Debian 13 (6.12) and Ubuntu
+26.04 (7.0) still read "needs the out-of-tree driver". Where `kernel_release` is absent or
+does not parse, it reads `false`, as every earlier daemon did. The Super-I/O
+recommendation's `in_mainline` (below) follows the same rule. Every other chip reads
+as before.
+
 #### Environment facts
 
 The facts that tell a driver, kernel or BIOS update apart from a hardware change are
@@ -1521,6 +1530,45 @@ through unparsed), and per `kernel_modules[]` entry `version`, `srcversion` and
 **loaded** module, so an unloaded one is `null` throughout; `out_of_tree: false`
 means the module's taint was read and carries no `O`, while `null` means it could
 not be read, never a guessed in-tree. Render every one as plain text.
+
+#### Kernel security (DEC-500)
+
+`kernel_security` (object, daemon ≥ 5.3.0, **omitted** when the daemon could read none of
+its facts, and on older daemons) says whether the kernel refuses unsigned modules, the
+usual reason an out-of-tree driver that built cleanly will not load. The facts are read
+per request from sysfs, securityfs and efivarfs only. No module is loaded or probed, and
+the packaged unit already mounts all three read-only (`ProtectKernelTunables`), so the
+sandbox is unchanged.
+
+```json
+"kernel_security": {
+  "secure_boot": true, "lockdown": "integrity",
+  "module_sig_enforce": false, "signed_modules_only": true
+}
+```
+
+Each field is omitted where it could not be read, never guessed:
+
+- `secure_boot: bool`: the firmware's `SecureBoot` EFI variable. `false` on a machine
+  booted without EFI, or with EFI but no such variable. Secure Boot refuses nothing by
+  itself: an Arch kernel loads unsigned modules with it on.
+- `lockdown: str`: the active level from `/sys/kernel/security/lockdown`, `"none"`,
+  `"integrity"` or `"confidentiality"` (render an unknown token as text). `"none"` also
+  where securityfs is mounted but the lockdown LSM is not active; omitted where
+  securityfs cannot be read.
+- `module_sig_enforce: bool`: the `module.sig_enforce` parameter. Omitted on a kernel
+  built without module signing, which has no such parameter.
+- `signed_modules_only: bool`: the daemon's verdict, and the one field a client words
+  advice on. `true` when `module_sig_enforce` is on or lockdown is `integrity` or
+  `confidentiality` — the kernel's own two refusals (`module_sig_check`: *Key was
+  rejected by service* and, under lockdown, *Operation not permitted*). `false` when both
+  were read and neither refuses. Omitted when that cannot be decided, which includes a
+  kernel with no `module_sig_enforce` (no signature to check).
+
+The same verdict reaches the Super-I/O advice (below): a chip that needs an out-of-tree
+driver which is not the one loaded gets a `risk_notes` entry naming the refusal and the
+MOK enrolment, and the `superio_driver_unloaded` readiness item's `detail` gains a
+sentence saying so.
 
 **No flag marks the DEC-405 change.** DEC-405 corrected what a sweep's `settled_ms`/`stability`
 and discovery's noise floor *mean* without adding a capability flag, so a client that relies
@@ -1581,6 +1629,11 @@ and the GUI parser defaults to `[]`:
   beside `chip_name` in the support bundle's `hardware_diagnostics.hwmon.chips`
   objects and the PWM Test Report's `environment.chips` (DEC-473);
   `wire_fields.json` pins the struct in both repos.
+  **Empty here, the board layout's list stands in** (DEC-500, daemon ≥ 5.3.0):
+  `board_layout.expected_chips` (below) is what a Gigabyte board's firmware layout
+  expects, and the GUI reads it only where this list is empty, so a board both list
+  raises one warning. The curated list wins: it is checked per board, and only it says
+  which chips are fanless.
 - `expected_fanless_chips: list[str]` (daemon ≥ 3.7.0, additive, same
   omit-when-empty rule): the chips in `expected_chips` that carry **no fan
   header** on this board, from the same curated row (today the B450 AORUS PRO's
@@ -1758,6 +1811,16 @@ does not.
   says "names not currently known"). `board_listed`: whether this board's DMI
   `board_name` is one of them (ASCII case-insensitive, trimmed). The names apply
   whether or not it is: the layout, not the name, is the key.
+- `expected_chips` (omitted when empty, daemon ≥ 5.3.0): the chips this layout says
+  the board exposes, primary first, in `chip_name` form (`["it8696", "it87952"]`).
+  Where the layout has blocks for two primaries (the X570S layouts' IT8688E and
+  IT8689E, some Intel layouts' IT8686E and IT8688E), only the one bound is listed,
+  and none when neither is: the firmware ID does not say which one the board
+  carries. The secondary (IT8792E, IT87952E) is listed whatever is bound. Checked
+  against the curated `expected_chips` table, the two agree on 101 of the 103 boards
+  both know. The two that differ are the B450 AORUS PRO boards, where this list
+  omits the fanless IT8792E the table has. A client uses it only where the
+  top-level `expected_chips` is empty (above).
 - `channels` (omitted when empty), sorted by `id`: one entry per **discovered**
   channel the catalogue covers **and whose driver published no label** (a header
   whose `label` is the synthesised `pwmN`, a monitor-only fan whose label is
@@ -2411,6 +2474,17 @@ Fields (`responses.rs::SuperIoResponse`; additive fields use
   `recommendation: SuperIoRecommendation?` (present only for an unbound,
   allowlisted chip: `module`, `in_mainline`, `load_hint`, `reason`,
   `risk_notes: list[str]`), and `caveats: list[str]`.
+  Since DEC-500 (daemon ≥ 5.3.0) `in_mainline` follows the running kernel as
+  `in_mainline_kernel` does (an IT8689E on 7.1 or later reads `true`, and gets a
+  risk note saying frankcrawford/it87 is optional there and what it still adds).
+  Where the loaded `it87` is the kernel's own (its taint read, with no `O`; an
+  unreadable taint claims neither) and cannot drive the chip, the
+  `load_hint` names the likely cause: a kernel update the out-of-tree DKMS build
+  did not follow, with `dkms status` and `sudo dkms autoinstall`. Where
+  `kernel_security.signed_modules_only` is `true` and the chip needs an
+  out-of-tree driver that is not the one loaded, `risk_notes` carries the signing
+  note. A chip found by the active port probe gets the same notes. All of it is
+  prose for display.
 - `acpi_conflict_drivers: list[str]`: driver names whose ISA I/O range collides
   with an ACPI OperationRegion (omitted when empty).
 - `notes: list[str]`: report-level notes; on x86 always includes the honest

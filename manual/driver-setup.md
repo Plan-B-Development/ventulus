@@ -193,6 +193,24 @@ cd nct6687d && git pull && make dkms/install
 
 On Arch, the `pull` updates the recipe; `makepkg` fetches the driver's latest source itself, and `-f` rebuilds even when nothing upstream has changed, which is what a reinstall needs. The `.deb` that `make deb` builds is versioned by its build time, so the `*` matches every build so far and `dpkg` installs the newest last.
 
+### After a kernel update
+
+DKMS builds the driver once for each kernel. If that build failed for a new kernel, or the new kernel's headers were not installed, the new kernel boots with its **own** `it87`. On most Gigabyte boards the kernel's own driver cannot drive the main chip, so fan headers disappear after the update. Ventulus spots it: the missing-chip warning says *The it87 driver loaded is the kernel's own*, and the Hardware page's Super-I/O row gives the commands below.
+
+```bash
+dkms status               # which kernels the driver is built and installed for
+sudo dkms autoinstall     # build it for the running kernel (its headers must be installed)
+sudo systemctl reboot
+```
+
+If `dkms status` shows the build failed, install the headers for the running kernel (Step 2) and run `sudo dkms autoinstall` again. Ventulus cannot check DKMS for you: the daemon is not allowed to read the DKMS tree, so these commands are yours to run.
+
+### IT8689E: the kernel's own driver, from Linux 7.1
+
+The IT8689E is the one Gigabyte primary chip the kernel's own `it87` drives, from **Linux 7.1**. Fedora 43 to 45, Arch and CachyOS ship 7.1 or later. Debian 13 (6.12) and Ubuntu 26.04 (7.0) do not, so there the out-of-tree driver is still needed. Ventulus reads the kernel you are running and marks the chip accordingly.
+
+On 7.1 or later the out-of-tree driver is optional, but still worth it on most boards: only it publishes the board's Gigabyte layout ID, which [board header names](hardware-troubleshooting.md#board-header-names-from-the-it87-catalogue) need, and only it has the fix for boards where fan writes have no effect ([PR #128](https://github.com/frankcrawford/it87/pull/128)). Whichever driver you run, check a header with **Test PWM Control**.
+
 ### it87 v2.0 renames your chips
 
 Builds of the it87 driver made on or after **2026-09-09** (the driver's v2.0 release,
@@ -230,7 +248,7 @@ sensors
 
 (`sensors` comes from the lm-sensors package. If the command is missing, install it: `sudo pacman -S lm_sensors` on Arch, `sudo apt install lm-sensors` on Debian and Ubuntu, `sudo dnf install lm_sensors` on Fedora.)
 
-If `modprobe` fails with *Key was rejected by service* (or a lockdown "unsigned module" error), Secure Boot is blocking the unsigned module. See [Secure Boot and DKMS modules](#secure-boot-and-dkms-modules) below.
+If `modprobe` fails with *Key was rejected by service*, or with *Operation not permitted* and a lockdown "unsigned module loading is restricted" line in the kernel log, your kernel is refusing the unsigned module. See [Secure Boot and DKMS modules](#secure-boot-and-dkms-modules) below.
 
 Boot-time loading: `ventulusd` (every package format, and its tarball) ships `/etc/modules-load.d/ventulus.conf`, which loads `nct6775`, `it87`, `w83627ehf` and `drivetemp` at boot, so `it87` is handled. `nct6687` is not in it: the `/etc/modules-load.d/nct6687.conf` from Step 3 is what loads it.
 
@@ -248,8 +266,13 @@ With UEFI **Secure Boot** enabled, the kernels of Debian, Ubuntu and Fedora load
 ```text
 modprobe: ERROR: could not insert 'it87': Key was rejected by service
 modprobe: ERROR: could not insert 'it87': Required key not available
+modprobe: ERROR: could not insert 'it87': Operation not permitted
 Lockdown: modprobe: unsigned module loading is restricted
 ```
+
+The first comes from module signature enforcement (`module.sig_enforce`), the third from kernel lockdown, with the last line in the kernel log beside it. Distributions turn one of them on when they boot with Secure Boot. Secure Boot alone refuses nothing: an Arch kernel loads unsigned modules with it on.
+
+**Ventulus checks this for you.** The readiness report (**System State** → **Open Full Report**) has a **Module signing** line: Secure Boot, the lockdown level, `module.sig_enforce`, and whether this kernel refuses unsigned drivers. When it does, and a driver your board needs is not loaded, the missing-chip warning and the Hardware page's driver advice say so.
 
 (The "Key was rejected by service" wording in the wild: [Arch forums thread](https://bbs.archlinux.org/viewtopic.php?id=283289). That case was an NVIDIA module, but the kernel emits the same error for any unsigned module.)
 
@@ -259,6 +282,9 @@ Check whether Secure Boot is the cause:
 bootctl status | grep -i "secure boot"   # systemd tool, present on every Arch/CachyOS install
 # or
 mokutil --sb-state                       # needs the mokutil package
+# What actually refuses: [integrity] or [confidentiality] here, or Y below, means signed only
+cat /sys/kernel/security/lockdown
+cat /sys/module/module/parameters/sig_enforce
 ```
 
 **On Debian, Ubuntu and Fedora,** DKMS signs the driver as it builds it, and prints the certificate it used (`Public certificate (MOK): …`): `/var/lib/dkms/mok.pub`, or `/var/lib/shim-signed/mok/MOK.der` on Ubuntu. Enroll that file once, then reboot:

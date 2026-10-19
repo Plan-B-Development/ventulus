@@ -319,6 +319,8 @@ class DiagnosticsService(QObject):
             # DEC-500: the layout follows the latest read, unlike the board
             # identity above — a driver reload can publish or withdraw the SIV.
             self._state.set_board_layout(result.board_layout)
+            if result.kernel_release:
+                self._state.kernel_release = result.kernel_release
         # Last, so a listener reads the cache, its time and the board together.
         self.hw_diagnostics_changed.emit()
 

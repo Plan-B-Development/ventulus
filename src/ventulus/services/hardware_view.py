@@ -16,6 +16,7 @@ real per-chip fields (no fabricated per-channel/address/poll-age columns).
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 
@@ -23,6 +24,7 @@ from ventulus.api.models import HardwareReadiness, SuperIoReport
 from ventulus.knowledge.driver_install import install_guide
 from ventulus.knowledge.sensor_knowledge import EC_TEMP_PROBE_NOTE
 from ventulus.ui.cooling_readiness import GROUP_ORDER, build_readiness_items, group_for
+from ventulus.ui.hwmon_guidance import pretty_chip
 from ventulus.ui.readiness_merge import MergedReadinessItem
 from ventulus.ui.widgets.inventory_readiness_view import _AUTO_EXPAND_RANK, _severity_chip
 
@@ -142,7 +144,7 @@ class RecommendedActionVM:
 class CommandBlockVM:
     """One copyable block of shell commands, with its heading (DEC-499)."""
 
-    key: str  # objectName part: "Install" or "Update"
+    key: str  # objectName part: "Install", "Update" or "Rebuild"
     title: str
     commands: str
     button_label: str
@@ -376,8 +378,18 @@ def _install_steps(
         return (install, update), all_notes
     project = guide.driver.project
     if guide.driver.in_kernel_namesake:
+        # DEC-500: the in-kernel one is loaded after a kernel update whose DKMS
+        # rebuild failed — the likeliest case, and one a first install does not
+        # fix.
+        rebuild = CommandBlockVM(
+            "Rebuild",
+            f"Installed {project} before a kernel update? Build it for this kernel, then reboot:",
+            guide.rebuild_text,
+            "Copy rebuild commands",
+        )
         return (
             replace(update, title=f"Already running {project}? Update it:"),
+            rebuild,
             replace(install, title=f"Still on the in-kernel {module}? {guide.title}:"),
         ), all_notes
     return (replace(update, title=f"{project} is loaded. To update it:"),), guide.notes
@@ -760,6 +772,9 @@ class BoardLayoutPanelVM:
     listing_text: str = ""
     #: What the catalogue names on this board, by kind.
     coverage_text: str = ""
+    #: The chips the layout expects and whether each was found (DEC-500); the
+    #: missing-chip warning itself is on the System State page, once.
+    chips_text: str = ""
     #: Source and commit.
     source_text: str = ""
     rows: tuple[BoardLayoutRowVM, ...] = ()
@@ -776,12 +791,34 @@ def _board_channel_text(channel_id: str, kind: str) -> str:
     return f"{parts[1]} {token}"
 
 
-def build_board_layout_panel(layout, *, board_name: str) -> BoardLayoutPanelVM:
+def _board_chips_text(expected: list[str], detected: Sequence[str]) -> str:
+    """ "This layout expects IT8696E (found) and IT87952E (not found)." — or "".
+
+    States what was found and points at the one place the warning lives, so the
+    panel never becomes a second missing-chip warning.
+    """
+    if not expected:
+        return ""
+    found = {c.lower() for c in detected}
+    parts = [
+        f"{pretty_chip(c)} ({'found' if c.lower() in found else 'not found'})" for c in expected
+    ]
+    listed = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + f" and {parts[-1]}"
+    text = f"This layout expects {listed}."
+    if any(c.lower() not in found for c in expected):
+        text += " The System State page says what a missing chip costs and how to get it back."
+    return text
+
+
+def build_board_layout_panel(
+    layout, *, board_name: str, detected_chips: Sequence[str] = ()
+) -> BoardLayoutPanelVM:
     """The Hardware page's Board layout panel from ``HardwareDiagnosticsResult.board_layout``.
 
     ``layout`` is ``None`` on every board without a GIGABYTE SIV, and the panel
     is then hidden rather than explaining an absence most boards have.
-    ``board_name`` is the DMI board name, for the listing sentence.
+    ``board_name`` is the DMI board name, for the listing sentence;
+    ``detected_chips`` the ``hwmon.chips_detected`` names, for the chips line.
     """
     if layout is None:
         return BoardLayoutPanelVM(has_layout=False)
@@ -838,6 +875,7 @@ def build_board_layout_panel(layout, *, board_name: str) -> BoardLayoutPanelVM:
         title_text=title,
         listing_text=listing,
         coverage_text=coverage,
+        chips_text=_board_chips_text(list(layout.expected_chips), detected_chips),
         source_text=_board_source_text(layout),
         rows=rows,
         footnote=_BOARD_LAYOUT_FOOTNOTE,

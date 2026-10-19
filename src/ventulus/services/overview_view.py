@@ -46,7 +46,7 @@ from ventulus.ui.fan_presence import (
     FanPresence,
     classify_fan_presence,
 )
-from ventulus.ui.hwmon_guidance import lookup_chip_guidance
+from ventulus.ui.hwmon_guidance import driver_line
 
 # ─── Display maps (extracted from diagnostics_page.py) ─────────────────────
 
@@ -245,6 +245,7 @@ def fan_row_tooltip(
     headers: list[HwmonHeader],
     caps: Capabilities | None,
     presence: FanPresence | None = None,
+    kernel_release: str | None = None,
 ) -> str:
     """Multi-line fan-row tooltip (chip/driver + control-method context).
 
@@ -266,10 +267,9 @@ def fan_row_tooltip(
         if header:
             if header.chip_name:
                 parts.append(f"Chip: {escape(header.chip_name, quote=False)}")
-            g = lookup_chip_guidance(header.chip_name) if header.chip_name else None
-            if g:
-                status = "mainline" if g.in_mainline else g.driver_source
-                parts.append(f"Driver: {g.driver_name} ({status})")
+            driver = driver_line(header.chip_name, kernel_release) if header.chip_name else None
+            if driver:
+                parts.append(f"Driver: {driver}")
             mode = {0: "DC", 1: "PWM"}.get(header.pwm_mode if header.pwm_mode is not None else -1)
             if mode:
                 parts.append(f"PWM mode: {mode}")
@@ -581,6 +581,7 @@ def build_fan_rows(
     caps: Capabilities | None,
     display_name: Callable[[str], str],
     freshness: Callable[[FanReading], Freshness] = default_reading_freshness,
+    kernel_release: str | None = None,
 ) -> list[FanRowVM]:
     """Mirror of `_on_fans`: displayable fans + synthesized PWM-only header rows.
 
@@ -610,7 +611,7 @@ def build_fan_rows(
                 pwm_text=str(f.last_commanded_pwm) if f.last_commanded_pwm is not None else "—",
                 freshness_label=freshness(f).value,
                 freshness_state=_FRESHNESS_STATE.get(freshness(f), "neutral"),
-                row_tooltip=fan_row_tooltip(f, headers, caps, presence),
+                row_tooltip=fan_row_tooltip(f, headers, caps, presence, kernel_release),
                 is_pwm_only=False,
             )
         )

@@ -28,6 +28,7 @@ from ..api.models import (
 from ..ui.hwmon_guidance import (
     dual_chip_firmware_counts,
     dual_chip_verify_hint,
+    expected_board_chips,
     verification_guidance,
 )
 from .verify_evidence import VerifyEvidence, gpu_verify_evidence, hwmon_verify_evidence
@@ -373,8 +374,10 @@ def build_verify_result_view(
     if diagnostics is not None:
         firmware_fans, reachable = dual_chip_firmware_counts(diagnostics)
         board_vendor = diagnostics.board.vendor
-        expected_chips = list(diagnostics.expected_chips)
-        fanless_chips = list(diagnostics.expected_fanless_chips)
+        # DEC-500: the board table, else the board catalogue's layout.
+        expected = expected_board_chips(diagnostics)
+        expected_chips = expected.chips
+        fanless_chips = expected.fanless
         detected = [c.chip_name for c in diagnostics.hwmon.chips_detected]
 
     guidance = verification_guidance(result.result, board_vendor, chip_name)

@@ -229,6 +229,11 @@ class AppState(QObject):
         # /inventory/hwmon, never on /fans, so no fan surface shows them.)
         self.board_layout: BoardLayout | None = None
         self.board_channel_names: dict[str, str] = {}
+        # DEC-500: the kernel the daemon runs on (`kernel_release`), from the
+        # same read, so a chip's driver tooltip follows it (an IT8689E is
+        # mainline from 7.1). Kept across a read that lacks it: the kernel does
+        # not change mid-session.
+        self.kernel_release: str | None = None
 
         # Per-sensor session min/max tracker (resets on reconnect)
         self.session_stats = SessionStatsTracker()

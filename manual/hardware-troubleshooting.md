@@ -122,7 +122,10 @@ Open the **System State** page:
 Open the **System State** page. If a *Super-I/O chip not enumerated* card (the
 dual-chip warning) sits under the **System Health Overview**, your motherboard is one
 of the Gigabyte boards with two ITE chips (X870E AORUS MASTER, X670E AORUS MASTER,
-Z790 AORUS MASTER and others), and one of them did not appear.
+Z790 AORUS MASTER and others), and one of them did not appear. Ventulus knows which
+chips to expect from its own list of boards or, for a Gigabyte board that list does
+not include, from the board's firmware layout. When the layout was the source, the
+warning says so and names it.
 
 **Case A: the driver is not loaded.** Run `sudo dmesg | grep -i it87` (or
 `journalctl -k -b | grep -i it87`). Each chip the driver found prints a line such as
@@ -132,6 +135,24 @@ Z790 AORUS MASTER and others), and one of them did not appear.
 1. Install the `frankcrawford/it87` driver (see [Driver Setup](driver-setup.md#step-3--install-the-driver)). Current builds reach
    the secondary chip's extra headers through MMIO, which is on by default.
 2. Reboot, then click **Rescan Hardware**.
+
+**Case A1: the kernel's own it87 is loaded.** The warning then says *The it87 driver
+loaded is the kernel's own, and it cannot drive* the missing chip. The kernel ships an
+`it87` too, and it drives only some of these chips. If you had installed the
+out-of-tree driver, a kernel update is the usual cause: DKMS builds the driver once
+for each kernel, and when that build failed, or the new kernel's headers were not
+installed, the new kernel booted with its own `it87`.
+
+1. Run `dkms status`. It lists each kernel the driver is built and installed for.
+   If it lists nothing for `it87`, the driver was never installed: go to Case A.
+2. Install the headers for the kernel you are running
+   ([Driver Setup, Step 2](driver-setup.md#step-2--prerequisites-dkms--kernel-headers)), then
+   build the driver for it: `sudo dkms autoinstall`.
+3. Reboot, then click **Rescan Hardware**.
+
+If loading it then fails with *Key was rejected by service* or *Operation not
+permitted*, your kernel only loads signed drivers. The warning says so when the daemon
+can tell. See [Secure Boot and DKMS modules](driver-setup.md#secure-boot-and-dkms-modules).
 
 **Case A2: an Intel Z890 / B860 board on a 2026-09 driver build.** If `modprobe it87`
 fails with *Invalid argument* after a line like `H2RAM set_slot(1,…) failed: -22`, or

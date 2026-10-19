@@ -167,11 +167,12 @@ System State page shows this guidance on MSI boards whose `board_name` contains
 
 ### LGA1700 (Z690 / Z790 AORUS)
 
-**Primary chip:** the ITE **IT8689E** on Z690 / Z790 AORUS boards. The out-of-tree
-`frankcrawford/it87` driver (DKMS) is recommended. Mainline `it87` gained IT8689E fan
-*control* in kernel 7.1 (commit `66b8eaf`), but the DKMS build stays the safe choice on
-the 6.12 / 6.18 LTS kernels most distributions ship, and only it handles the extra
-curve vectors that overrode manual mode before its PR #128.
+**Primary chip:** the ITE **IT8689E** on Z690 / Z790 AORUS boards. Mainline `it87`
+drives it, fan *control* included, from kernel 7.1 (commit `66b8eaf`). Below 7.1, which
+includes Debian 13 (6.12) and Ubuntu 26.04 (7.0), the out-of-tree `frankcrawford/it87`
+driver (DKMS) is needed. On 7.1 or later it is optional but still recommended: only it
+publishes the board's GIGABYTE layout ID, which board header names need, and only it
+handles the extra curve vectors that overrode manual mode before its PR #128.
 
 **Secondary chip:** an **IT87952E** on the Z690 AORUS PRO / MASTER and the Z790 AORUS
 MASTER / XTREME / PRO X (on the Z790 AORUS MASTER at `0x0b10`, not `0x0a60`). The

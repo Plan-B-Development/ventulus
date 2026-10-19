@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from html import escape
-from typing import Any
+from typing import Any, NamedTuple
 
 from ventulus.knowledge.driver_install import package_hint, update_hint
 
@@ -146,12 +146,66 @@ def advisory_detail_html(details: list[str]) -> str:
 class ChipGuidance:
     chip_prefix: str
     driver_name: str
+    #: Whether the kernel's own driver drives the chip — on a kernel older than
+    #: :attr:`mainline_since` where that is set. Read it through
+    #: :func:`chip_in_mainline`, which knows the running kernel.
     in_mainline: bool
     driver_source: str
     driver_url: str
     bios_tips: list[str] = field(default_factory=list)
     known_issues: list[str] = field(default_factory=list)
     notes: str = ""
+    #: The first kernel ``(major, minor)`` whose own driver drives the chip, for
+    #: a chip the kernels people run may predate (DEC-500: IT8689E, 7.1). The
+    #: daemon's ``chip_db::mainline_since`` holds the same fact.
+    mainline_since: tuple[int, int] | None = None
+
+
+def kernel_version(release: str | None) -> tuple[int, int] | None:
+    """``(major, minor)`` of a kernel release (``"7.2.10-1-cachyos"`` → ``(7, 2)``),
+    or ``None`` when absent or unparsable — the daemon's ``parse_kernel_version``
+    reading."""
+    if not release:
+        return None
+    head = ""
+    for ch in release.strip():
+        if not (ch.isdigit() or ch == "."):
+            break
+        head += ch
+    parts = head.split(".")
+    try:
+        return int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def driver_line(chip_name: str, kernel_release: str | None) -> str | None:
+    """``"it87 (mainline)"`` or ``"it87 (frankcrawford/it87)"`` — the driver a
+    chip needs on the kernel running here, for a tooltip; ``None`` for a chip
+    with no guidance entry."""
+    g = lookup_chip_guidance(chip_name)
+    if g is None:
+        return None
+    where = "mainline" if chip_in_mainline(chip_name, kernel_release) else g.driver_source
+    return f"{g.driver_name} ({where})"
+
+
+def chip_in_mainline(chip_name: str, kernel_release: str | None) -> bool:
+    """Whether the kernel running here drives *chip_name* with its own driver.
+
+    The guidance entry's :attr:`ChipGuidance.in_mainline`, except that a chip
+    with a :attr:`ChipGuidance.mainline_since` release is mainline on that
+    kernel or later (DEC-500). An unknown kernel keeps the entry's answer — for
+    the IT8689E, "needs the out-of-tree driver", what it always said. False for
+    a chip with no entry.
+    """
+    guidance = lookup_chip_guidance(chip_name)
+    if guidance is None:
+        return False
+    running = kernel_version(kernel_release)
+    if guidance.mainline_since is not None and running is not None:
+        return running >= guidance.mainline_since
+    return guidance.in_mainline
 
 
 @dataclass(frozen=True)
@@ -615,6 +669,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
         chip_prefix="it8689",
         driver_name="it87",
         in_mainline=False,
+        mainline_since=(7, 1),
         driver_source="frankcrawford/it87",
         driver_url="https://github.com/frankcrawford/it87",
         bios_tips=[
@@ -634,13 +689,15 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             "'acpi_enforce_resources=lax' kernel parameter.",
         ],
         known_issues=[
-            "Mainline it87 gained IT8689E support — six PWM channels — in kernel "
-            "7.1 (commit 66b8eaf, merged 2026-03-31; 7.1 released 2026-06-14). The "
-            "DKMS build is still recommended: the 6.12 / 6.18 LTS kernels most "
-            "people run lack it, mainline has no fix for the extra curve vectors "
-            "that make writes ineffective on some Gigabyte boards, and the "
-            "out-of-tree driver's IT8689E contributor says mainline's "
-            "FEAT_FANCTL_ONOFF flag is wrong for this chip.",
+            "The kernel's own it87 drives the IT8689E — six PWM channels — from "
+            "kernel 7.1 (commit 66b8eaf; 7.1 released 2026-06-14). Fedora 43 to 45 and "
+            "Arch currently ship 7.1 or later; Debian 13 (6.12) and Ubuntu 26.04 "
+            "(7.0) do not, and there the out-of-tree driver is needed. On 7.1 or "
+            "later it is optional: it adds the board's GIGABYTE layout ID, which "
+            "board header names need, and fixes for the extra curve vectors that "
+            "make writes ineffective on some Gigabyte boards (PR #128). Its IT8689E "
+            "contributor also says mainline's FEAT_FANCTL_ONOFF flag is wrong for "
+            "this chip, so check the headers with Test PWM Control on either driver.",
             "Before PR #128, IT8689E boards (Rev 1 especially, e.g. X670E Aorus "
             "Master) accepted PWM writes with zero effect while a normal BIOS "
             "curve was active — the chip's extra vector curves overrode manual "
@@ -1322,23 +1379,40 @@ def lookup_chip_guidance(chip_name: str) -> ChipGuidance | None:
     return best
 
 
-def format_driver_status(chip_name: str, loaded: bool) -> str:
-    """Human-readable one-liner for driver load state."""
+def format_driver_status(
+    chip_name: str,
+    loaded: bool,
+    kernel_release: str | None = None,
+    *,
+    in_mainline: bool | None = None,
+) -> str:
+    """Human-readable one-liner for driver load state, for the kernel running
+    here (*kernel_release*, the daemon's ``kernel_release``; DEC-500).
+
+    *in_mainline*, where given, is the daemon's per-chip answer
+    (``in_mainline_kernel``) and wins, so a row's status cannot contradict the
+    Mainline column beside it on any daemon.
+    """
     guidance = lookup_chip_guidance(chip_name)
     if guidance is None:
         return f"Unknown chip '{chip_name}' — driver status unavailable"
 
-    if loaded and guidance.in_mainline:
+    mainline = chip_in_mainline(chip_name, kernel_release) if in_mainline is None else in_mainline
+    if loaded and mainline:
         return f"{guidance.driver_name} loaded (mainline kernel)"
-    if loaded and not guidance.in_mainline:
+    if loaded and not mainline:
         return f"{guidance.driver_name} loaded (out-of-tree: {guidance.driver_source})"
-    if not loaded and guidance.in_mainline:
+    if not loaded and mainline:
         return f"{guidance.driver_name} not loaded — try: sudo modprobe {guidance.driver_name}"
     return f"{guidance.driver_name} not loaded — install {package_hint(guidance.driver_name)}"
 
 
 def format_bound_driver_status(
-    chip_name: str, bound_driver: str, in_mainline: bool, loaded_modules: set[str]
+    chip_name: str,
+    bound_driver: str,
+    in_mainline: bool,
+    loaded_modules: set[str],
+    kernel_release: str | None = None,
 ) -> str:
     """One-liner for a chip whose bound driver the daemon observed (DEC-469).
 
@@ -1353,8 +1427,14 @@ def format_bound_driver_status(
     where = "mainline kernel" if in_mainline else "out-of-tree"
     text = f"{bound_driver} bound ({where})"
     guidance = lookup_chip_guidance(chip_name)
-    if guidance is not None and not guidance.in_mainline and guidance.driver_name != bound_driver:
-        text += ". " + format_driver_status(chip_name, guidance.driver_name in loaded_modules)
+    if (
+        guidance is not None
+        and not chip_in_mainline(chip_name, kernel_release)
+        and guidance.driver_name != bound_driver
+    ):
+        text += ". " + format_driver_status(
+            chip_name, guidance.driver_name in loaded_modules, kernel_release
+        )
     return text
 
 
@@ -2829,6 +2909,98 @@ def _pretty_chip(chip: str) -> str:
     return _CHIP_PRETTY_NAMES.get(chip.lower(), chip.upper())
 
 
+def pretty_chip(chip: str) -> str:
+    """A chip's marketing name (``it87952`` → ``IT87952E``), for display."""
+    return _pretty_chip(chip)
+
+
+#: How the loaded ``it87`` stands, from ``KernelModuleInfo`` (DEC-500): the
+#: dual-chip warning's driver paragraph depends on it.
+IT87_NOT_LOADED = "not_loaded"
+IT87_IN_TREE = "in_tree"
+IT87_OUT_OF_TREE = "out_of_tree"
+#: Loaded, with the out-of-tree flag unread (an older daemon), or no entry.
+IT87_UNKNOWN = ""
+
+
+def it87_state(kernel_modules: list[Any]) -> str:
+    """The loaded ``it87``'s state from ``HardwareDiagnosticsResult.kernel_modules``.
+
+    The daemon reads the kernel's ``O`` taint (DEC-405): ``out_of_tree`` is
+    ``True`` for a build from outside the kernel tree, ``False`` for the
+    kernel's own, ``None`` when it could not say — which stays unknown here.
+    """
+    for m in kernel_modules or ():
+        if getattr(m, "name", "") != "it87":
+            continue
+        if not getattr(m, "loaded", False):
+            return IT87_NOT_LOADED
+        out_of_tree = getattr(m, "out_of_tree", None)
+        if out_of_tree is True:
+            return IT87_OUT_OF_TREE
+        if out_of_tree is False:
+            return IT87_IN_TREE
+        return IT87_UNKNOWN
+    return IT87_UNKNOWN
+
+
+def in_tree_cannot_drive(missing: list[str], it87: str, kernel_release: str | None) -> list[str]:
+    """The missing chips the loaded kernel's own ``it87`` cannot drive, in
+    order (DEC-500) — empty unless the loaded ``it87`` is the kernel's own.
+    Then the out-of-tree build is what is missing, not the chip."""
+    if it87 != IT87_IN_TREE:
+        return []
+    return [c for c in missing if not chip_in_mainline(c, kernel_release)]
+
+
+def in_tree_rebuild_html(chips: list[str]) -> str:
+    """The driver paragraph when the kernel's own ``it87`` is loaded and cannot
+    drive *chips* (DEC-500): the missed DKMS rebuild is the usual cause. The
+    daemon's ``superio::IN_TREE_REBUILD_CAUSE`` says the same."""
+    names = ", ".join(f"<b>{escape(_pretty_chip(c))}</b>" for c in chips)
+    return (
+        f"<b>The it87 driver loaded is the kernel's own, and it cannot drive "
+        f"{names}.</b> That needs the out-of-tree driver. If you had installed it, "
+        f"the usual cause is a kernel update its DKMS build did not follow: the "
+        f"rebuild for the new kernel failed, or that kernel's headers were not "
+        f"installed, so it kept its own driver. <code>dkms status</code> lists the "
+        f"kernels the build is installed for, and <code>sudo dkms autoinstall</code> "
+        f"builds it for the running kernel once that kernel's headers are installed; "
+        f"then reboot and click <i>Rescan Hardware</i> (in the footer). If you never "
+        f"installed it, install {escape(package_hint('it87'))} and reboot.<br><br>"
+    )
+
+
+def signing_applies(
+    missing: list[str], it87: str, kernel_release: str | None, signed_modules_only: bool | None
+) -> bool:
+    """Whether the signing cause belongs beside these missing chips (DEC-500): the
+    kernel refuses unsigned modules, the out-of-tree it87 is not the one loaded,
+    and some missing chip needs it on this kernel. The daemon's Super-I/O note
+    (``superio::kernel_risk_notes``) applies the same three conditions."""
+    return (
+        signed_modules_only is True
+        and it87 != IT87_OUT_OF_TREE
+        and any(not chip_in_mainline(c, kernel_release) for c in missing)
+    )
+
+
+def signed_driver_html() -> str:
+    """The paragraph for a kernel that refuses unsigned modules (DEC-500), from
+    the kernel's two refusals: ``sig_enforce`` and lockdown. The daemon's
+    ``superio::signed_modules_note`` says the same."""
+    return (
+        "<b>Your kernel only loads signed drivers</b> (module signature enforcement "
+        "or lockdown is on, as distributions usually set it under Secure Boot). An "
+        "out-of-tree it87 that is unsigned, or signed with a key this machine has not "
+        "enrolled, is refused: <code>sudo modprobe it87</code> reports <i>Key was "
+        "rejected by service</i> or <i>Operation not permitted</i>. DKMS signs the "
+        "driver as it builds it and prints the certificate it used; enrol it once "
+        "with <code>sudo mokutil --import &lt;file&gt;</code>, reboot, and choose "
+        "<i>Enroll MOK</i> in the MOK Manager screen.<br><br>"
+    )
+
+
 def dual_chip_firmware_counts(diag: Any) -> tuple[int | None, int | None]:
     """``(firmware_fan_count, reachable_fan_count)`` from a
     ``HardwareDiagnosticsResult``, for every dual-chip consumer (``X87-d``).
@@ -2846,6 +3018,35 @@ def dual_chip_firmware_counts(diag: Any) -> tuple[int | None, int | None]:
     if firmware is None:
         return None, None
     return firmware.fan_count, diag.hwmon.total_headers
+
+
+class ExpectedChips(NamedTuple):
+    """The chips this board is expected to expose, and where that came from."""
+
+    chips: list[str]
+    #: The chips among them that carry no fan header (`BRD-j`).
+    fanless: list[str]
+    #: The SIV when the board catalogue's layout supplied the list, else ``""``.
+    layout_siv: str
+
+
+def expected_board_chips(diag: Any) -> ExpectedChips:
+    """The one reading of "which chips should this board have" (DEC-500).
+
+    The curated board table (``expected_chips``) wins wherever it lists the
+    board: it is checked per board, and only it says which chips are fanless.
+    Otherwise the board catalogue's layout for the board's SIV
+    (``board_layout.expected_chips``), so a board the table does not list still
+    gets the missing-chip warning — once, whichever source found it. Every
+    consumer — the warning, its fan-loss wording, the verify hint and the
+    acknowledgement fingerprint — reads it here, so they cannot disagree.
+    """
+    if diag.expected_chips:
+        return ExpectedChips(list(diag.expected_chips), list(diag.expected_fanless_chips), "")
+    layout = getattr(diag, "board_layout", None)
+    if layout is not None and layout.expected_chips:
+        return ExpectedChips(list(layout.expected_chips), [], layout.siv)
+    return ExpectedChips([], [], "")
 
 
 def missing_dual_chips(expected_chips: list[str], detected_chip_names: list[str]) -> list[str]:
@@ -2892,6 +3093,10 @@ def dual_chip_warning_html(
     firmware_fan_count: int | None = None,
     reachable_fan_count: int | None = None,
     fanless_chips: list[str] | None = None,
+    layout_siv: str = "",
+    it87: str = IT87_UNKNOWN,
+    kernel_release: str | None = None,
+    signed_modules_only: bool | None = None,
 ) -> str | None:
     """Return rich-text HTML for the dual-chip board warning, or None.
 
@@ -2968,6 +3173,16 @@ def dual_chip_warning_html(
     heading says the fan headers are unaffected and names the loss as
     temperatures and voltages. The recovery ladder stays: it brings those
     readings back.
+
+    **Where the expectation came from, and what the driver is** (DEC-500).
+    ``layout_siv`` is set when ``expected_chips`` came from the board
+    catalogue's layout for the board's SIV rather than the curated board table,
+    and the copy says so. ``it87`` is :func:`it87_state`: where the loaded it87
+    is the kernel's own and cannot drive a missing chip
+    (:func:`in_tree_cannot_drive`, for ``kernel_release``), the chip is not
+    latched — the out-of-tree build is missing — so the driver paragraph names
+    the missed DKMS rebuild and the ladder is for after that. Where
+    :func:`signing_applies`, a paragraph says the kernel refuses unsigned drivers.
     """
     if not expected_chips:
         return None
@@ -3044,22 +3259,50 @@ def dual_chip_warning_html(
     # the pretty-name table, so escape its output before it lands in rich text.
     expected_pretty = ", ".join(f"<b>{escape(_pretty_chip(c))}</b>" for c in expected_chips)
     missing_pretty = ", ".join(f"<b>{escape(_pretty_chip(c))}</b>" for c in missing)
+    source = (
+        f"The expected chips come from the board catalogue's layout "
+        f"<b>{escape(layout_siv)}</b>, which your board's firmware reports, not "
+        f"from a list checked for this board.<br><br>"
+        if layout_siv
+        else ""
+    )
+    cannot_drive = in_tree_cannot_drive(missing, it87, kernel_release)
+    signing = (
+        signed_driver_html()
+        if signing_applies(missing, it87, kernel_release, signed_modules_only)
+        else ""
+    )
+    if cannot_drive:
+        driver_paragraph = in_tree_rebuild_html(cannot_drive) + signing
+        ladder_lead = (
+            "<b>If a chip is still missing once the out-of-tree driver is loaded, "
+            "work down this list, re-checking after each step:</b><br>"
+        )
+    else:
+        driver_paragraph = (
+            f"<b>First, is the driver loaded?</b> Run "
+            f"<code>sudo dmesg | grep -i it87</code>. A healthy chip prints a "
+            f"<i>Found IT8xxxE chip</i> line. No <code>it87</code> lines at all means "
+            f"the out-of-tree driver is not loaded: install "
+            f"{escape(package_hint('it87'))}, "
+            f"reboot, then click <i>Rescan Hardware</i> (in the footer). On an Intel "
+            f"Z890 / B860 board, an <i>H2RAM … failed</i> line, a module that "
+            f"will not load (<i>Invalid argument</i>), or a <i>Found</i> line with "
+            f"no chip appearing, means a driver build from 2026-09-09 to "
+            f"2026-10-01, fixed on 2026-10-02 (it87 PR #140): "
+            f"{escape(update_hint('it87'))} and reboot before the steps below.<br><br>"
+            f"{signing}"
+        )
+        ladder_lead = (
+            "<b>If the driver is loaded and a chip is still missing, work down this "
+            "list, re-checking after each step:</b><br>"
+        )
     chip_summary = (
         f"expected {expected_pretty}; missing {missing_pretty}.<br><br>"
+        f"{source}"
         f"{measured}"
-        f"<b>First, is the driver loaded?</b> Run "
-        f"<code>sudo dmesg | grep -i it87</code>. A healthy chip prints a "
-        f"<i>Found IT8xxxE chip</i> line. No <code>it87</code> lines at all means "
-        f"the out-of-tree driver is not loaded: install "
-        f"{escape(package_hint('it87'))}, "
-        f"reboot, then click <i>Rescan Hardware</i> (in the footer). On an Intel "
-        f"Z890 / B860 board, an <i>H2RAM … failed</i> line, a module that "
-        f"will not load (<i>Invalid argument</i>), or a <i>Found</i> line with "
-        f"no chip appearing, means a driver build from 2026-09-09 to "
-        f"2026-10-01, fixed on 2026-10-02 (it87 PR #140): "
-        f"{escape(update_hint('it87'))} and reboot before the steps below.<br><br>"
-        f"<b>If the driver is loaded and a chip is still missing, work down this "
-        f"list, re-checking after each step:</b><br>"
+        f"{driver_paragraph}"
+        f"{ladder_lead}"
         f"&nbsp;&nbsp;1. Stop whatever is unlocking the Super-I/O: do not run "
         f"<code>sensors-detect</code>, and keep the <code>nct6775</code> / "
         f"<code>w83627ehf</code> modules from loading — they write the unlock "
