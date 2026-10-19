@@ -130,6 +130,7 @@ def _label(no_libsensors, vendor, board, chip, idx):
         board_vendor=vendor,
         board_name=board,
         sensors_paths=no_libsensors,
+        board_label="",
     )
 
 

@@ -16,7 +16,7 @@ def _sensor() -> SensorReading:
 
 def _html(sensor: SensorReading, dc=None) -> str:
     cls = classify_sensor(sensor.chip_name, sensor.label, sensor.temp_type)
-    return build_sensor_detail_html(sensor, None, dc, classification=cls, peers=[])
+    return build_sensor_detail_html(sensor, None, dc, classification=cls, peers=[], board_names={})
 
 
 def test_daemon_classification_section_present():

@@ -138,14 +138,22 @@ def min_pwm_badge(control, floor_roles: Mapping[str, str]) -> MinPwmBadge:
         assigned = {mid for mid, r in by_member.items() if r}
         nouns = sorted({_FLOOR_ROLE_NOUN.get(by_member[mid] or "", "") for mid in assigned} - {""})
         noun = nouns[0] if len(nouns) == 1 else "pump or CPU-fan"
-        tip = (
-            f"Minimum PWM raised to {role_floor:.0f}% because a member's header is "
-            f"assigned the {noun} role."
-        )
-        if "pump" in nouns:
-            tip += f" {role_floor:.0f}% protects the pump from stalling."
+        if not nouns:
+            # DEC-500: only the board-catalogue name floors these members.
+            tip = (
+                f"Minimum PWM raised to {role_floor:.0f}% because the board names a "
+                f"member's header for a CPU fan or pump. The daemon holds it at "
+                f"{role_floor:.0f}% or above."
+            )
         else:
-            tip += f" The daemon holds a CPU fan at {role_floor:.0f}% or above."
+            tip = (
+                f"Minimum PWM raised to {role_floor:.0f}% because a member's header is "
+                f"assigned the {noun} role."
+            )
+            if "pump" in nouns:
+                tip += f" {role_floor:.0f}% protects the pump from stalling."
+            else:
+                tip += f" The daemon holds a CPU fan at {role_floor:.0f}% or above."
         others = [
             m
             for m in members
@@ -153,8 +161,9 @@ def min_pwm_badge(control, floor_roles: Mapping[str, str]) -> MinPwmBadge:
         ]
         if others:
             whom = "member" if len(assigned) == 1 else "members"
+            who = f"the {noun}-assigned {whom}" if nouns else f"that {whom}"
             tip += (
-                f" It applies to the {noun}-assigned {whom}; the other fans in this "
+                f" It applies to {who}; the other fans in this "
                 f"control keep {control.minimum_pct:.0f}%."
             )
     elif role == CONTROL_ROLE_CHASSIS:
@@ -439,7 +448,10 @@ def unlisted_sensor_choice(sensor_id: str, live_name: str | None = None) -> str:
     if live_name:
         return f"{live_name} (not offered as a curve source)"
     label = sensor_id.split(":")[-1] if ":" in sensor_id else sensor_id
-    return f"{sensor_display_name(sensor_id, label, peers=(sensor_id,))} (unavailable)"
+    # No board names: the daemon names only sensors it reports (DEC-500), and
+    # this one is not reported now.
+    name = sensor_display_name(sensor_id, label, peers=(sensor_id,), board_names={})
+    return f"{name} (unavailable)"
 
 
 def default_curve_sensor_id(sensors) -> str:
@@ -451,11 +463,14 @@ def default_curve_sensor_id(sensors) -> str:
     return next((s.id for s in sensors if s.control_eligible), "")
 
 
-def sensor_combo_label(s, overrides: dict, *, peers: Iterable[str]) -> str:
+def sensor_combo_label(
+    s, overrides: dict, *, peers: Iterable[str], board_names: Mapping[str, str]
+) -> str:
     """Curve-editor sensor-combo label, starring coolant + CPU sensors (★) — the
     recommended bindings for AIO/radiator curves (DEC-157). Selection stays free;
     this only highlights. A memory module reads "memory", not "board" (DEC-491);
-    ``peers`` are the ids it is listed among (``sensor_display_name``)."""
+    ``peers`` are the ids it is listed among and ``board_names`` the board
+    catalogue's names (``sensor_display_name``)."""
     val_text = f" — {s.value_c:.1f}°C" if s.value_c is not None else ""
     cls = classify_sensor_with_overrides(
         s.id, chip_name=s.chip_name, label=s.label, overrides=overrides
@@ -469,7 +484,8 @@ def sensor_combo_label(s, overrides: dict, *, peers: Iterable[str]) -> str:
         if cls.source_class in MEMORY_SOURCE_CLASSES
         else _SENSOR_KIND_WORDS.get(s.kind, s.kind)
     )
-    return f"{star}{sensor_display_name(s.id, s.label, peers=peers)} ({word}){val_text}"
+    name = sensor_display_name(s.id, s.label, peers=peers, board_names=board_names)
+    return f"{star}{name} ({word}){val_text}"
 
 
 def role_preserving_label(display_name: str, fallback_label: str, source: str) -> str:
@@ -911,9 +927,10 @@ def build_pump_role_candidates(headers, *, display_name) -> list[dict]:
     return rows
 
 
-def build_sensor_choices(sensors, overrides: dict) -> list[dict]:
+def build_sensor_choices(sensors, overrides: dict, *, board_names: Mapping[str, str]) -> list[dict]:
     """AIO wizard sensor rows, flagging coolant + CPU sensors as ``preferred``
-    (the recommended bindings for a radiator curve, DEC-157).
+    (the recommended bindings for a radiator curve, DEC-157). ``board_names`` as
+    for ``sensor_display_name``.
 
     ``coolant`` is the row's own :func:`sensor_is_coolant` answer, which is what
     the dialog stores as the device's ``coolant_sensor`` (`TS-v`); the page seeds
@@ -927,7 +944,7 @@ def build_sensor_choices(sensors, overrides: dict) -> list[dict]:
         choices.append(
             {
                 "id": s.id,
-                "label": sensor_display_name(s.id, s.label, peers=peers),
+                "label": sensor_display_name(s.id, s.label, peers=peers, board_names=board_names),
                 "preferred": preferred,
                 "coolant": coolant,
             }

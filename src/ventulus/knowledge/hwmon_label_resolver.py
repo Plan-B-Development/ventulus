@@ -17,7 +17,16 @@ Priority (callers should check 1 first):
     2. ``HwmonHeader.label`` (daemon-supplied sysfs)  ← this module
     3. ``/etc/sensors.d/*.conf`` and friends          ← this module
     4. In-repo ``HWMON_LABEL_FALLBACK`` table          ← this module
-    5. raw sensor name (``pwmN``)                      ← this module
+    5. ``HwmonHeader.board_label`` (daemon catalogue) ← this module
+    6. raw sensor name (``pwmN``)                      ← this module
+
+Tier 5 is the daemon's board catalogue (DEC-500): frankcrawford/it87's Gigabyte
+config for the board's SIV, sent only for a header whose driver published no
+label. It sits below the verified in-repo table, which a person checked on the
+board, and above the raw name. The name is shown plain: the daemon classifies the
+header from the same name, so a ``*_PUMP`` here is a pump to its protection and
+an "(unverified)" suffix would describe the evidence, not the header. Where the
+name came from is shown beside it instead (the header inspector and card).
 
 Tier 2 lives here rather than in the caller because the daemon *synthesises*
 ``pwmN`` when the chip exposes no label file, so "non-empty" does not mean
@@ -602,12 +611,21 @@ def is_placeholder_hwmon_label(label: str, pwm_index: int) -> bool:
     return bool(label) and label == f"pwm{pwm_index}"
 
 
+#: Where a header's resolved name came from (:func:`hwmon_header_label_source`).
+LABEL_SOURCE_DRIVER = "driver"
+LABEL_SOURCE_SENSORS_CONF = "sensors_conf"
+LABEL_SOURCE_BOARD_TABLE = "board_table"
+LABEL_SOURCE_BOARD_CATALOGUE = "board_catalogue"
+LABEL_SOURCE_NONE = "none"
+
+
 def resolve_hwmon_header_label(
     *,
     sysfs_label: str,
     chip_name: str,
     sysfs_chip_name: str,
     pwm_index: int,
+    board_label: str,
     board_vendor: str = "",
     board_name: str = "",
     sensors_paths: list[str] | None = None,
@@ -615,13 +633,14 @@ def resolve_hwmon_header_label(
     """Resolve the best display label for a hwmon PWM header.
 
     The caller is responsible for the user-alias check (priority 1).
-    This function covers priorities 2-5:
+    This function covers priorities 2-6:
 
         2. daemon-supplied ``sysfs_label`` (may be empty *or* a synthesised
            ``pwmN`` placeholder — see :func:`is_placeholder_hwmon_label`)
         3. libsensors config lookup, ``pwmN`` and ``fanN`` keys
         4. in-repo fallback table
-        5. raw ``pwmN`` as the last resort
+        5. the daemon's board-catalogue name (DEC-500)
+        6. raw ``pwmN`` as the last resort
 
     Args:
         sysfs_label: ``HwmonHeader.label`` from the daemon (passes
@@ -637,13 +656,73 @@ def resolve_hwmon_header_label(
             falls back to *chip_name*. Required, so a caller cannot silently
             match on the wrong spelling.
         pwm_index: ``HwmonHeader.pwm_index`` (the N in ``pwmN``).
+        board_label: ``HwmonHeader.board_label`` — the daemon's board-catalogue
+            name, ``""`` when it sent none. Required, so a caller cannot drop the
+            tier: the resolved name becomes ``member_label``, which feeds the
+            30 % CPU/pump floor (DEC-228), and the daemon floors and protects the
+            header by this same name. Read only when the driver's own label is
+            absent or synthesised — the daemon sends it only then, and a driver
+            label always wins.
         board_vendor: DMI ``board_vendor`` from
             ``/diagnostics/hardware``. Empty ⇒ skip vendor match.
         board_name: DMI ``board_name``. Empty ⇒ skip name match.
         sensors_paths: Override libsensors search paths (tests only).
     """
+    return _resolve_header_label(
+        sysfs_label=sysfs_label,
+        chip_name=chip_name,
+        sysfs_chip_name=sysfs_chip_name,
+        pwm_index=pwm_index,
+        board_label=board_label,
+        board_vendor=board_vendor,
+        board_name=board_name,
+        sensors_paths=sensors_paths,
+    )[0]
+
+
+def hwmon_header_label_source(
+    *,
+    sysfs_label: str,
+    chip_name: str,
+    sysfs_chip_name: str,
+    pwm_index: int,
+    board_label: str,
+    board_vendor: str = "",
+    board_name: str = "",
+    sensors_paths: list[str] | None = None,
+) -> str:
+    """Which tier :func:`resolve_hwmon_header_label` answers from, as one of the
+    ``LABEL_SOURCE_*`` tokens — the provenance a surface shows beside the name.
+
+    The same walk as the name, never inferred from the answer: two tiers often
+    agree (the board table and the catalogue both say ``CPU_FAN``).
+    """
+    return _resolve_header_label(
+        sysfs_label=sysfs_label,
+        chip_name=chip_name,
+        sysfs_chip_name=sysfs_chip_name,
+        pwm_index=pwm_index,
+        board_label=board_label,
+        board_vendor=board_vendor,
+        board_name=board_name,
+        sensors_paths=sensors_paths,
+    )[1]
+
+
+def _resolve_header_label(
+    *,
+    sysfs_label: str,
+    chip_name: str,
+    sysfs_chip_name: str,
+    pwm_index: int,
+    board_label: str,
+    board_vendor: str,
+    board_name: str,
+    sensors_paths: list[str] | None,
+) -> tuple[str, str]:
+    """``(name, LABEL_SOURCE_*)`` — the one walk of the tiers."""
     if sysfs_label and not is_placeholder_hwmon_label(sysfs_label, pwm_index):
-        return sysfs_label
+        return sysfs_label, LABEL_SOURCE_DRIVER
     pwm_key = f"pwm{pwm_index}"
     fan_key = f"fan{pwm_index}"
     # Tier 3 — libsensors. Communities almost always write fan-N labels
@@ -653,7 +732,7 @@ def resolve_hwmon_header_label(
         sensors_chip, fan_key, paths=sensors_paths
     ) or resolve_label_from_libsensors(sensors_chip, pwm_key, paths=sensors_paths)
     if label:
-        return label
+        return label, LABEL_SOURCE_SENSORS_CONF
     # Tier 4 — fallback table. Its keys are exclusively ``pwm{N}`` (unlike the
     # libsensors tier, communities never key this in-repo table by ``fan{N}``),
     # so a ``fan{N}`` lookup here can never match — query ``pwm{N}`` only. If a
@@ -665,5 +744,8 @@ def resolve_hwmon_header_label(
         sensor_name=pwm_key,
     )
     if label:
-        return label
-    return pwm_key
+        return label, LABEL_SOURCE_BOARD_TABLE
+    # Tier 5 — the daemon's board catalogue (DEC-500).
+    if board_label.strip():
+        return board_label.strip(), LABEL_SOURCE_BOARD_CATALOGUE
+    return pwm_key, LABEL_SOURCE_NONE

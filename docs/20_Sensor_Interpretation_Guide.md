@@ -224,6 +224,19 @@ channel. A board-specific override can name such a channel in the Sensor Detail
 dialog, but it does not change the classification or its confidence (see
 [Board-specific override database](#board-specific-override-database)).
 
+**Board-catalogue names (DEC-500).** On a Gigabyte board whose out-of-tree driver
+publishes the SIV, the daemon names an unlabelled `tempN` from its board catalogue
+(`/diagnostics/hardware .board_layout`): `System 1`, `PCH`, `VRM MOS`, `PCIEX16`,
+`EC_TEMP1`. The GUI shows that name wherever the sensor appears, while the
+driver's own label is still the synthesised `tempN`. It is a **display name
+only**: classification reads the driver's label, so the table above applies
+unchanged and the channel stays a low-confidence `super_io_channel`. A channel
+the catalogue calls `CPU` is the board's socket thermistor as the config names it,
+not the CPU's own sensor; it never becomes a CPU sensor and never feeds the CPU
+thermal emergency, which reads `k10temp`/`coretemp`. An `EC_TEMP` channel is a
+header for an optional thermistor probe: with no probe fitted its reading means
+nothing, and the GUI says so in the row's tooltip.
+
 ### asus_ec_sensors (ASUS embedded controller)
 
 Kernel docs: https://docs.kernel.org/hwmon/asus_ec_sensors.html

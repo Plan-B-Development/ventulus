@@ -396,6 +396,7 @@ class TestBuildSensorChoices:
         rows = build_sensor_choices(
             [_S("s1", "Tctl", "cpu_temp"), _S("s2", "Ambient", "other")],
             overrides={},
+            board_names={},
         )
         by_id = {r["id"]: r for r in rows}
         assert by_id["s1"]["preferred"] is True
@@ -412,6 +413,7 @@ class TestBuildSensorChoices:
         rows = build_sensor_choices(
             [_S("s1", "Coolant", "other")],
             overrides={"s1": "coolant"},
+            board_names={},
         )
         assert rows[0]["preferred"] is True
 

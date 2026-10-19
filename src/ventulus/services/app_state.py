@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from ventulus.api.models import (
     DEFAULT_DAEMON_POLL_INTERVAL_MS,
     BoardInfo,
+    BoardLayout,
     Capabilities,
     ConnectionState,
     CoolingDeviceInventory,
@@ -27,7 +28,10 @@ from ventulus.api.models import (
     SensorReading,
     at_least,
 )
-from ventulus.knowledge.hwmon_label_resolver import resolve_hwmon_header_label
+from ventulus.knowledge.hwmon_label_resolver import (
+    hwmon_header_label_source,
+    resolve_hwmon_header_label,
+)
 from ventulus.knowledge.sensor_knowledge import (
     SensorClassification,
     classify_reading,
@@ -215,6 +219,17 @@ class AppState(QObject):
         # not mean this is unused.
         self.board_info: BoardInfo = BoardInfo()
 
+        # DEC-500: the board's SIV layout and the daemon's board-catalogue names,
+        # from the same /diagnostics/hardware read (`set_board_layout`, written
+        # only by ``DiagnosticsService.set_hw_diagnostics``). Unlike
+        # `board_info` it follows the latest read: a driver reload can publish
+        # or withdraw the SIV. Headers carry their own `board_label` on
+        # /hwmon/headers; this names temperatures. (Its monitor-only fan
+        # entries feed only the Board layout panel: those inputs are on
+        # /inventory/hwmon, never on /fans, so no fan surface shows them.)
+        self.board_layout: BoardLayout | None = None
+        self.board_channel_names: dict[str, str] = {}
+
         # Per-sensor session min/max tracker (resets on reconnect)
         self.session_stats = SessionStatsTracker()
 
@@ -358,6 +373,20 @@ class AppState(QObject):
     def set_hwmon_headers(self, headers: list[HwmonHeader]) -> None:
         self.hwmon_headers = headers
         self.headers_updated.emit(headers)
+
+    def set_board_layout(self, layout: BoardLayout | None) -> None:
+        """Record the DEC-500 board layout and index its names by published id.
+
+        ``board_channel_names`` maps a channel id to the board's name for it —
+        the ``board_names`` every ``sensor_display_name`` call passes. Unmapped
+        channels carry no name and are not in it.
+        """
+        self.board_layout = layout
+        self.board_channel_names = (
+            {c.id: c.board_label for c in layout.channels if c.board_label}
+            if layout is not None
+            else {}
+        )
 
     def request_hw_diagnostics_refresh(self) -> None:
         """Ask the live poll worker to re-read ``/diagnostics/hardware``.
@@ -543,9 +572,10 @@ class AppState(QObject):
             2. OpenFan channel label (``openfan:ch00`` -> ``OpenFan CH0``)
             3. ``hwmon_label_resolver`` (hwmon fans) — the daemon-supplied
                sysfs ``HwmonHeader.label``, then ``/etc/sensors.d``, then the
-               in-repo board fallback table (A3), then raw ``pwmN``. A label
-               the daemon merely synthesised from the node id is skipped
-               rather than treated as authoritative (DEC-229)
+               in-repo board fallback table (A3), then the daemon's board
+               catalogue (``HwmonHeader.board_label``, DEC-500), then raw
+               ``pwmN``. A label the daemon merely synthesised from the node id
+               is skipped rather than treated as authoritative (DEC-229)
             4. raw ``fan_id`` as a last resort
 
         Split out of :meth:`fan_display_name` for DEC-227: ``apply_fan_rename``
@@ -590,10 +620,25 @@ class AppState(QObject):
                     chip_name=h.chip_name,
                     sysfs_chip_name=h.sysfs_chip_name,
                     pwm_index=h.pwm_index,
+                    board_label=h.board_label,
                     board_vendor=self.board_info.vendor,
                     board_name=self.board_info.name,
                 )
         return fan_id
+
+    def header_name_source(self, header: HwmonHeader) -> str:
+        """Where :meth:`fan_fallback_name` got this header's name — a
+        ``hwmon_label_resolver.LABEL_SOURCE_*`` token, for the provenance a
+        surface shows beside it (DEC-500)."""
+        return hwmon_header_label_source(
+            sysfs_label=header.label,
+            chip_name=header.chip_name,
+            sysfs_chip_name=header.sysfs_chip_name,
+            pwm_index=header.pwm_index,
+            board_label=header.board_label,
+            board_vendor=self.board_info.vendor,
+            board_name=self.board_info.name,
+        )
 
     @property
     def warning_count(self) -> int:
@@ -674,7 +719,9 @@ class AppState(QObject):
         for s in self.sensors:
             freshness = self.reading_freshness(s)
             if freshness != Freshness.FRESH:
-                label = sensor_display_name(s.id, s.label, peers=peers)
+                label = sensor_display_name(
+                    s.id, s.label, peers=peers, board_names=self.board_channel_names
+                )
                 conditions.append(
                     AlertCondition(
                         key=f"sensor_stale:{s.id}",

@@ -1711,7 +1711,9 @@ class ControlsPage(QWidget):
             preselect_ids=preselect_ids,
             display_name=self._state.fan_display_name,
         )
-        sensor_choices = build_sensor_choices(self._state.sensors, overrides)
+        sensor_choices = build_sensor_choices(
+            self._state.sensors, overrides, board_names=self._state.board_channel_names
+        )
         # An empty list hides the picker entirely, which is what an older daemon
         # gets: no capability, no role step, and the flow behaves as it did before.
         pump_candidates = (
@@ -1953,7 +1955,12 @@ class ControlsPage(QWidget):
             if not s.control_eligible:
                 continue
             is_gpu_temp = s.kind == "gpu_temp" or s.source == "amd_gpu"
-            name = sensor_display_name(s.id, s.label, peers=[p.id for p in self._state.sensors])
+            name = sensor_display_name(
+                s.id,
+                s.label,
+                peers=[p.id for p in self._state.sensors],
+                board_names=self._state.board_channel_names,
+            )
             sensor_choices.append({"id": s.id, "label": name, "preferred": is_gpu_temp})
             if is_gpu_temp and default_sensor_id is None:
                 default_sensor_id = s.id
@@ -2436,7 +2443,12 @@ class ControlsPage(QWidget):
                     if s.control_eligible:
                         sensor_items.append((s.id, self._sensor_combo_label(s)))
                     else:
-                        unoffered[s.id] = sensor_display_name(s.id, s.label, peers=peer_ids)
+                        unoffered[s.id] = sensor_display_name(
+                            s.id,
+                            s.label,
+                            peers=peer_ids,
+                            board_names=self._state.board_channel_names if self._state else {},
+                        )
             # Composite curves offer only cycle-free choices (DEC-150/151).
             mix_candidates = (
                 mix_candidate_curves(profile, curve.id) if curve.type == CurveType.MIX else None
@@ -2604,7 +2616,10 @@ class ControlsPage(QWidget):
                         card.update_output_preview(
                             editing.name,
                             sensor_display_name(
-                                s.id, s.label, peers=[p.id for p in self._state.sensors]
+                                s.id,
+                                s.label,
+                                peers=[p.id for p in self._state.sensors],
+                                board_names=self._state.board_channel_names,
                             ),
                             s.value_c,
                             output,
@@ -2762,7 +2777,10 @@ class ControlsPage(QWidget):
                         for s in self._state.sensors:
                             if s.id == curve.sensor_id:
                                 sensor_name = sensor_display_name(
-                                    s.id, s.label, peers=[p.id for p in self._state.sensors]
+                                    s.id,
+                                    s.label,
+                                    peers=[p.id for p in self._state.sensors],
+                                    board_names=self._state.board_channel_names,
                                 )
                                 sensor_value = s.value_c
                                 break
@@ -3437,7 +3455,12 @@ class ControlsPage(QWidget):
         :func:`controls_view.sensor_combo_label` (DEC-157)."""
         overrides = self._state.sensor_class_overrides if self._state else {}
         peers = [p.id for p in self._state.sensors] if self._state else [s.id]
-        return sensor_combo_label(s, overrides, peers=peers)
+        return sensor_combo_label(
+            s,
+            overrides,
+            peers=peers,
+            board_names=self._state.board_channel_names if self._state else {},
+        )
 
     def _on_sensor_values_updated(self, sensors) -> None:
         """Called ~1Hz. Rebuild sensor dropdown only when the sensor list changes."""
@@ -3454,7 +3477,12 @@ class ControlsPage(QWidget):
                 # the moment the radio goes down. Existing curves already bound to
                 # one keep working and still show their live value below.
                 if not s.control_eligible:
-                    unoffered[s.id] = sensor_display_name(s.id, s.label, peers=peer_ids)
+                    unoffered[s.id] = sensor_display_name(
+                        s.id,
+                        s.label,
+                        peers=peer_ids,
+                        board_names=self._state.board_channel_names if self._state else {},
+                    )
                     continue
                 if s.id not in seen:
                     items.append((s.id, self._sensor_combo_label(s)))
@@ -3483,8 +3511,13 @@ class ControlsPage(QWidget):
 
         # Update curve card sensor value labels (cheap — dict lookup per card)
         peers = [s.id for s in sensors]
+        board_names = self._state.board_channel_names if self._state else {}
         sensor_map = {
-            s.id: (sensor_display_name(s.id, s.label, peers=peers), s.value_c) for s in sensors
+            s.id: (
+                sensor_display_name(s.id, s.label, peers=peers, board_names=board_names),
+                s.value_c,
+            )
+            for s in sensors
         }
         for _curve_id, ccard in self._curve_cards.items():
             # A sensor_id kept by a curve that reads none is not shown as if it
@@ -3500,7 +3533,10 @@ class ControlsPage(QWidget):
                 ccard.update_sensor_display(label, val)
             elif sid:
                 pretty = sensor_display_name(
-                    sid, sid.split(":")[-1] if ":" in sid else sid, peers=peers
+                    sid,
+                    sid.split(":")[-1] if ":" in sid else sid,
+                    peers=peers,
+                    board_names=board_names,
                 )
                 ccard.update_sensor_display(pretty)
 

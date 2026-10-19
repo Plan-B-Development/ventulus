@@ -122,6 +122,15 @@ class PwmHeaderCard(ContentSizedCard):
         self._caveat_lbl.setVisible(False)
         root.addWidget(self._caveat_lbl)
 
+        # DEC-500: where a board-catalogue name came from — it is not verified on
+        # this board, and the name alone does not say so. Hidden otherwise.
+        self._provenance_lbl = QLabel("", self)
+        self._provenance_lbl.setObjectName(f"HeaderCard_Label_provenance_{slug}")
+        self._provenance_lbl.setProperty("class", "CardMeta")
+        self._provenance_lbl.setWordWrap(True)
+        self._provenance_lbl.setVisible(False)
+        root.addWidget(self._provenance_lbl)
+
         # `ROLE-d`: what the last "Set role…" on this card did, beside the pill
         # it changed. Owned by the page (one message at a time), never by the
         # view-model, so the 1 Hz `set_view` does not wipe it.
@@ -282,6 +291,8 @@ class PwmHeaderCard(ContentSizedCard):
         self._role_btn.setAccessibleName(f"Set the role of {view.title}")
         self._caveat_lbl.setText(view.label_caveat)
         self._caveat_lbl.setVisible(bool(view.label_caveat))
+        self._provenance_lbl.setText(view.name_provenance)
+        self._provenance_lbl.setVisible(bool(view.name_provenance))
         self._set_muted(view.no_fan)
 
         self._live_state = _fill_grid(

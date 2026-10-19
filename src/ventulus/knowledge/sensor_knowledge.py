@@ -23,6 +23,7 @@ Classification is based on verified Linux kernel documentation:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from html import escape
@@ -137,13 +138,23 @@ def _classify_memory_label(label: str) -> SensorClassification:
     )
 
 
-def sensor_display_name(sensor_id: str, label: str, *, peers: Iterable[str]) -> str:
-    """The name a surface shows for a sensor (DEC-491, DEC-492).
+def sensor_display_name(
+    sensor_id: str, label: str, *, peers: Iterable[str], board_names: Mapping[str, str]
+) -> str:
+    """The name a surface shows for a sensor (DEC-491, DEC-492, DEC-500).
 
     Every sensor keeps ``label or id``, except a memory-module sensor
     (:data:`MEMORY_MODULE_CHIPS`): those all publish ``temp1``, so two DIMMs
     would look identical. The SPD address in the id tells modules apart:
     ``DIMM 0x51``. No slot is claimed: the kernel does not know it.
+
+    ``board_names`` is ``AppState.board_channel_names``: the daemon's
+    board-catalogue name per sensor id (DEC-500). It names a sensor only while
+    the sensor's own label is the synthesised ``tempN`` (or empty) — a driver
+    label always wins — and it is a **name only**: classification reads the raw
+    label, so a board temperature the catalogue calls ``CPU`` never becomes a
+    CPU sensor. Required, for the reason ``peers`` is: a surface that dropped it
+    would name the same sensor differently from every other surface.
 
     ``peers`` is the set of sensor ids the name is shown among — required, so no
     surface can silently drop it. Where another memory sensor there sits at the
@@ -153,6 +164,9 @@ def sensor_display_name(sensor_id: str, label: str, *, peers: Iterable[str]) -> 
     """
     me = parse_memory_sensor_id(sensor_id)
     if me is None:
+        board = board_names.get(sensor_id, "")
+        if board and (not label or _SYNTHESISED_TEMP_LABEL.fullmatch(label)):
+            return board
         return label or sensor_id
     name = f"DIMM 0x{me.address:02x}"
     twins = (
@@ -163,6 +177,17 @@ def sensor_display_name(sensor_id: str, label: str, *, peers: Iterable[str]) -> 
     if any(p.chip == me.chip and p.address == me.address for p in twins):
         return f"{name} ({_memory_segment_text(sensor_id, me)})"
     return name
+
+
+#: The label the daemon gives a temperature whose driver publishes none.
+_SYNTHESISED_TEMP_LABEL = re.compile(r"temp\d+")
+
+#: DEC-500: a Gigabyte EC_TEMP header (a board-catalogue name) reads an optional
+#: thermistor probe, so what it shows depends on whether one is fitted.
+EC_TEMP_PROBE_NOTE = (
+    "An EC_TEMP header reads a thermistor probe plugged into it. With no probe "
+    "fitted, its reading means nothing."
+)
 
 
 def _memory_segment_text(sensor_id: str, me) -> str:

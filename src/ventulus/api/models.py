@@ -1299,9 +1299,17 @@ class HwmonHeader:
     # omits the field entirely, hence the "unknown" default.
     role: str = "unknown"
     # How `role` was established: "none" | "label" | "chip_mapping" |
-    # "user_assigned". Lets the UI distinguish a confident classification from
-    # a guess worth asking the user about.
+    # "board_catalogue" (DEC-500) | "user_assigned". Lets the UI distinguish a
+    # confident classification from a guess worth asking the user about. An
+    # opaque token like `role`: render one this GUI does not know.
     role_source: str = "none"
+    # DEC-500 (daemon >= 5.3.0): the daemon's board-catalogue name for this
+    # header — frankcrawford/it87's Gigabyte config for the board's SIV — sent
+    # only where the driver published no label (so `label` is the synthesised
+    # `pwmN`). Not verified on this machine. It is role evidence on the daemon
+    # side (`role_source == "board_catalogue"`) and a name tier here
+    # (`hwmon_label_resolver`), never part of `id`. "" when absent.
+    board_label: str = ""
 
     # ── AIO-MB Phase 4 (DEC-316, daemon >= 2.31.0) ───────────────────────────
     # Every field below defaults to None/empty meaning "this daemon did not
@@ -1917,6 +1925,52 @@ class VoltageRail:
 
 
 @dataclass
+class BoardLayoutChannel:
+    """One channel the daemon's board catalogue covers (DEC-500, daemon >= 5.3.0).
+
+    ``id`` is the id the entity is published under elsewhere — a header's
+    (``GET /hwmon/headers``), a monitor-only fan's (``GET /inventory/hwmon``
+    ``monitor_only_fans``, never ``/fans``) or a sensor's — and ``kind`` says
+    which (``"pwm"`` / ``"fan"`` / ``"temp"``, an opaque token). Exactly one of
+    :attr:`board_label` and :attr:`board_unmapped` is set.
+    """
+
+    id: str = ""
+    kind: str = ""
+    #: The board's name for the channel. Not verified on this machine.
+    board_label: str = ""
+    #: The board's config does not map this channel (upstream ``ignore``): not
+    #: mapped by this layout, which is not a claim that nothing is connected.
+    board_unmapped: bool = False
+
+
+@dataclass
+class BoardLayout:
+    """The board's GIGABYTE firmware layout and what the daemon's board catalogue
+    says about it (DEC-500, ``/diagnostics/hardware .board_layout``).
+
+    Absent (``None`` on the result) on any board without an SIV — every
+    non-Gigabyte board, and Gigabyte boards on the in-kernel ``it87`` — and on
+    older daemons.
+    """
+
+    #: The raw SIV word, eight upper-case hex digits (``"A008090A"``).
+    siv: str = ""
+    #: ``"AMD"`` or ``"Intel"``: the catalogue platform the key used.
+    platform: str = ""
+    #: Whether the catalogue has any block for this SIV on this platform.
+    in_catalogue: bool = False
+    #: The frankcrawford/it87 commit the catalogue was generated from.
+    catalogue_commit: str = ""
+    #: The board names upstream lists for this SIV; empty where it says "names
+    #: not currently known".
+    listed_boards: list[str] = field(default_factory=list)
+    #: Whether this board's DMI name is one of :attr:`listed_boards`.
+    board_listed: bool = False
+    channels: list[BoardLayoutChannel] = field(default_factory=list)
+
+
+@dataclass
 class HardwareDiagnosticsResult:
     api_version: int = 1
     hwmon: HwmonDiagnostics = field(default_factory=HwmonDiagnostics)
@@ -1991,6 +2045,10 @@ class HardwareDiagnosticsResult:
     # Empty on older daemons and on boards whose chips expose no ADC channel —
     # the daemon omits the key entirely rather than sending `[]`.
     voltages: list[VoltageRail] = field(default_factory=list)
+    # DEC-500 (daemon >= 5.3.0): the board's SIV layout and the board-catalogue
+    # names for its unlabelled channels. `None` without an SIV, and on older
+    # daemons.
+    board_layout: BoardLayout | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -3461,6 +3519,43 @@ def parse_hardware_diagnostics(data: dict) -> HardwareDiagnosticsResult:
         amd_pci_devices=amd_pci_devices,
         amdgpu_module_loaded=bool(data.get("amdgpu_module_loaded", False)),
         voltages=voltages,
+        board_layout=_parse_board_layout(data.get("board_layout")),
+    )
+
+
+def _parse_board_layout(raw: object) -> BoardLayout | None:
+    """Parse the DEC-500 ``board_layout`` object, or ``None``.
+
+    Coerced field by field. A channel is kept only with an id and exactly one
+    of a non-empty name and the unmapped flag: a malformed entry is dropped
+    rather than shown as a name the daemon did not give.
+    """
+    if not isinstance(raw, dict):
+        return None
+    channels: list[BoardLayoutChannel] = []
+    for c in raw.get("channels") or []:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "")
+        name = c.get("board_label")
+        name = name.strip() if isinstance(name, str) else ""
+        unmapped = c.get("board_unmapped") is True
+        if not cid or bool(name) == unmapped:
+            continue
+        channels.append(
+            BoardLayoutChannel(
+                id=cid, kind=str(c.get("kind") or ""), board_label=name, board_unmapped=unmapped
+            )
+        )
+    listed = raw.get("listed_boards")
+    return BoardLayout(
+        siv=str(raw.get("siv") or ""),
+        platform=str(raw.get("platform") or ""),
+        in_catalogue=raw.get("in_catalogue") is True,
+        catalogue_commit=str(raw.get("catalogue_commit") or ""),
+        listed_boards=[str(b) for b in listed if b] if isinstance(listed, list) else [],
+        board_listed=raw.get("board_listed") is True,
+        channels=channels,
     )
 
 

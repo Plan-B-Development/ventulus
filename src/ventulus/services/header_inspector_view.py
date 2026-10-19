@@ -35,7 +35,14 @@ from collections.abc import Collection
 from dataclasses import dataclass, field
 
 from ..api.models import Capabilities, ControlPathRecord, FanReading, HwmonHeader
-from ..knowledge.hwmon_label_resolver import is_placeholder_hwmon_label
+from ..knowledge.hwmon_label_resolver import (
+    LABEL_SOURCE_BOARD_CATALOGUE,
+    LABEL_SOURCE_BOARD_TABLE,
+    LABEL_SOURCE_DRIVER,
+    LABEL_SOURCE_NONE,
+    LABEL_SOURCE_SENSORS_CONF,
+    is_placeholder_hwmon_label,
+)
 from .daemon_features import daemon_supports, unsupported_feature_message
 from .fan_mode import PWM_ENABLE_MANUAL, pwm_enable_label
 from .pump_protection import header_effective_floor_pct, header_is_pump_protected
@@ -84,8 +91,36 @@ _ROLE_SOURCE_LABELS = {
     "none": "Not classified",
     "label": "Hardware label",
     "chip_mapping": "Chip mapping",
+    "board_catalogue": "Board catalogue",
     "user_assigned": "Assigned by you",
 }
+
+#: Where a header's shown name came from (DEC-500): the user's own name, or a
+#: ``hwmon_label_resolver.LABEL_SOURCE_*`` token from ``AppState.header_name_source``.
+NAME_SOURCE_ALIAS = "alias"
+_NAME_SOURCE_LABELS = {
+    NAME_SOURCE_ALIAS: "Your name",
+    LABEL_SOURCE_DRIVER: "Driver label",
+    LABEL_SOURCE_SENSORS_CONF: "sensors.d configuration",
+    LABEL_SOURCE_BOARD_TABLE: "Ventulus board table",
+    LABEL_SOURCE_BOARD_CATALOGUE: "it87 board catalogue",
+    LABEL_SOURCE_NONE: "Channel number",
+}
+
+
+def name_source_label(token: str) -> str:
+    """The readable form of a name-source token; an unknown one is humanised."""
+    return _NAME_SOURCE_LABELS.get(token, humanise_token(token))
+
+
+def board_name_provenance(*, siv: str, board_listed: bool | None) -> str:
+    """Where a board-catalogue name comes from, for the card and inspector
+    (DEC-500). ``siv`` is ``""`` before the layout has been read."""
+    layout = f" for layout {siv}" if siv else ""
+    text = f"Named from the it87 board catalogue{layout}; not verified on this board."
+    if board_listed is False:
+        text += " The catalogue does not list this board model for the layout."
+    return text
 
 
 def role_label(token: str) -> str:
@@ -194,6 +229,9 @@ class HeaderInspectorView:
     #: ``no_fan``) and the daemon does not protect it as a pump: the card is
     #: dimmed and its status does not warn about a missing RPM.
     no_fan: bool = False
+    #: DEC-500: where the shown name came from, when the card should say so —
+    #: a board-catalogue name, which is not verified on this board. "" otherwise.
+    name_provenance: str = ""
 
 
 def control_ownership(reading: FanReading | None) -> str:
@@ -271,6 +309,9 @@ def build_header_inspector_view(
     control_path: ControlPathRecord | None = None,
     board_vendor: str = "",
     stalled: bool = False,
+    name_source: str = "",
+    board_siv: str = "",
+    board_listed: bool | None = None,
 ) -> HeaderInspectorView:
     """Build the render-ready inspection of one PWM header.
 
@@ -281,6 +322,9 @@ def build_header_inspector_view(
     ``board_vendor`` is the DMI vendor, read only for the `BRD-h` label caveat.
     ``stalled`` is ``AppState.stalled_fan_ids`` membership (`TS-bg`), passed by
     :func:`build_header_inspector_views`, which requires the set.
+    ``name_source`` is where ``display_name`` came from (``NAME_SOURCE_ALIAS`` or
+    ``AppState.header_name_source``); ``board_siv`` and ``board_listed`` are
+    ``AppState.board_layout``'s, for a board-catalogue name's provenance (DEC-500).
     """
     # Local import: `header_role_view` imports this module's label helpers.
     from .header_role_view import nct6687_label_note, role_editable
@@ -297,6 +341,10 @@ def build_header_inspector_view(
     ownership = control_ownership(reading)
     requested, approximate = requested_pct(reading)
     readback = reading.pwm_readback_pct if reading else None
+    board_label = (header.board_label or "").strip()
+    provenance = (
+        board_name_provenance(siv=board_siv, board_listed=board_listed) if board_label else ""
+    )
 
     # ── Live rows (§3, §6) ───────────────────────────────────────────────────
     live: list[InfoRow] = [
@@ -368,7 +416,9 @@ def build_header_inspector_view(
             UNKNOWN_TEXT if placeholder else (raw_label or UNKNOWN_TEXT),
             note=label_caveat,
         ),
+        *([InfoRow("Board header", board_label, note=provenance)] if board_label else []),
         InfoRow("Display name", title),
+        *([InfoRow("Name source", name_source_label(name_source))] if name_source else []),
         InfoRow("Direct AIO device", "Yes" if header.is_aio else "No"),
         InfoRow(
             "Cooling device",
@@ -437,6 +487,7 @@ def build_header_inspector_view(
             "Prohibited" if protected else "Permitted",
             state="warn" if protected else "neutral",
         ),
+        *_board_header_rows(header, board_label, protected=protected),
     ]
 
     # ── Action enablement (§11) ──────────────────────────────────────────────
@@ -512,7 +563,47 @@ def build_header_inspector_view(
         set_role_disabled_reason=set_role_reason,
         label_caveat=label_caveat,
         no_fan=no_fan,
+        # Only a catalogue name says where it came from on the card: every other
+        # source is the driver's, the user's or a checked table's.
+        name_provenance=provenance if name_source == LABEL_SOURCE_BOARD_CATALOGUE else "",
     )
+
+
+def _board_header_rows(header: HwmonHeader, board_label: str, *, protected: bool) -> list[InfoRow]:
+    """What a board-catalogue name does and does not say (DEC-500).
+
+    A board name says what the header is FOR. A ``*_PUMP`` header takes a pump
+    or a fan, and what is plugged in is known only when the user says so.
+    """
+    if not board_label:
+        return []
+    rows: list[InfoRow] = []
+    if "pump" in board_label.lower():
+        rows.append(
+            InfoRow(
+                "Header type",
+                "Fan or pump header",
+                note=(
+                    "Protected as a pump: never stopped, and held at the pump floor."
+                    if protected
+                    else ""
+                ),
+            )
+        )
+    assigned = header.role_source == "user_assigned"
+    rows.append(
+        InfoRow(
+            "Connected device",
+            role_label(header.role) if assigned else "Not known",
+            note=(
+                ""
+                if assigned
+                else "The board name says what the header is for, not what is "
+                "plugged into it. Set its role to record that."
+            ),
+        )
+    )
+    return rows
 
 
 # `P8-ag`: both of these went through `daemon_supports` like every other gate.
@@ -559,11 +650,16 @@ def build_header_inspector_views(
     control_paths: dict[str, ControlPathRecord] | None = None,
     board_vendor: str = "",
     stalled_ids: Collection[str],
+    name_sources: dict[str, str] | None = None,
+    board_siv: str = "",
+    board_listed: bool | None = None,
 ) -> list[HeaderInspectorView]:
     """Build views for every header, pumps first then daemon order.
 
     ``stalled_ids`` is ``AppState.stalled_fan_ids`` (`TS-bg`). Required, so the
     page cannot fall back to the raw ``stall_detected`` by leaving it out.
+    ``name_sources`` maps a header id to its name source; ``board_siv`` and
+    ``board_listed`` are the board layout's (see the single-header builder).
 
     Pumps lead because §2 and §5 both treat the pump as the header a user is
     looking for; the rest keep the daemon's ordering so the list is stable.
@@ -572,6 +668,7 @@ def build_header_inspector_views(
     names = display_names or {}
     reverts = enable_revert_counts or {}
     paths = control_paths or {}
+    sources = name_sources or {}
     views = [
         build_header_inspector_view(
             h,
@@ -582,6 +679,9 @@ def build_header_inspector_views(
             control_path=paths.get(h.id),
             board_vendor=board_vendor,
             stalled=h.id in stalled_ids,
+            name_source=sources.get(h.id, ""),
+            board_siv=board_siv,
+            board_listed=board_listed,
         )
         for h in headers
     ]

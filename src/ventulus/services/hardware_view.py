@@ -21,6 +21,7 @@ from enum import Enum
 
 from ventulus.api.models import HardwareReadiness, SuperIoReport
 from ventulus.knowledge.driver_install import install_guide
+from ventulus.knowledge.sensor_knowledge import EC_TEMP_PROBE_NOTE
 from ventulus.ui.cooling_readiness import GROUP_ORDER, build_readiness_items, group_for
 from ventulus.ui.readiness_merge import MergedReadinessItem
 from ventulus.ui.widgets.inventory_readiness_view import _AUTO_EXPAND_RANK, _severity_chip
@@ -491,7 +492,7 @@ class RailKind(Enum):
 _IDENTIFICATION_TEXT: dict[RailKind, str] = {
     RailKind.DRIVER: "Named by the driver",
     RailKind.CATALOGUE: "Named by the board catalogue",
-    RailKind.UNMAPPED: "Not used by this board",
+    RailKind.UNMAPPED: "Not mapped for this board",
     RailKind.RAW: "Unnamed channel",
 }
 
@@ -535,7 +536,7 @@ class VoltagePanelVM:
     #: hours-old millivolts as current ones.
     provenance_text: str
     #: Shown under the table: the raw-pin warning while any row shows an
-    #: unscaled pin reading (unnamed or not used), and the catalogue's credit
+    #: unscaled pin reading (unnamed or not mapped), and the catalogue's credit
     #: while any row came from it; empty when neither applies.
     footnote: str
     #: Why the last re-read failed, shown while the previous readings (or the
@@ -560,7 +561,7 @@ _UNMAPPED_CAVEAT = (
 # the kernel driver never does, so `inN_label` — the only label the daemon reads
 # — is unchanged by it.
 _VOLTAGE_FOOTNOTE = (
-    "Unnamed and unused channels are shown as measured at the chip's input pin. Boards feed "
+    "Unnamed and unmapped channels are shown as measured at the chip's input pin. Boards feed "
     "rails through resistor dividers the driver knows nothing about, so those "
     "readings are real voltages but not the rail voltage. An /etc/sensors.d file "
     "names them for the sensors command, not here — lm_sensors reads it, and the "
@@ -602,7 +603,7 @@ def _read_at_text(read_at: float, now: float) -> str:
 
 def _rail_kind(rail) -> RailKind:
     """Classify a rail. The driver's label wins over the catalogue (DEC-464 Q2),
-    and "not used" over a catalogue name — the daemon never sends both, and if
+    and "not mapped" over a catalogue name — the daemon never sends both, and if
     one ever did, an unscaled reading that claims no rail is the safer
     misreading than a name."""
     if rail.identified:
@@ -614,19 +615,39 @@ def _rail_kind(rail) -> RailKind:
     return RailKind.RAW
 
 
+#: DEC-500: the supply rails whose nominal voltage is in their name. A board
+#: catalogue reading of one far from it says the divider does not fit this board
+#: (or the input is not that rail) — display only, never an alert.
+_NOMINAL_RAIL_V = {"+12V": 12.0, "+5V": 5.0, "+3.3V": 3.3}
+#: Wider than the ATX ±5 % on purpose: this flags a wrong divider, not a
+#: marginal supply.
+_RAIL_PLAUSIBLE_FRACTION = 0.10
+_IMPLAUSIBLE_IDENTIFICATION = "Named by the board catalogue — reading out of range"
+
+
 def _voltage_row(rail) -> VoltageRowVM:
     kind = _rail_kind(rail)
     name, value_text, caveat = rail.label, f"{rail.value_v:.3f} V", ""
+    identification = _IDENTIFICATION_TEXT[kind]
     if kind is RailKind.CATALOGUE:
         multiplier = rail.board_multiplier
         name = rail.board_label
-        value_text = f"{rail.value_v * multiplier:.3f} V"
+        volts = rail.value_v * multiplier
+        value_text = f"{volts:.3f} V"
         if multiplier == 1.0:
             caveat = "Named from the it87 board catalogue — read directly at the pin."
         else:
             caveat = (
                 f"Named from the it87 board catalogue — pin {rail.value_v:.3f} V "
                 f"\N{MULTIPLICATION SIGN} {multiplier:g}."
+            )
+        nominal = _NOMINAL_RAIL_V.get(name)
+        if nominal is not None and abs(volts / nominal - 1) > _RAIL_PLAUSIBLE_FRACTION:
+            identification = _IMPLAUSIBLE_IDENTIFICATION
+            caveat += (
+                f" That is more than {_RAIL_PLAUSIBLE_FRACTION:.0%} from {nominal:g} V, so "
+                "the catalogue's divider may not fit this board, or this input is not "
+                "that rail."
             )
     elif kind is RailKind.UNMAPPED:
         caveat = _UNMAPPED_CAVEAT
@@ -637,7 +658,7 @@ def _voltage_row(rail) -> VoltageRowVM:
         chip=rail.chip_name,
         value_text=value_text,
         kind=kind,
-        identification_text=_IDENTIFICATION_TEXT[kind],
+        identification_text=identification,
         caveat=caveat,
     )
 
@@ -679,7 +700,7 @@ def build_voltage_panel(
     if count[RailKind.CATALOGUE]:
         summary += f" · {count[RailKind.CATALOGUE]} by the board catalogue"
     if count[RailKind.UNMAPPED]:
-        summary += f" · {count[RailKind.UNMAPPED]} not used"
+        summary += f" · {count[RailKind.UNMAPPED]} not mapped"
     footnotes = []
     if count[RailKind.RAW] or count[RailKind.UNMAPPED]:
         footnotes.append(_VOLTAGE_FOOTNOTE)
@@ -697,3 +718,132 @@ def build_voltage_panel(
         footnote=" ".join(footnotes),
         refresh_error_text=error_text,
     )
+
+
+# ── Board layout (DEC-500) ─────────────────────────────────────────────────
+
+#: Display order and words for the wire's opaque ``kind`` tokens.
+_BOARD_KIND_ORDER = {"pwm": 0, "fan": 1, "temp": 2}
+_BOARD_KIND_WORDS = {"pwm": "Fan header", "fan": "Fan (monitor only)", "temp": "Temperature"}
+_BOARD_KIND_SINGULARS = {"pwm": "fan header", "fan": "monitor-only fan", "temp": "temperature"}
+_BOARD_KIND_PLURALS = {"pwm": "fan headers", "fan": "monitor-only fans", "temp": "temperatures"}
+
+
+_BOARD_LAYOUT_FOOTNOTE = (
+    "Names come from the it87 driver project's Gigabyte sensor configs (GPL-2.0), "
+    "matched on this board's firmware layout, and are not verified on this board. "
+    "A driver's own label always wins. A channel where a second reading of "
+    'GIGABYTE\'s sensor tables disagrees is left unnamed. "Not mapped" means the '
+    "layout does not map the channel, not that nothing is connected. Set a "
+    "header's role on its card if the name is wrong."
+)
+
+
+@dataclass(frozen=True)
+class BoardLayoutRowVM:
+    #: The board's name, or "Not mapped for this board".
+    name: str
+    #: ``it8696 pwm1``: the chip and channel the name is for.
+    channel: str
+    kind_text: str
+    #: Shown as the row tooltip; "" when there is nothing to add.
+    note: str
+
+
+@dataclass(frozen=True)
+class BoardLayoutPanelVM:
+    #: False without a layout: the Hardware page then hides the panel.
+    has_layout: bool
+    #: "Layout A008090A · AMD"
+    title_text: str = ""
+    #: Whether upstream lists this board for the layout, or why it cannot say.
+    listing_text: str = ""
+    #: What the catalogue names on this board, by kind.
+    coverage_text: str = ""
+    #: Source and commit.
+    source_text: str = ""
+    rows: tuple[BoardLayoutRowVM, ...] = ()
+    footnote: str = ""
+
+
+def _board_channel_text(channel_id: str, kind: str) -> str:
+    """``it8696 pwm1`` from a published id: ``hwmon:<chip>:<dev>:pwmN:<label>``,
+    ``…:fanN:<label>`` or ``hwmon:<chip>:<dev>:tempN``. Falls back to the id."""
+    parts = channel_id.split(":")
+    if len(parts) < 4 or parts[0] != "hwmon":
+        return channel_id
+    token = parts[-1] if kind == "temp" else parts[-2]
+    return f"{parts[1]} {token}"
+
+
+def build_board_layout_panel(layout, *, board_name: str) -> BoardLayoutPanelVM:
+    """The Hardware page's Board layout panel from ``HardwareDiagnosticsResult.board_layout``.
+
+    ``layout`` is ``None`` on every board without a GIGABYTE SIV, and the panel
+    is then hidden rather than explaining an absence most boards have.
+    ``board_name`` is the DMI board name, for the listing sentence.
+    """
+    if layout is None:
+        return BoardLayoutPanelVM(has_layout=False)
+    platform = f" · {layout.platform}" if layout.platform else ""
+    title = f"Layout {layout.siv or '—'}{platform}"
+    if not layout.in_catalogue:
+        return BoardLayoutPanelVM(
+            has_layout=True,
+            title_text=title,
+            listing_text=(
+                "This layout is not in the board catalogue yet, so no fan header or "
+                "temperature is named from it."
+            ),
+            source_text=_board_source_text(layout),
+        )
+    yours = f"Your board ({board_name})" if board_name else "Your board"
+    if not layout.listed_boards:
+        listing = "The catalogue does not name the boards that use this layout."
+    elif layout.board_listed:
+        listing = f"{yours} is one of the boards listed for this layout."
+    else:
+        listing = (
+            f"{yours} is not one of the boards listed for this layout "
+            f"({', '.join(layout.listed_boards)}). The names are matched on the "
+            "layout, so they still apply, with less certainty."
+        )
+    ordered = sorted(
+        layout.channels, key=lambda c: (_BOARD_KIND_ORDER.get(c.kind, len(_BOARD_KIND_ORDER)), c.id)
+    )
+    rows = tuple(
+        BoardLayoutRowVM(
+            name=c.board_label if c.board_label else "Not mapped for this board",
+            channel=_board_channel_text(c.id, c.kind),
+            kind_text=_BOARD_KIND_WORDS.get(c.kind, c.kind.replace("_", " ").capitalize()),
+            note=EC_TEMP_PROBE_NOTE if c.board_label.upper().startswith("EC_TEMP") else "",
+        )
+        for c in ordered
+    )
+    named: dict[str, int] = {}
+    for c in ordered:
+        if c.board_label:
+            named[c.kind] = named.get(c.kind, 0) + 1
+    unmapped = sum(1 for c in ordered if c.board_unmapped)
+    parts = [
+        f"{n} {(_BOARD_KIND_PLURALS if n != 1 else _BOARD_KIND_SINGULARS).get(k, k)}"
+        for k, n in sorted(named.items(), key=lambda kv: _BOARD_KIND_ORDER.get(kv[0], 9))
+    ]
+    coverage = "Names " + ", ".join(parts) if parts else "Names nothing the driver left unnamed"
+    if unmapped:
+        coverage += f" · {unmapped} not mapped"
+    coverage += "."
+    return BoardLayoutPanelVM(
+        has_layout=True,
+        title_text=title,
+        listing_text=listing,
+        coverage_text=coverage,
+        source_text=_board_source_text(layout),
+        rows=rows,
+        footnote=_BOARD_LAYOUT_FOOTNOTE,
+    )
+
+
+def _board_source_text(layout) -> str:
+    commit = f", commit {layout.catalogue_commit[:7]}" if layout.catalogue_commit else ""
+    return f"Board catalogue: frankcrawford/it87 Gigabyte sensor configs{commit}."

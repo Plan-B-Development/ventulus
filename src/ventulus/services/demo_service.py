@@ -14,6 +14,8 @@ from ventulus.api.models import (
     AioHwmonCapability,
     AmdGpuCapability,
     BoardInfo,
+    BoardLayout,
+    BoardLayoutChannel,
     Capabilities,
     ControlCapability,
     DaemonStatus,
@@ -392,6 +394,32 @@ def _demo_voltages() -> list[VoltageRail]:
     ]
 
 
+def _demo_board_layout() -> BoardLayout:
+    """DEC-500: what a current daemon reports for this board (SIV A008090A,
+    AMD) — listed upstream, with the catalogue's commit. Only the board
+    temperature is named: the demo's headers carry driver labels, and a driver
+    label always wins, so the daemon names none of them."""
+    return BoardLayout(
+        siv="A008090A",
+        platform="AMD",
+        in_catalogue=True,
+        catalogue_commit="bd7a566c8a60fe0308d67e26761e16260368191a",
+        listed_boards=[
+            "X870 AORUS ELITE WIFI7",
+            "X870 AORUS ELITE WIFI7 ICE",
+            "X870E AORUS MASTER",
+            "X870E AORUS PRO",
+            "X870E AORUS PRO ICE",
+        ],
+        board_listed=True,
+        channels=[
+            BoardLayoutChannel(
+                id=f"hwmon:it8696:{_IT8696_DEVICE}:temp1", kind="temp", board_label="System 1"
+            )
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Demo service
 # ---------------------------------------------------------------------------
@@ -638,6 +666,7 @@ class DemoService:
                 bios_version="F4 (demo)",
             ),
             voltages=_demo_voltages(),
+            board_layout=_demo_board_layout(),
         )
 
     def set_fan_pwm(self, fan_id: str, pwm_percent: int) -> None:

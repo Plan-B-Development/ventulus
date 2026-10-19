@@ -36,7 +36,12 @@ def _cls(sensor: SensorReading, board: BoardInfo | None = None):
 
 def _html(sensor: SensorReading, board: BoardInfo | None, daemon_cls=None) -> str:
     return build_sensor_detail_html(
-        sensor, board, daemon_cls, classification=_cls(sensor, board), peers=[sensor.id]
+        sensor,
+        board,
+        daemon_cls,
+        classification=_cls(sensor, board),
+        peers=[sensor.id],
+        board_names={},
     )
 
 
@@ -203,20 +208,26 @@ class TestHtmlEscaping:
 class TestSensorDetailDialog:
     def test_dialog_titles_with_sensor_label(self, qtbot):
         sensor = _reading(label="Tctl")
-        dlg = SensorDetailDialog(sensor, None, classification=_cls(sensor), peers=[])
+        dlg = SensorDetailDialog(
+            sensor, None, classification=_cls(sensor), peers=[], board_names={}
+        )
         qtbot.addWidget(dlg)
         assert "Tctl" in dlg.windowTitle()
 
     def test_dialog_object_names_for_test_lookup(self, qtbot):
-        dlg = SensorDetailDialog(_reading(), None, classification=_cls(_reading()), peers=[])
+        dlg = SensorDetailDialog(
+            _reading(), None, classification=_cls(_reading()), peers=[], board_names={}
+        )
         qtbot.addWidget(dlg)
         assert dlg.objectName() == "Diagnostics_SensorDetail_Dialog"
         assert dlg._browser.objectName() == "Diagnostics_SensorDetail_Browser"
 
     def test_set_sensor_updates_in_place(self, qtbot):
         sensor = _reading(label="Tctl")
-        dlg = SensorDetailDialog(sensor, None, classification=_cls(sensor), peers=[])
+        dlg = SensorDetailDialog(
+            sensor, None, classification=_cls(sensor), peers=[], board_names={}
+        )
         qtbot.addWidget(dlg)
         nxt = _reading(label="Tccd1")
-        dlg.set_sensor(nxt, None, classification=_cls(nxt), peers=[])
+        dlg.set_sensor(nxt, None, classification=_cls(nxt), peers=[], board_names={})
         assert "Tccd1" in dlg.windowTitle()

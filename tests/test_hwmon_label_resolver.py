@@ -308,6 +308,7 @@ class TestResolverPriority:
             board_vendor="Gigabyte Technology Co., Ltd.",
             board_name="X870E AORUS MASTER",
             sensors_paths=[str(cfg)],
+            board_label="",
         )
         assert label == "FROM_SYSFS"
 
@@ -325,6 +326,7 @@ class TestResolverPriority:
             board_vendor="Gigabyte Technology Co., Ltd.",
             board_name="X870E AORUS MASTER",
             sensors_paths=[str(cfg)],
+            board_label="",
         )
         assert label == "USER_OVERRIDE"
 
@@ -337,6 +339,7 @@ class TestResolverPriority:
             board_vendor="Gigabyte Technology Co., Ltd.",
             board_name="X870E AORUS MASTER",
             sensors_paths=[],  # No libsensors files.
+            board_label="",
         )
         assert label == "CPU_FAN"
 
@@ -356,6 +359,7 @@ class TestResolverPriority:
             board_vendor="Test Vendor",
             board_name="TEST BOARD",
             sensors_paths=[],
+            board_label="",
         )
         assert label == "SYS_FAN9_PUMP (unverified)"
 
@@ -374,6 +378,7 @@ class TestResolverPriority:
                 board_vendor="Gigabyte Technology Co., Ltd.",
                 board_name="X870E AORUS MASTER",
                 sensors_paths=[],
+                board_label="",
             )
             assert label == name
 
@@ -386,6 +391,7 @@ class TestResolverPriority:
             board_vendor="Some Vendor Inc.",
             board_name="Some Other Board",
             sensors_paths=[],
+            board_label="",
         )
         assert label == "pwm2"
 
@@ -403,6 +409,7 @@ class TestResolverPriority:
             sysfs_chip_name="",
             pwm_index=1,
             sensors_paths=[str(cfg)],
+            board_label="",
         )
         assert label == "FROM_FAN"
 
@@ -415,6 +422,7 @@ class TestResolverPriority:
             sysfs_chip_name="",
             pwm_index=1,
             sensors_paths=[str(cfg)],
+            board_label="",
         )
         assert label == "FROM_PWM"
 
@@ -428,6 +436,7 @@ class TestResolverPriority:
             board_vendor="Gigabyte Technology Co., Ltd.",
             board_name="X870E AORUS MASTER",
             sensors_paths=[],
+            board_label="",
         )
         assert label == "CPU_FAN"
 
@@ -445,6 +454,7 @@ class TestResolverPriority:
             board_vendor="Gigabyte Technology Co., Ltd.",
             board_name="X870E AORUS MASTER",
             sensors_paths=[str(cfg)],
+            board_label="",
         )
         assert label == "USER_OVERRIDE"
 
@@ -525,6 +535,7 @@ class TestCache:
                 sysfs_chip_name="it8696",
                 pwm_index=1,
                 sensors_paths=[],
+                board_label="",
             )
             == "pwm1"
         )

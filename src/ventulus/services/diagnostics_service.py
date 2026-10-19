@@ -303,6 +303,9 @@ class DiagnosticsService(QObject):
         mid-session and hand ``_role_preserving_label`` a role-less name again —
         re-opening the very floor bug this change closes, from a button click.
 
+        The DEC-500 board layout goes to ``AppState.set_board_layout`` from here
+        too, always taking the newest result.
+
         It also stamps ``last_hw_diagnostics_at`` and emits
         ``hw_diagnostics_changed`` (`VOLT-a`), for the same reason: a writer
         that bypassed this method would leave both stale.
@@ -313,6 +316,9 @@ class DiagnosticsService(QObject):
             incoming, known = result.board, self._state.board_info
             if (incoming.vendor or incoming.name) or not (known.vendor or known.name):
                 self._state.board_info = incoming
+            # DEC-500: the layout follows the latest read, unlike the board
+            # identity above — a driver reload can publish or withdraw the SIV.
+            self._state.set_board_layout(result.board_layout)
         # Last, so a listener reads the cache, its time and the board together.
         self.hw_diagnostics_changed.emit()
 

@@ -97,7 +97,7 @@ Once saved, fan labels propagate across the entire application:
 - Overview page: fan status table
 - Profile files: member labels are snapshotted into the profile JSON
 
-Labels are stored as `fan_aliases` in `app_settings.json` and persist across sessions. Display names always prefer your alias, then the GPU model, then the OpenFAN channel label (`OpenFan CH0`), then the hwmon header label the chip publishes, then a label from `/etc/sensors.d` or `/usr/share/sensors`, then Ventulus's own per-board table, then the raw hardware ID (see [Per-board hwmon header label resolver](hardware-troubleshooting.md#per-board-hwmon-header-label-resolver)). The name is not only cosmetic: a header whose resolved name says CPU or pump gets the 30 % minimum when it joins a fan role.
+Labels are stored as `fan_aliases` in `app_settings.json` and persist across sessions. Display names always prefer your alias, then the GPU model, then the OpenFAN channel label (`OpenFan CH0`), then the hwmon header label the chip publishes, then a label from `/etc/sensors.d` or `/usr/share/sensors`, then Ventulus's own per-board table, then the board catalogue's name on Gigabyte boards, then the raw hardware ID (see [Per-board hwmon header label resolver](hardware-troubleshooting.md#per-board-hwmon-header-label-resolver)). The name is not only cosmetic: a header whose resolved name says CPU or pump gets the 30 % minimum when it joins a fan role.
 
 You do not have to run the wizard to rename a fan. Once you know which fan is
 which, you can rename one directly wherever it appears. See

@@ -92,7 +92,9 @@ def header_is_pump_protected(
       name: a user *alias* of "Pump" on an unlabelled header is invisible to
       those daemons, so trusting it would claim protection they do not apply —
       the unsafe direction. The DEC-229 synthesised ``pwmN`` placeholder is
-      skipped for the same reason it always is.
+      skipped for the same reason it always is. Where the driver gave no label,
+      the daemon's own board-catalogue name (``board_label``, DEC-500) stands in
+      for it — a daemon fact like the label, not a GUI-side guess;
     * the header is a liquid-cooler channel 1, which the daemon maps to a pump —
       but ONLY where no recognised non-pump label outranks that. The daemon
       consults the label first and reaches chip mapping only when the label says
@@ -147,8 +149,9 @@ def header_is_pump_protected(
 
 
 def header_infers_pump(header: HwmonHeader | None, capabilities: Capabilities | None) -> bool:
-    """Whether the daemon infers a pump from the header itself: its raw label or
-    a liquid-cooler channel 1 (the daemon's ``classify_header_role``).
+    """Whether the daemon infers a pump from the header itself: its raw label,
+    the board-catalogue name standing in for a label the driver did not publish
+    (DEC-500), or a liquid-cooler channel 1 (the daemon's ``classify_header_role``).
 
     That term of the union holds whatever role the user assigns or removes, so
     removing a user's pump role from such a header lowers no protection. It is
@@ -162,6 +165,11 @@ def header_infers_pump(header: HwmonHeader | None, capabilities: Capabilities | 
     raw_label = header.label or ""
     if is_placeholder_hwmon_label(raw_label, header.pwm_index):
         raw_label = ""
+    # DEC-500: the daemon reads its catalogue name only where the driver gave no
+    # label, by the same rules — the daemon only sends one then, but the
+    # precedence is mirrored rather than assumed.
+    if not raw_label:
+        raw_label = (header.board_label or "").strip()
     lowered = raw_label.lower()
     if "pump" in lowered:
         return True

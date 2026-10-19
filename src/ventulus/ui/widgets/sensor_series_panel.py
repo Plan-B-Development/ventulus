@@ -393,12 +393,13 @@ class SensorSeriesPanel(QFrame):
 
             # Add sensors to groups
             peers = [s.id for s in sensors]
+            board_names = self._state.board_channel_names if self._state else {}
             for s in sensors:
                 group_key, group_label = self._sensor_group(s)
                 group_item = self._ensure_group(group_key, group_label)
 
                 series_key = f"{_SENSOR_KEY_PREFIX}{s.id}"
-                label = sensor_display_name(s.id, s.label, peers=peers)
+                label = sensor_display_name(s.id, s.label, peers=peers, board_names=board_names)
 
                 item = QTreeWidgetItem(group_item)
                 item.setText(0, label)

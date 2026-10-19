@@ -481,6 +481,17 @@ therefore never runs. It also refuses when `/proc/ioports` cannot be read, skips
 that a driver or the firmware has reserved, and turns away a second run within 10
 seconds. Each refusal appears as a note in the section.
 
+### Board layout
+
+Shown on Gigabyte boards whose driver publishes the board's firmware layout (the
+SIV). It gives the layout code and CPU platform, whether the it87 project lists your
+board model for that layout, how many fan headers, fans and temperatures the board
+catalogue named, the catalogue's source and commit, and a table of every name with
+the chip channel it belongs to. "Not mapped for this board" means the layout does not
+map the channel, not that nothing is connected. See
+[Board header names](hardware-troubleshooting.md#board-header-names-from-the-it87-catalogue)
+for what the names do.
+
 ### Voltages
 
 A read-only table of the analogue inputs your Super-I/O chip exposes, typically ten
@@ -495,9 +506,13 @@ per chip. The **Identification** column says who named each row:
   the rail voltage (the pin reading times the divider); hover the row for the pin
   reading and the divider. On an X870E AORUS MASTER, for example, `in2` reads about
   2 V at the pin and is shown as `+12V` at about 12 V.
-- **Not used by this board**: the catalogue does not map this input for your board. It
-  may be unconnected or unused, so the reading is the raw pin voltage and not a known
+- **Not mapped for this board**: the catalogue does not map this input for your board.
+  It may be unconnected or unused, so the reading is the raw pin voltage and not a known
   rail.
+- **Named by the board catalogue — reading out of range**: a `+12V`, `+5V` or `+3.3V`
+  rail the catalogue named reads more than 10 % from its nominal voltage. The
+  catalogue's divider may not fit your board, or the input is not that rail. Hover
+  the row for the pin reading. It is shown, not alarmed on.
 - **Unnamed channel**: nobody named it, which is normal on a board the catalogue does
   not cover.
 

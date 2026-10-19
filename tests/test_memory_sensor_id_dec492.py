@@ -104,26 +104,30 @@ def test_memory_sensor_id_fixture_copies_are_byte_identical():
 
 class TestDisplayName:
     def test_both_forms_name_the_module_by_address(self):
-        assert sensor_display_name(LEGACY, "temp1", peers=[LEGACY]) == "DIMM 0x51"
-        assert sensor_display_name(STABLE, "temp1", peers=[STABLE]) == "DIMM 0x51"
+        assert sensor_display_name(LEGACY, "temp1", peers=[LEGACY], board_names={}) == "DIMM 0x51"
+        assert sensor_display_name(STABLE, "temp1", peers=[STABLE], board_names={}) == "DIMM 0x51"
 
     def test_same_address_on_two_segments_is_told_apart(self):
         peers = [STABLE, STABLE_P2]
-        assert sensor_display_name(STABLE, "temp1", peers=peers) == "DIMM 0x51 (p0)"
-        assert sensor_display_name(STABLE_P2, "temp1", peers=peers) == "DIMM 0x51 (p2)"
+        assert sensor_display_name(STABLE, "temp1", peers=peers, board_names={}) == "DIMM 0x51 (p0)"
+        assert (
+            sensor_display_name(STABLE_P2, "temp1", peers=peers, board_names={}) == "DIMM 0x51 (p2)"
+        )
 
     def test_legacy_twins_are_told_apart_by_bus(self):
         a, b = "hwmon:spd5118:21-0051:temp1", "hwmon:spd5118:22-0051:temp1"
-        assert sensor_display_name(a, "temp1", peers=[a, b]) == "DIMM 0x51 (bus 21)"
+        assert sensor_display_name(a, "temp1", peers=[a, b], board_names={}) == "DIMM 0x51 (bus 21)"
 
     def test_a_different_chip_at_the_same_address_is_not_a_twin(self):
         jc = "hwmon:jc42:0000:00:14.0-p2-0051:temp1"
-        assert sensor_display_name(STABLE, "temp1", peers=[STABLE, jc]) == "DIMM 0x51"
+        assert (
+            sensor_display_name(STABLE, "temp1", peers=[STABLE, jc], board_names={}) == "DIMM 0x51"
+        )
 
     def test_a_mux_channel_is_named(self):
         a = "hwmon:spd5118:0000:00:1f.4-ch0-0050:temp1"
         b = "hwmon:spd5118:0000:00:1f.4-ch1-0050:temp1"
-        assert sensor_display_name(b, "temp1", peers=[a, b]) == "DIMM 0x50 (ch1)"
+        assert sensor_display_name(b, "temp1", peers=[a, b], board_names={}) == "DIMM 0x50 (ch1)"
 
     def test_the_series_panel_lists_twins_apart(self, qtbot):
         """The call site, not just the helper: a surface passes its peers."""

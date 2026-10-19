@@ -137,7 +137,7 @@ def test_an_unmapped_row_keeps_its_pin_reading_and_claims_no_rail():
     # It must not claim the input is unconnected — that is what upstream's
     # `ignore` does NOT say.
     assert "may be unconnected or unused" in row.caveat
-    assert row.identification_text == "Not used by this board"
+    assert row.identification_text == "Not mapped for this board"
 
 
 def test_the_driver_label_wins_over_a_catalogue_entry():
@@ -162,7 +162,7 @@ def test_unmapped_wins_over_a_catalogue_name_so_no_rail_is_claimed():
 def test_the_summary_counts_every_kind():
     panel = _panel(_rails())
     assert panel.summary_text == (
-        "5 channels · 1 named by the driver · 2 by the board catalogue · 1 not used"
+        "5 channels · 1 named by the driver · 2 by the board catalogue · 1 not mapped"
     )
 
 
@@ -227,4 +227,4 @@ def test_the_page_renders_each_kind_from_the_cached_diagnostics(qtbot):
     twelve = next(r for r in rails if r.channel == 2)
     assert cells["+12V"][0] == f"{twelve.value_v * twelve.board_multiplier:.3f} V"
     unmapped = next(r for r in rails if r.channel == 0)
-    assert cells["in0"][:2] == (f"{unmapped.value_v:.3f} V", "Not used by this board")
+    assert cells["in0"][:2] == (f"{unmapped.value_v:.3f} V", "Not mapped for this board")

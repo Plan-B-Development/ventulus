@@ -65,13 +65,17 @@ from ventulus.services.cooling_device_view import build_cooling_device_views
 from ventulus.services.daemon_features import daemon_supports, unsupported_feature_message
 from ventulus.services.diagnostics_service import DiagnosticsService
 from ventulus.services.hardware_view import (
+    build_board_layout_panel,
     build_checklist,
     build_readiness_summary,
     build_recommended_actions,
     build_superio_panel,
     build_voltage_panel,
 )
-from ventulus.services.header_inspector_view import build_header_inspector_views
+from ventulus.services.header_inspector_view import (
+    NAME_SOURCE_ALIAS,
+    build_header_inspector_views,
+)
 from ventulus.services.header_role_view import (
     failure_message,
     nct6687_label_note,
@@ -181,6 +185,8 @@ _SIO_NOTES = 7
 # `WIRE-ag` Voltages table. Named constants, not literals: WIRE-w recorded that
 # inserting a column silently repointed a test that hardcoded an index.
 _VOLTAGE_COLS = ["Rail", "Chip", "Reading", "Identification"]
+#: DEC-500 Board layout table.
+_BOARD_LAYOUT_COLS = ["Board name", "Channel", "Kind"]
 _VOLT_NAME = 0
 _VOLT_CHIP = 1
 _VOLT_VALUE = 2
@@ -449,6 +455,10 @@ class HardwarePage(QWidget):
         # Super-I/O.
         layout.addWidget(self._build_superio_card())
 
+        # DEC-500: the board's firmware layout and its catalogue names. Hidden on
+        # a board without one, which is most boards.
+        layout.addWidget(self._build_board_layout_card())
+
         # Voltages (`WIRE-ag`) — display-only, below Super-I/O because it is
         # reference information rather than something to act on.
         layout.addWidget(self._build_voltages_card())
@@ -528,6 +538,19 @@ class HardwarePage(QWidget):
         self._superio_layout.setContentsMargins(0, 0, 0, 0)
         self._superio_layout.setSpacing(8)
         v.addWidget(self._superio_container)
+        return card
+
+    def _build_board_layout_card(self) -> QWidget:
+        card = Card(object_name="Hardware_Card_boardLayout")
+        v = QVBoxLayout(card)
+        v.addWidget(SectionHeader("Board layout", object_name="Hardware_SectionHeader_boardLayout"))
+        self._board_layout_container = QWidget()
+        self._board_layout_layout = QVBoxLayout(self._board_layout_container)
+        self._board_layout_layout.setContentsMargins(0, 0, 0, 0)
+        self._board_layout_layout.setSpacing(8)
+        v.addWidget(self._board_layout_container)
+        self._board_layout_card = card
+        card.setVisible(False)
         return card
 
     def _build_voltages_card(self) -> QWidget:
@@ -792,10 +815,25 @@ class HardwarePage(QWidget):
         caps = self._capabilities()
         return bool(caps and getattr(caps.control, "cooling_devices", False))
 
+    def _header_name_sources(self, headers) -> dict[str, str]:
+        """Where each header's shown name comes from (DEC-500): the user's own
+        name, else the label ladder's tier (``AppState.header_name_source``)."""
+        state = self._state
+        if state is None:
+            return {}
+        return {
+            h.id: NAME_SOURCE_ALIAS if h.id in state.fan_aliases else state.header_name_source(h)
+            for h in headers
+        }
+
     def _sensor_labels(self) -> dict[str, str]:
         sensors = self._state.sensors if self._state else []
         peers = [s.id for s in sensors]
-        return {s.id: sensor_display_name(s.id, s.label, peers=peers) for s in sensors}
+        board_names = self._state.board_channel_names if self._state else {}
+        return {
+            s.id: sensor_display_name(s.id, s.label, peers=peers, board_names=board_names)
+            for s in sensors
+        }
 
     def _sensor_values(self) -> dict[str, float]:
         return {
@@ -838,6 +876,7 @@ class HardwarePage(QWidget):
         )
         self._sync_device_cards(device_views)
 
+        layout = state.board_layout if state else None
         header_views = build_header_inspector_views(
             headers,
             readings=readings,
@@ -851,6 +890,9 @@ class HardwarePage(QWidget):
             control_paths=self._control_paths,
             board_vendor=self._board_vendor(),
             stalled_ids=state.stalled_fan_ids if state else frozenset(),
+            name_sources=self._header_name_sources(headers),
+            board_siv=layout.siv if layout else "",
+            board_listed=layout.board_listed if layout else None,
         )
         self._sync_header_cards(header_views)
         self._gate_device_cards(device_views, header_views)
@@ -1262,6 +1304,7 @@ class HardwarePage(QWidget):
         # construction — otherwise the panel is stuck on its empty note for the
         # whole session for anyone who opened Hardware before the first poll.
         self._render_voltages()
+        self._render_board_layout()
         if not self._readiness_unsupported and not self._readiness_auto_fetched:
             self._readiness_auto_fetched = True  # latch BEFORE emit → no double-fetch
             self._fetch_readiness()
@@ -1345,6 +1388,7 @@ class HardwarePage(QWidget):
     def _on_hw_diagnostics_changed(self) -> None:
         self._voltage_refresh_error = ""
         self._render_voltages()
+        self._render_board_layout()
 
     @Slot(list)
     def _on_headers_for_readiness(self, headers: list) -> None:
@@ -1442,6 +1486,7 @@ class HardwarePage(QWidget):
         self._render_actions(build_recommended_actions(items), summary)
         self._render_superio(build_superio_panel(hw.superio))
         self._render_voltages()
+        self._render_board_layout()
 
     def _render_checklist(self, groups) -> None:
         _clear_layout(self._checklist_layout)
@@ -1751,6 +1796,49 @@ class HardwarePage(QWidget):
                 _note_label(panel.footnote, "Hardware_Label_voltagesFootnote")
             )
         self._add_voltage_error_note(panel)
+
+    def _render_board_layout(self) -> None:
+        """Render the DEC-500 Board layout panel from the cached diagnostics —
+        the same snapshot, and the same redraw points, as the Voltages panel."""
+        _clear_layout(self._board_layout_layout)
+        diag = getattr(self._diag, "last_hw_diagnostics", None)
+        board = getattr(diag, "board", None)
+        panel = build_board_layout_panel(
+            getattr(diag, "board_layout", None), board_name=getattr(board, "name", "") or ""
+        )
+        self._board_layout_card.setVisible(panel.has_layout)
+        if not panel.has_layout:
+            return
+        for text, name in (
+            (panel.title_text, "Hardware_Label_boardLayoutTitle"),
+            (panel.listing_text, "Hardware_Label_boardLayoutListing"),
+            (panel.coverage_text, "Hardware_Label_boardLayoutCoverage"),
+            (panel.source_text, "Hardware_Label_boardLayoutSource"),
+        ):
+            if text:
+                self._board_layout_layout.addWidget(_note_label(text, name))
+        if panel.rows:
+            table = QTableWidget(len(panel.rows), len(_BOARD_LAYOUT_COLS))
+            table.setObjectName("Hardware_Table_boardLayout")
+            table.setHorizontalHeaderLabels(_BOARD_LAYOUT_COLS)
+            apply_dense_table(table)
+            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            header = table.horizontalHeader()
+            header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            header.setStretchLastSection(True)
+            for i, row in enumerate(panel.rows):
+                _ensure_items(table, i, len(_BOARD_LAYOUT_COLS))
+                table.item(i, 0).setText(row.name)
+                table.item(i, 1).setText(row.channel)
+                table.item(i, 2).setText(row.kind_text)
+                if row.note:
+                    for col in range(len(_BOARD_LAYOUT_COLS)):
+                        table.item(i, col).setToolTip(row.note)
+            self._board_layout_layout.addWidget(table)
+        if panel.footnote:
+            self._board_layout_layout.addWidget(
+                _note_label(panel.footnote, "Hardware_Label_boardLayoutFootnote")
+            )
 
     def _add_voltage_error_note(self, panel) -> None:
         if panel.refresh_error_text:

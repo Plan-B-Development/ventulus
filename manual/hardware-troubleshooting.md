@@ -405,7 +405,8 @@ Ventulus fills the gap by choosing each header's name in this order:
 3. **`/etc/sensors.d` and `/usr/share/sensors/*`** chip blocks (libsensors
    configuration: `chip`, `label` and `ignore` lines).
 4. **Ventulus's own per-board table**, matched on your board's vendor and model.
-5. **The node id** (`pwm1`), when nothing above knows the board.
+5. **The board catalogue name**, on Gigabyte boards (next section).
+6. **The node id** (`pwm1`), when nothing above knows the board.
 
 The name is not only cosmetic: a header whose name says CPU or pump gets the 30 %
 minimum when it joins a fan role. The per-board table currently covers the
@@ -423,6 +424,58 @@ minimum when it joins a fan role. The per-board table currently covers the
 A label with an `(unverified)` suffix is a hint, not a fact (no table entry carries
 one today). The Fan Wizard is the safe way to confirm which physical fan is on which
 header.
+
+### Board header names from the it87 catalogue
+
+**What it does.** On a Gigabyte board running the out-of-tree
+[it87 driver](driver-setup.md), the board publishes its firmware layout, a code
+called the SIV (`A008090A` on an X870E AORUS MASTER). The daemon looks the layout up
+in a catalogue built from the it87 project's Gigabyte sensor configurations and names
+the fan headers and temperatures the driver left unnamed: `CPU_FAN`,
+`SYS_FAN5_PUMP`, `VRM MOS`. (Names for extra fan inputs with no speed control appear
+only in the Board layout panel.) A header's name becomes its name everywhere in
+Ventulus, and it does what the same label from the driver would do:
+
+- a header named `…_PUMP` is protected as a pump: identify changes its speed instead
+  of stopping it, no [fan test](fan-tests.md) drives it below the pump floor, and a
+  profile holds it at that floor (30 %, or 70 % on a header in DC mode);
+- a header named `CPU_FAN` or `CPU_OPT` gets the 30 % minimum in a fan role.
+
+A `…_PUMP` header takes a pump or a fan; the name says what the header is for, not
+what is plugged into it. Temperatures get their names for display only: a
+temperature the catalogue calls `CPU` is a board thermistor, not your CPU's own
+sensor, and Ventulus never treats it as one. An `EC_TEMP` header reads a thermistor
+probe you plug in; without one, ignore its reading.
+
+**How sure it is.** The names come from configurations other owners wrote and
+checked for their boards, matched on the layout code rather than the board name, and
+are **not verified on your board**. The header's card says so ("Named from the it87
+board catalogue for layout …; not verified on this board."), and the header's details
+show the board name and where the shown name came from. The **Board layout** panel on the Hardware page
+shows the layout code, whether the catalogue lists your board model for it, and
+every name it gave. If a name is wrong, set the header's role on its card (**Set
+role…**): a role you assign can add pump protection or a floor, but can never take
+away the protection a pump name gives. Rename the header to change what it is
+called.
+
+**Why some names stay generic.**
+
+- Your driver publishes no layout code: the in-kernel `it87`, or an out-of-tree
+  build older than the one that added it. See [Driver Setup](driver-setup.md).
+- You installed the driver after the daemon started. The daemon reads the layout
+  once, as it starts: restart it (`sudo systemctl restart ventulusd`), or reboot.
+- The layout is not in the catalogue yet.
+- The layout does not map that channel ("Not mapped for this board"). That does not
+  mean nothing is connected.
+- Two independent readings of GIGABYTE's own sensor tables disagree about that
+  channel, so it is left unnamed rather than guessed.
+- The driver already names the channel. A driver label always wins.
+
+**How to help.** If a name is wrong, or a layout is missing, open an issue with the
+output of `cat /sys/class/gigabyte/id/gigabyte_siv`, your board model, and which
+physical header the fan is on (the Fan Wizard finds that out safely). The fix belongs
+upstream in the it87 project's Gigabyte configurations, from which the catalogue is
+regenerated.
 
 ## Intel Arc GPUs are monitor-only
 

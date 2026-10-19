@@ -159,7 +159,7 @@ def _sensor(value_c: float, thresholds: SensorThresholds) -> SensorReading:
 
 def _row(s: SensorReading):
     return ov.build_sensor_rows(
-        [s], classify=lambda r: classify_reading(r, board_vendor="", overrides={})
+        [s], classify=lambda r: classify_reading(r, board_vendor="", overrides={}), board_names={}
     )[0]
 
 

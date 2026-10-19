@@ -446,13 +446,22 @@ class OverviewPage(QWidget):
             peers = [s.id for s in self._state.sensors] + [u.id for u in rows]
             for u in rows:
                 secs = max(0, u.unavailable_for_ms // 1000)
-                name = sensor_display_name(u.id, u.label, peers=peers)
+                name = sensor_display_name(
+                    u.id,
+                    u.label,
+                    peers=peers,
+                    board_names=self._state.board_channel_names if self._state else {},
+                )
                 lines.append(f"   • {name} — {u.reason} (unavailable {secs}s)")
             self._unavailable_label.setText("\n".join(lines))
             self._unavailable_label.setVisible(True)
         self._refresh_summary()
 
     # ── Sensor table rendering ───────────────────────────────────────
+
+    def _board_names(self) -> dict[str, str]:
+        """``AppState.board_channel_names`` (DEC-500), empty without a state."""
+        return self._state.board_channel_names if self._state is not None else {}
 
     def _classify(self, sensor):
         """Classify ``sensor`` through ``AppState.classify_sensor`` — the one
@@ -492,14 +501,20 @@ class OverviewPage(QWidget):
         self._sensor_table.setRowCount(total)
         self._sensor_table.clearSpans()
 
-        for i, vm in enumerate(build_sensor_rows(visible, classify=self._classify)):
+        for i, vm in enumerate(
+            build_sensor_rows(visible, classify=self._classify, board_names=self._board_names())
+        ):
             self._populate_sensor_row(i, vm, dimmed=False)
 
         if hidden:
             toggle_row = len(visible)
             self._set_hidden_toggle_row(toggle_row, len(hidden))
             if self._hidden_group_expanded:
-                for j, vm in enumerate(build_sensor_rows(hidden, classify=self._classify)):
+                for j, vm in enumerate(
+                    build_sensor_rows(
+                        hidden, classify=self._classify, board_names=self._board_names()
+                    )
+                ):
                     self._populate_sensor_row(toggle_row + 1 + j, vm, dimmed=True)
 
         self._refresh_summary()
@@ -839,6 +854,7 @@ class OverviewPage(QWidget):
                 parent=self,
                 classification=classification,
                 peers=peers,
+                board_names=self._board_names(),
                 freshness=freshness,
             )
             self._sensor_detail_dialog.finished.connect(self._on_sensor_detail_closed)
@@ -849,6 +865,7 @@ class OverviewPage(QWidget):
                 daemon_cls,
                 classification=classification,
                 peers=peers,
+                board_names=self._board_names(),
                 freshness=freshness,
             )
         self._sensor_detail_dialog.show()

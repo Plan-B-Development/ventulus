@@ -188,7 +188,7 @@ def test_build_fan_rows_freshness_state_map():
 
 
 def test_build_sensor_rows_moves_source_into_tooltip():
-    r = ov.build_sensor_rows([_sensor(source="amd_gpu")], classify=_classifier())[0]
+    r = ov.build_sensor_rows([_sensor(source="amd_gpu")], classify=_classifier(), board_names={})[0]
     assert r.chip == "k10temp"
     assert "Source: amd_gpu" in r.tooltip  # the daemon-subsystem column is now hover-only
     assert r.confidence_state in ("ok", "info", "neutral", "warn")
@@ -196,13 +196,13 @@ def test_build_sensor_rows_moves_source_into_tooltip():
 
 def test_build_sensor_rows_alarm_suffix():
     s = _sensor(value_c=95.0, thresholds=SensorThresholds(crit_c=90.0))
-    r = ov.build_sensor_rows([s], classify=_classifier())[0]
+    r = ov.build_sensor_rows([s], classify=_classifier(), board_names={})[0]
     assert "⚠ ALARM" in r.value_text
     assert r.is_alarm
 
 
 def test_build_sensor_rows_prefix_matches_flags():
-    r = ov.build_sensor_rows([_sensor()], classify=_classifier())[0]
+    r = ov.build_sensor_rows([_sensor()], classify=_classifier(), board_names={})[0]
     if r.is_quirky:
         assert r.label.startswith("⚠ ")
     elif r.is_low_confidence:
@@ -218,6 +218,7 @@ def test_build_sensor_rows_low_confidence_gets_question_prefix():
     r = ov.build_sensor_rows(
         [_sensor(sid="x:temp1", chip_name="mystery", label="temp1")],
         classify=_classifier(),
+        board_names={},
     )[0]
     assert r.is_low_confidence and not r.is_quirky
     assert r.label.startswith("? ")
@@ -229,6 +230,7 @@ def test_build_sensor_rows_quirky_gets_warning_prefix():
     r = ov.build_sensor_rows(
         [_sensor(sid="x:cputin", chip_name="nct6776", label="CPUTIN")],
         classify=_classifier("ASUS"),
+        board_names={},
     )[0]
     assert r.is_quirky
     assert r.label.startswith("⚠ ")

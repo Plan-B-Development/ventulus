@@ -16,7 +16,7 @@ actually represents.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from html import escape
 from typing import TYPE_CHECKING
 
@@ -202,6 +202,7 @@ def build_sensor_detail_html(
     *,
     classification: SensorClassification,
     peers: Iterable[str],
+    board_names: Mapping[str, str],
 ) -> str:
     """Build the static report for the detail dialog: identity, classification,
     board context, thresholds and driver docs. What moves with each reading is
@@ -229,7 +230,10 @@ def build_sensor_detail_html(
 
     # ── Header line ────────────────────────────────────────────────
     conf = _CONFIDENCE_DISPLAY.get(classification.confidence, classification.confidence)
-    header_label = escape(sensor_display_name(sensor.id, sensor.label, peers=peers) or "Sensor")
+    header_label = escape(
+        sensor_display_name(sensor.id, sensor.label, peers=peers, board_names=board_names)
+        or "Sensor"
+    )
     parts.append(
         f'<div style="color:{t.text_primary};font-size:large;font-weight:bold">'
         f"{header_label}</div>"
@@ -398,6 +402,7 @@ class SensorDetailDialog(QDialog):
         *,
         classification: SensorClassification,
         peers: Iterable[str],
+        board_names: Mapping[str, str],
         freshness: Freshness | None = None,
     ) -> None:
         super().__init__(parent)
@@ -432,6 +437,7 @@ class SensorDetailDialog(QDialog):
             daemon_classification,
             classification=classification,
             peers=peers,
+            board_names=board_names,
             freshness=freshness,
         )
 
@@ -448,13 +454,17 @@ class SensorDetailDialog(QDialog):
         *,
         classification: SensorClassification,
         peers: Iterable[str],
+        board_names: Mapping[str, str],
         freshness: Freshness | None = None,
     ) -> None:
         """Replace contents in place — used when the dialog is reopened on a
         different row of the table without rebuilding the widget."""
         peers = list(peers)
         self._sensor_id = sensor.id
-        title = sensor_display_name(sensor.id, sensor.label, peers=peers) or "Sensor"
+        title = (
+            sensor_display_name(sensor.id, sensor.label, peers=peers, board_names=board_names)
+            or "Sensor"
+        )
         self.setWindowTitle(f"Sensor Detail — {title}")
         self._browser.setHtml(
             build_sensor_detail_html(
@@ -463,6 +473,7 @@ class SensorDetailDialog(QDialog):
                 daemon_classification,
                 classification=classification,
                 peers=peers,
+                board_names=board_names,
             )
         )
         self.set_live(sensor, freshness)

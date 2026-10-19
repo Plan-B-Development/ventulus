@@ -49,7 +49,7 @@ import pytest
 
 from ventulus.api.models import Capabilities, HwmonHeader
 from ventulus.knowledge.sensor_knowledge import _LIQUID_COOLER_CHIPS, is_liquid_cooler_chip
-from ventulus.services.pump_protection import header_is_pump_protected
+from ventulus.services.pump_protection import header_infers_pump, header_is_pump_protected
 
 FIXTURE = Path(__file__).parent / "fixtures" / "header_role_classification.json"
 _CASES = json.loads(FIXTURE.read_text())["cases"]
@@ -103,11 +103,37 @@ def test_header_pump_protection_parity(case):
         pwm_index=case["pwm_index"],
         is_aio=case["is_aio"],
         role=case["role"],
+        # DEC-500: the catalogue name is an input, absent from most cases.
+        board_label=case.get("board_label", ""),
         # None, deliberately: this is the reconstruction path, and `None` must be
         # read as "this daemon did not say" rather than as "no".
         stop_permitted=None,
     )
     assert header_is_pump_protected(header, _caps()) == case["pump_protected"], case["name"]
+
+
+@pytest.mark.parametrize("case", _CASES, ids=[c["name"] for c in _CASES])
+def test_header_inference_matches_the_oracle_without_the_daemon_role(case):
+    """The GUI's own inference, with the daemon's ``role`` withheld.
+
+    The test above short-circuits on ``role == "pump"``, so a pump case agrees by
+    construction (the limit the module docstring records). ``header_infers_pump``
+    never reads ``role``: it is the GUI reasoning from the label, the
+    board-catalogue name (DEC-500) and the chip alone, as the daemon's
+    classifier does. Every oracle case has no assignment and no profile, so the
+    inference IS the union — and here each case is an independent agreement.
+    """
+    header = HwmonHeader(
+        id=f"hwmon:{case['chip_name']}:dev:pwm{case['pwm_index']}:{case['label']}",
+        label=case["label"],
+        chip_name=case["chip_name"],
+        pwm_index=case["pwm_index"],
+        is_aio=case["is_aio"],
+        role="unknown",
+        board_label=case.get("board_label", ""),
+        stop_permitted=None,
+    )
+    assert header_infers_pump(header, _caps()) == case["pump_protected"], case["name"]
 
 
 @pytest.mark.parametrize("case", _CASES, ids=[c["name"] for c in _CASES])

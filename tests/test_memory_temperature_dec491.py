@@ -131,17 +131,20 @@ class TestClassification:
 
 class TestDisplayName:
     def test_two_dimms_get_different_names_from_their_spd_address(self):
-        assert sensor_display_name(DIMM_A, "temp1", peers=[]) == "DIMM 0x51"
-        assert sensor_display_name(DIMM_B, "temp1", peers=[]) == "DIMM 0x53"
+        assert sensor_display_name(DIMM_A, "temp1", peers=[], board_names={}) == "DIMM 0x51"
+        assert sensor_display_name(DIMM_B, "temp1", peers=[], board_names={}) == "DIMM 0x53"
 
     def test_ddr4_jc42_address(self):
-        assert sensor_display_name("hwmon:jc42:0-0018:temp1", "temp1", peers=[]) == "DIMM 0x18"
+        assert (
+            sensor_display_name("hwmon:jc42:0-0018:temp1", "temp1", peers=[], board_names={})
+            == "DIMM 0x18"
+        )
 
     def test_the_bus_number_is_not_part_of_the_name(self):
         # The kernel numbers i2c buses dynamically; the address is what stays.
-        assert sensor_display_name("hwmon:spd5118:3-0051:temp1", "temp1", peers=[]) == (
-            sensor_display_name(DIMM_A, "temp1", peers=[])
-        )
+        assert sensor_display_name(
+            "hwmon:spd5118:3-0051:temp1", "temp1", peers=[], board_names={}
+        ) == (sensor_display_name(DIMM_A, "temp1", peers=[], board_names={}))
 
     @pytest.mark.parametrize(
         "sid",
@@ -152,7 +155,7 @@ class TestDisplayName:
         ],
     )
     def test_unparsable_memory_id_keeps_the_plain_name(self, sid):
-        assert sensor_display_name(sid, "temp1", peers=[]) == "temp1"
+        assert sensor_display_name(sid, "temp1", peers=[], board_names={}) == "temp1"
 
     def test_every_other_sensor_keeps_label_or_id(self):
         # The whole demo population (DIMMs excepted) plus labelless sensors: the
@@ -166,7 +169,9 @@ class TestDisplayName:
             SensorReading(id="", label=""),
         ]
         for s in others:
-            assert sensor_display_name(s.id, s.label, peers=[]) == (s.label or s.id), s.id
+            assert sensor_display_name(s.id, s.label, peers=[], board_names={}) == (
+                s.label or s.id
+            ), s.id
 
 
 # ─── surfaces ───────────────────────────────────────────────────────────
@@ -209,7 +214,7 @@ class TestDefaultSeries:
 class TestOverview:
     def test_rows_name_each_dimm_without_the_low_confidence_mark(self):
         rows = build_sensor_rows(
-            [_dimm(DIMM_A), _dimm(DIMM_B)], classify=AppState().classify_sensor
+            [_dimm(DIMM_A), _dimm(DIMM_B)], classify=AppState().classify_sensor, board_names={}
         )
         assert [r.label for r in rows] == ["DIMM 0x51", "DIMM 0x53"]
         assert not any(r.is_low_confidence for r in rows)
@@ -243,16 +248,22 @@ class TestOverview:
 
 class TestControlsPicker:
     def test_combo_label_names_the_dimm_and_says_memory(self):
-        assert sensor_combo_label(_dimm(DIMM_A), {}, peers=[]).startswith("DIMM 0x51 (memory)")
-        assert sensor_combo_label(_board(), {}, peers=[]).startswith("SYSTIN (board)")
-        assert sensor_combo_label(_cpu(), {}, peers=[]).startswith("★ Tctl (CPU)")
+        assert sensor_combo_label(_dimm(DIMM_A), {}, peers=[], board_names={}).startswith(
+            "DIMM 0x51 (memory)"
+        )
+        assert sensor_combo_label(_board(), {}, peers=[], board_names={}).startswith(
+            "SYSTIN (board)"
+        )
+        assert sensor_combo_label(_cpu(), {}, peers=[], board_names={}).startswith("★ Tctl (CPU)")
 
     def test_an_unlisted_kind_shows_as_sent(self):
         s = SensorReading(id="x", kind="future_temp", label="X", value_c=None)
-        assert sensor_combo_label(s, {}, peers=[]) == "X (future_temp)"
+        assert sensor_combo_label(s, {}, peers=[], board_names={}) == "X (future_temp)"
 
     def test_aio_wizard_choices_carry_the_name(self):
-        labels = [c["label"] for c in build_sensor_choices([_dimm(DIMM_A), _board()], {})]
+        labels = [
+            c["label"] for c in build_sensor_choices([_dimm(DIMM_A), _board()], {}, board_names={})
+        ]
         assert labels == ["DIMM 0x51", "SYSTIN"]
 
 
@@ -281,7 +292,7 @@ class TestCritGuard:
         assert trusted_crit_c(s) is None
         assert not is_alarm_active(s)
         html = build_sensor_detail_html(
-            s, None, classification=AppState().classify_sensor(s), peers=[s.id]
+            s, None, classification=AppState().classify_sensor(s), peers=[s.id], board_names={}
         )
         assert "exceeds crit" not in build_sensor_live_html(s)
         assert "not a plausible module limit" in html
@@ -305,7 +316,7 @@ class TestCritGuard:
 def test_demo_mode_shows_a_ddr5_pair_under_memory():
     sensors = DemoService().sensors()
     memory = [s for s in sensors if sensor_is_memory(s)]
-    assert sorted(sensor_display_name(s.id, s.label, peers=[]) for s in memory) == [
+    assert sorted(sensor_display_name(s.id, s.label, peers=[], board_names={}) for s in memory) == [
         "DIMM 0x51",
         "DIMM 0x53",
     ]

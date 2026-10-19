@@ -652,6 +652,10 @@ def role_tagged_member_label(label: str, header_role: str) -> str:
 #: the daemon that advertises ``control.cpu_fan_role_floor`` (`ROLE-a`).
 _FLOOR_ROLE_PUMP = "pump"
 _FLOOR_ROLE_CPU_FAN = "cpu_fan"
+#: DEC-500: not a role — the header's board-catalogue name names a CPU fan or
+#: pump, which the daemon floors on (``board_label_earns_hard_floor``).
+FLOOR_ROLE_BOARD_NAME = "board_name"
+_ROLE_SOURCE_BOARD_CATALOGUE = "board_catalogue"
 
 
 def _openfan_role_key(member_id: str) -> str | None:
@@ -688,6 +692,14 @@ def floor_role_header_roles(headers, capabilities, openfan_roles) -> Mapping[str
     required, with no default, so a caller cannot silently drop the channels
     (the DEC-379 shape); it is empty where the daemon has no OpenFan roles.
 
+    DEC-500 adds the daemon's board-catalogue term: a header whose ``board_label``
+    names a CPU fan or pump (``cpu``/``pump``/``aio``, the label rule) maps to
+    :data:`FLOOR_ROLE_BOARD_NAME`, and so does a role the daemon inferred from
+    that name (``role_source == "board_catalogue"``) — the floor is the same, but
+    nobody assigned it, and the badge says why. That catches a member saved as
+    ``pwm5`` before the catalogue named the header ``CPU_OPT``, which no role
+    covers and the daemon floors at 30%.
+
     Display only, and live: it follows the role both ways, as the daemon's
     assignment term does. It is deliberately NOT ``header_is_pump_protected`` —
     that union also carries terms the label classifier already mirrors, and on
@@ -698,7 +710,14 @@ def floor_role_header_roles(headers, capabilities, openfan_roles) -> Mapping[str
     roles = {_FLOOR_ROLE_PUMP}
     if daemon_supports("cpu_fan_role_floor", capabilities) is True:
         roles.add(_FLOOR_ROLE_CPU_FAN)
-    floor_roles = {h.id: h.role for h in headers or () if getattr(h, "role", "") in roles}
+    floor_roles: dict[str, str] = {}
+    for h in headers or ():
+        role = getattr(h, "role", "")
+        if role in roles:
+            from_board = getattr(h, "role_source", "") == _ROLE_SOURCE_BOARD_CATALOGUE
+            floor_roles[h.id] = FLOOR_ROLE_BOARD_NAME if from_board else role
+        elif _label_indicates_cpu_or_pump(getattr(h, "board_label", "")):
+            floor_roles[h.id] = FLOOR_ROLE_BOARD_NAME
     for r in openfan_roles or ():
         key = _openfan_role_key(getattr(r, "fan_id", ""))
         if key is not None and getattr(r, "role", "") in roles:

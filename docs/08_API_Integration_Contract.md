@@ -1159,15 +1159,17 @@ derived GUI-side by `AppState.fan_display_name` / `fan_fallback_name`, in this o
 4. hwmon header `label` from `GET /hwmon/headers` (hwmon fans only), **unless it is a
    synthesised placeholder** (see below)
 5. `/etc/sensors.d` + the in-repo board fallback table (`hwmon_label_resolver`, hwmon only)
-6. raw `pwmN` for a fan that matches a known hwmon header; the raw fan id otherwise (a fan
+6. the daemon's board-catalogue name, the header's `board_label` (DEC-500, below the
+   checked in-repo table)
+7. raw `pwmN` for a fan that matches a known hwmon header; the raw fan id otherwise (a fan
    in no header list at all), as a last resort
 
 **`HwmonHeader.label` is never empty, and may be invented (DEC-229).** The daemon's
 `read_label` tries `pwm{N}_label`, then `fan{N}_label`, then *synthesises* `pwm{N}`.
 The it87 driver publishes no label files for most Gigabyte boards, so the synthesised form
-is common. Tiers 4-6 therefore live inside `resolve_hwmon_header_label`, which skips a
+is common. Tiers 4-7 therefore live inside `resolve_hwmon_header_label`, which skips a
 label exactly equal to the header's own `pwm{index}` token (`is_placeholder_hwmon_label`)
-and lets tiers 5-6 run. The predicate is deliberately exact rather than a "looks generic"
+and lets tiers 5-7 run. The predicate is deliberately exact rather than a "looks generic"
 heuristic: `pwm[1-*]_label` is not a documented hwmon attribute at all (only
 `fan[1-*]_label` is), and discarding a genuine board label would be the worse failure.
 
@@ -1178,7 +1180,7 @@ saved profile member id and `fan_aliases` key would change.
 Tier 5's board-table half is keyed on DMI `(vendor, board)` from `GET /diagnostics/hardware`,
 which the GUI fetches once on the first capabilities cycle and stores in `AppState.board_info`
 via `DiagnosticsService.set_hw_diagnostics` (its single writer). With no board identity the
-table cannot match and tier 6 answers: the result is degraded, never wrong.
+table cannot match and a later tier answers: the result is degraded, never wrong.
 
 **Profile member labels are a separate store with a different job (DEC-228).**
 `ControlMember.member_label` lives in the profile document, which the daemon holds as
@@ -1411,11 +1413,29 @@ Use to discover:
     survives a restart, and is dropped at boot when its header id is no longer discovered.
 
 - `role_source` (string, DEC-311): how `role` was established, one of
-  `"none"` | `"label"` | `"chip_mapping"` | `"user_assigned"`. Lets a client distinguish a
-  confident classification from a header worth asking the user about. Note that on boards whose
+  `"none"` | `"label"` | `"chip_mapping"` | `"board_catalogue"` (DEC-500, daemon ≥ 5.3.0) |
+  `"user_assigned"`. Lets a client distinguish a confident classification from a header worth
+  asking the user about; render a token you do not know. Note that on boards whose
   Super-I/O publishes no `pwmN_label`/`fanN_label` files (common; measured on `it8696`, which
   exposes five channels and zero label files), *every* header comes back
-  `role: "unknown", role_source: "none"` until the user assigns one.
+  `role: "unknown", role_source: "none"` until the user assigns one, unless the board
+  catalogue names it (next field).
+- `board_label` (string, optional, DEC-500, daemon ≥ 5.3.0): the board catalogue's name for
+  the header (`CPU_FAN`, `SYS_FAN5_PUMP`), from frankcrawford/it87's Gigabyte config for the
+  board's SIV (§ GET /diagnostics/hardware, Board layout). **Sent only where the driver
+  publishes no label**, so `label` is then the synthesised `pwmN`; never part of `id`; omitted
+  everywhere else and by older daemons. **It is role evidence on the daemon side**: below a
+  real driver label and above chip mapping, `classify_header_role` applies the same label
+  rules to it, so a `*_PUMP` name gives `role: "pump", role_source: "board_catalogue"` and
+  that header is pump-protected everywhere (`stop_permitted: false`, identify perturbs it, the
+  engine floors it); `CPU_OPT` stays `unknown`. The engine also floors a header whose
+  catalogue name contains `cpu`/`pump`/`aio` at 30 % — the DEC-252 "daemon's own label"
+  term for a header with no label of its own. Like every floor term it only adds. (A profile
+  member saved under the catalogue name is floored by that label from the start; one saved as
+  the bare `pwmN` gets the catalogue's floor once the engine has read the header set, normally
+  its first tick, later only if the hwmon controller was busy as the engine started.) The name
+  is **not verified on this machine**; a client showing it as a header's name should say
+  where it came from.
 
 ### GET /poll
 Combined batch endpoint returning status + sensors + fans in one call.
@@ -1658,8 +1678,8 @@ same chip + SIV maps to different rail names on AMD and Intel boards.
   configuration"). It is not a named rail, and `value_v` is its pin reading like
   any unidentified channel. It is **not** a claim that the input is unconnected:
   the X299 configs ignore an input for one CPU family that they label `DRAM
-  CH(A/B)` for the other. A client should say the board does not use it, not that
-  it is unwired.
+  CH(A/B)` for the other. A client should say the board's layout does not map it,
+  not that it is unused or unwired.
 
 **None of the three ever appears on an `identified` channel**: the driver labels
 only the chip's internal inputs, already scaled, so a catalogue multiplier would
@@ -1687,6 +1707,76 @@ are GPU voltages, not board rails, and are excluded).
 
 Entries are ordered by `(chip_name, device_id, channel)`, numerically by channel,
 so a chip with more than ten channels does not emit `in10` before `in2`.
+
+Since DEC-500 (daemon ≥ 5.3.0) the catalogue leaves out every channel where an
+independent derivation of GIGABYTE's own sensor tables disagrees with the it87
+config: such an input carries none of the three fields and reads as an
+unidentified channel. That changes 39 inputs on nine layouts: the IT8689E's
+`in0`–`in6` on the five X570S layouts, which 3.3.0–5.2.x reported
+`board_unmapped`, and the IT8792E's `in4` on four layouts, which they named
+`Chipset Core 2.5V` with a 1.649 divider.
+
+#### Board layout (DEC-500)
+
+`board_layout` (object, **omitted** when the board publishes no SIV — every
+non-Gigabyte board, and Gigabyte boards on the in-kernel `it87`, which does not
+expose `/sys/class/gigabyte/id/gigabyte_siv` — or the CPU vendor is unknown, and
+on older daemons) is the board's GIGABYTE firmware layout and what the board
+catalogue says about its unlabelled channels. Additive; `api_version` unchanged.
+
+The key (CPU vendor and SIV) is read **once, at daemon start**, before header
+discovery, and every catalogue fact is answered under it: the headers' names and
+inferred roles, this object, and `POST /hwmon/rescan`'s headers. That is what the
+running controller enforces, so an SIV that appears later (the out-of-tree driver
+installed mid-session) takes effect at the next daemon start, and until then
+`board_firmware_counts`, read on each request, can show a layout this object
+does not.
+
+```json
+"board_layout": {
+  "siv": "A008090A", "platform": "AMD", "in_catalogue": true,
+  "catalogue_commit": "bd7a566c8a60fe0308d67e26761e16260368191a",
+  "listed_boards": ["X870 AORUS ELITE WIFI7", "X870E AORUS MASTER", "X870E AORUS PRO"],
+  "board_listed": true,
+  "channels": [
+    {"id": "hwmon:it8696:it87.2624:pwm1:pwm1", "kind": "pwm", "board_label": "CPU_FAN"},
+    {"id": "hwmon:it8696:it87.2624:pwm6:pwm6", "kind": "pwm", "board_unmapped": true},
+    {"id": "hwmon:it87952:it87.2656:fan3:fan3", "kind": "fan", "board_label": "SYS_FAN4"},
+    {"id": "hwmon:it8696:it87.2624:temp5", "kind": "temp", "board_label": "VRM MOS"}
+  ]
+}
+```
+
+- `siv`: the raw SIV word as eight upper-case hex digits. The catalogue key is
+  **platform + canonical chip + SIV**, never the board name: upstream lists board
+  names for some layouts, and one name can map to two.
+- `platform`: `"AMD"` or `"Intel"`, the CPU vendor the key used.
+- `in_catalogue`: whether the catalogue has any block for this SIV on this
+  platform. `false` is a layout nobody has mapped yet: `channels` is then empty.
+- `catalogue_commit`: the frankcrawford/it87 commit the table was generated from.
+- `listed_boards`: the board names upstream lists for this SIV (empty where it
+  says "names not currently known"). `board_listed`: whether this board's DMI
+  `board_name` is one of them (ASCII case-insensitive, trimmed). The names apply
+  whether or not it is: the layout, not the name, is the key.
+- `channels` (omitted when empty), sorted by `id`: one entry per **discovered**
+  channel the catalogue covers **and whose driver published no label** (a header
+  whose `label` is the synthesised `pwmN`, a monitor-only fan whose label is
+  `fanN`, a temperature whose label is `tempN`). `id` is the id the entity is
+  published under elsewhere, and is the client's join key: a header's on
+  `/hwmon/headers` (and `/fans`), a monitor-only fan's on `/inventory/hwmon`
+  `monitor_only_fans` (never on `/fans`, which carries headers only), a
+  temperature's on `/sensors`; `kind` is `"pwm"`, `"fan"` or `"temp"` (render an unknown
+  token). Exactly one of `board_label` (the board's name, not verified on this
+  machine) and `board_unmapped` (`true`: the layout does not map the channel,
+  upstream `ignore` — not a claim that nothing is connected) is present. A channel
+  the catalogue withholds (the derivations disagree) or never mentions is not
+  listed. A header's entry repeats its `board_label` from `/hwmon/headers`.
+
+**Names only, for temperatures and fans.** A temperature the catalogue calls
+`CPU` keeps the daemon's own `kind`, and the thermal ladder never reads a
+catalogue name; nothing here is on `/poll`. A client must keep classifying a
+sensor by its own label and treat `board_label` as a display name only, shown
+while the sensor's live label is still the synthesised one.
 
 #### Module collisions
 

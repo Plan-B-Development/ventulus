@@ -111,6 +111,7 @@ class TestSecurityEscape:
         rows = build_sensor_rows(
             [SensorReading(id="s1", kind="cpu_temp", label="Tctl", value_c=40.0, source="<b>src")],
             classify=lambda s: classify_reading(s, board_vendor="ASUS", overrides={}),
+            board_names={},
         )
         assert "<b>src" not in rows[0].tooltip
         assert "&lt;b&gt;src" in rows[0].tooltip

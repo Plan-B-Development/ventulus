@@ -15,7 +15,7 @@ mirror the current `_on_capabilities` / `_on_status` / `_on_fans` / `_set_sensor
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from html import escape
 
@@ -31,6 +31,7 @@ from ventulus.api.models import (
 )
 from ventulus.knowledge.hwmon_label_resolver import is_placeholder_hwmon_label
 from ventulus.knowledge.sensor_knowledge import (
+    EC_TEMP_PROBE_NOTE,
     MEMORY_SOURCE_CLASSES,
     SensorClassification,
     format_sensor_tooltip,
@@ -658,9 +659,14 @@ SensorClassifier = Callable[[SensorReading], SensorClassification]
 
 
 def build_sensor_rows(
-    sensors: list[SensorReading], *, classify: SensorClassifier
+    sensors: list[SensorReading],
+    *,
+    classify: SensorClassifier,
+    board_names: Mapping[str, str],
 ) -> list[SensorRowVM]:
     """Mirror of `_set_sensor_row` (minus Qt): 8-column data + hover tooltip.
+
+    ``board_names`` is ``AppState.board_channel_names`` (``sensor_display_name``).
 
     The tooltip appends the daemon `Source:` line — the one datum the mockup
     moves out of the table into hover (Session min/max is already in the tooltip).
@@ -685,9 +691,13 @@ def build_sensor_rows(
             rate_c_per_s=s.rate_c_per_s,
         )
         tooltip += f"\nSource: {escape(s.source, quote=False) if s.source else '—'}"
+        name = sensor_display_name(s.id, s.label, peers=peers, board_names=board_names)
+        if board_names.get(s.id) == name and name.upper().startswith("EC_TEMP"):
+            # DEC-500: a board name from the catalogue; this header reads a probe.
+            tooltip += f"\n{EC_TEMP_PROBE_NOTE}"
         rows.append(
             SensorRowVM(
-                label=prefix + sensor_display_name(s.id, s.label, peers=peers),
+                label=prefix + name,
                 sensor_id=s.id or "—",
                 source_class_text=SOURCE_CLASS_DISPLAY.get(
                     classification.source_class, classification.source_class

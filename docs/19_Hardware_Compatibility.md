@@ -210,6 +210,25 @@ exactly as `sensors` does, so a block written for the old `it8696-*` name stops
 applying. [Driver Setup](../manual/driver-setup.md#it87-v20-renames-your-chips) has
 the detail.
 
+#### Board names from the SIV catalogue
+
+The ITE chips publish no fan or temperature labels. When the out-of-tree driver
+publishes the board's SIV (`/sys/class/gigabyte/id/gigabyte_siv`; the in-kernel
+`it87` does not), the daemon looks it up in a catalogue built from the
+frankcrawford/it87 Gigabyte sensor configs and names the channels the driver left
+unnamed (DEC-500): fan headers (`CPU_FAN`, `SYS_FAN5_PUMP`), monitor-only fans and
+temperatures (`VRM MOS`, `PCIEX16`), as it already named voltage rails (DEC-464).
+The key is the CPU platform, the chip and the SIV, never the board name. A header's
+catalogue name is role evidence: a `*_PUMP` header is protected as a pump and a
+`CPU_FAN` or `CPU_OPT` header gets the 30 % floor, as the same driver label would.
+A temperature's name is for display only. Where a second, independent reading of
+GIGABYTE's own sensor tables disagrees with a config, the channel is left unnamed
+(124 channels on 27 layouts, among them the A0030507 and A0040607 pump and `CPU_OPT`
+headers and the IT87952E `temp1` on five layouts). The Hardware page's
+Board layout panel shows the layout, whether upstream lists your board for it, and
+every name it gave. [Board header names](../manual/hardware-troubleshooting.md#board-header-names-from-the-it87-catalogue)
+in the manual covers what the names do and how to correct one.
+
 #### A secondary chip that does not enumerate
 
 On some systems only the primary chip appears (5 of 8 fan headers on an X870E AORUS

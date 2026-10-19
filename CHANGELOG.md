@@ -5,6 +5,31 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Added
+
+- **Gigabyte fan headers and temperatures show their board names.** With a daemon that reads
+  the board's firmware layout (ventulusd's next release) on a Gigabyte board running the out-of-tree
+  it87 driver, a header the driver leaves as `pwm1` is named from the it87 project's Gigabyte
+  configurations: `CPU_FAN`, `SYS_FAN5_PUMP`. Temperatures get names the same way (`VRM MOS`,
+  `PCIEX16`). Your own name, the driver's label, `/etc/sensors.d` and
+  Ventulus's checked board table still come first. The header's card and its details say the name
+  came from the board catalogue and is not verified on your board.
+- **A board name that says CPU or pump counts.** It becomes the header's name in a profile, so a
+  `CPU_FAN`, `CPU_OPT` or `…_PUMP` header gets the 30 % minimum in a fan role, and the daemon
+  protects a `…_PUMP` header as a pump. A role you assign can add to that, never take it away.
+  The minimum badge also shows the floor for a header saved under its old `pwmN` name, which the
+  daemon now holds at 30 %.
+- **Board layout panel on the Hardware page.** It shows the layout code, whether the it87 project
+  lists your board model for it, how many channels it named, the catalogue's source, and every name
+  with its chip channel. An `EC_TEMP` temperature notes that it reads only with a probe fitted.
+- **A catalogue-named supply rail far from nominal says so.** A `+12V`, `+5V` or `+3.3V` rail
+  reading more than 10 % off is marked "reading out of range" in the Voltages table. Display only.
+
+### Changed
+
+- **"Not used by this board" is now "Not mapped for this board"** in the Voltages table: the
+  board's layout does not map the input, which does not mean nothing is connected.
+
 ## [5.3.1] — 2026-10-17
 
 Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.2.0 is the current daemon release.
