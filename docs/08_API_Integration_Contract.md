@@ -1377,7 +1377,11 @@ Use to discover:
     `set_pwm_enable`; `nct6775` → `[0,1,2,3,4,5]`, cited from the kernel docs) and has none for
     unrecognised chips.
   - `rpm_min_threshold` / `rpm_max_threshold` (int, optional): from `fanN_min` / `fanN_max`.
-    Most Super-I/O chips expose only the minimum.
+    Most Super-I/O chips expose only the minimum. Absent when the chip's bound driver is the
+    out-of-tree `nct6687` or `nct6686` (daemons after 5.3.0): their builds that publish the pair
+    serve the slowest and fastest speeds seen since the module loaded, not limits. Mainline
+    `nct6683`, which names its devices the same way, keeps its `fanN_min`. An older daemon
+    publishes those speeds as thresholds.
   - `tach_pulses_per_rev` (int, optional): from `fanN_pulses`. **Absent on `it87`**, so `null`
     is the common case on the validation hardware rather than an anomaly.
   - `pwm_verification` (object, optional, DEC-456, daemon ≥ 3.2.0, capability
