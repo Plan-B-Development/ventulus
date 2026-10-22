@@ -5,6 +5,12 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+## [5.4.1] — 2026-10-22
+
+Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.3.1 is the current daemon
+release and drops the false ACPI conflict reports and nct6687/nct6686 RPM thresholds on its side.
+The ACPI card is hidden here with any daemon.
+
 ### Fixed
 
 - **ASUS boards using `asus_wmi_sensors` are no longer told a BIOS update is the fix for WMI
@@ -23,7 +29,7 @@ rename. Version numbers carry on from Control-OFC.
   ranges, sometimes with it87 advice on an MSI or ASRock Nuvoton board. The System State page,
   the readiness report and the Hardware page's Super-I/O notes no longer show it, even with an
   older daemon (an older daemon's *ACPI claims a Super-I/O chip's I/O ports* readiness item
-  still lists until the daemon is updated; ignore it). To check for a real conflict, run
+  still lists until the daemon is updated to 5.3.1; ignore it). To check for a real conflict, run
   `sudo dmesg | grep -i "conflicts with OpRegion"`; the hardware docs and manual now say so.
 - Hardware docs: the X670E AORUS MASTER and X870E AORUS MASTER X3D carry SYS_FAN7_PUMP and
   SYS_FAN8_PUMP on an ITE IT5701 controller (seen on Windows; no Linux report yet), and the
