@@ -93,9 +93,9 @@ If your board exposes both `asusec` and `nct6799`/`nct6798` in
 the extra sensors. Never try to write PWM through the EC or WMI interface.
 
 **`asus_ec_sensors` lists boards by exact DMI name**, and the list grows with every
-kernel: 55 boards in 7.2, 60 in the 7.3 release candidates. A board added in a recent
+kernel: 55 boards in 7.2, 60 in 7.3. A board added in a recent
 kernel is **not** in the 6.12 / 6.18 LTS kernels. The AMD boards on the list as of
-the 7.3 release candidates, with the kernel that added the newer ones:
+7.3, with the kernel that added the newer ones:
 
 - PRIME X470-PRO, PRIME X570-PRO, PRIME X670E-PRO WIFI
 - ProArt B550-CREATOR, ProArt X570-CREATOR WIFI, ProArt X670E-CREATOR WIFI,
@@ -122,9 +122,11 @@ X370 / X470 / B450 ROG CROSSHAIR VI / VII, ROG STRIX B450 and X470 boards, PRIME
 X470-PRO, and the X399 boards). The kernel documentation warns that some ASUS BIOSes
 implement WMI badly: fans stop, fans stick at maximum, or readings freeze, more likely
 the more often it is polled, with the PRIME X470-PRO "particularly bad". It names no
-safe polling rate. Update to a BIOS whose WMI method version is 2 or later (the driver
-refuses older versions), and soak-test while polling before you leave the machine
-unattended. The [AMD Sensor Interpretation Deep Dive](22_AMD_Sensor_Interpretation_Deep_Dive.md#asus-wmi-sensors-am4-and-x399-boards)
+safe polling rate, and no BIOS version is a known fix: the driver only loads when the
+BIOS reports WMI method version 2 or later, so that version is not the remedy, and the
+kernel doc queued for 7.4 says only that a more recent BIOS "might help"
+([hwmon patch, 2026-10-16](https://patch.msgid.link/20261016163509.249020-1-heyheyco@gmail.com)).
+Soak-test while polling before you leave the machine unattended. The [AMD Sensor Interpretation Deep Dive](22_AMD_Sensor_Interpretation_Deep_Dive.md#asus-wmi-sensors-am4-and-x399-boards)
 has the board list and what the readings mean.
 
 ### ACPI conflicts and BIOS settings
@@ -369,7 +371,7 @@ a primary chip with a secondary that carries extra headers:
 |---|---|---|
 | AM4 400-series | X470 AORUS ULTRA GAMING, X470 AORUS GAMING 5/7 WIFI, B450 AORUS PRO / PRO WIFI / PRO-CF: **IT8686E** at `0x0a40` + **IT8792E** at `0x0a60`. On the B450 AORUS PRO the IT8792E carries no fan header, so a missing secondary costs temperatures and voltages, not fans | |
 | AM4 500-series | X570 AORUS MASTER / PRO / PRO WIFI / ULTRA / XTREME, B550 AORUS MASTER / PRO, B550 VISION D: **IT8688E + IT8792E**. The X570S refresh (X570S AERO G, X570S AORUS MASTER): **IT8689E + IT87952E** | B550M AORUS PRO, B550I AORUS PRO AX: IT8688E only |
-| AM5 600-series | X670E AORUS MASTER, X670E AORUS PRO X: **IT8689E + IT8792E** (hwmon `it8792`, not `it87952`; [#96](https://github.com/frankcrawford/it87/issues/96) dmesg: "Found IT8792E/IT8795E chip at 0xa60, revision 3") | X670 AORUS ELITE AX, X670 / B650 GAMING X AX: IT8689E only (it87 SIV catalogue) |
+| AM5 600-series | X670E AORUS MASTER, X670E AORUS PRO X: **IT8689E + IT8792E** (hwmon `it8792`, not `it87952`; [#96](https://github.com/frankcrawford/it87/issues/96) dmesg: "Found IT8792E/IT8795E chip at 0xa60, revision 3"). On the MASTER, SYS_FAN7_PUMP / SYS_FAN8_PUMP sit on an ITE IT5701 behind the IT8792E ([LibreHardwareMonitor PR #2587](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/pull/2587), Windows; no Linux report yet) | X670 AORUS ELITE AX, X670 / B650 GAMING X AX: IT8689E only (it87 SIV catalogue) |
 | AM5 800-series | X870E AORUS PRO / ELITE X3D / MASTER / XTREME AI TOP, B850 AI TOP, X870 AORUS ELITE WIFI7, X870 AORUS STEALTH ICE: **IT8696E + IT87952E**. Per the it87 SIV catalogue alone, the same pair on the 2026 boards: X870 / B850 AORUS ELITE X3D, X870E EAGLE (X3D) WIFI7, X870E AERO X3D (DARK) WOOD, X870 AORUS TACHYON ICE, X870E AORUS XTREME X3D AI TOP, X870 / B850 AORUS STEALTH | X870E AORUS ELITE WIFI7, X870 EAGLE WIFI7, B850M AORUS STEALTH (ICE): IT8696E only |
 
 The Threadripper boards (X399, TRX40, TRX50) are in the

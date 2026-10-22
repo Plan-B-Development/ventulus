@@ -334,8 +334,9 @@ def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
             "/etc/modprobe.d/it87.conf (preferred for ITE chips), or add "
             "'acpi_enforce_resources=lax' to the kernel command line."
             if has_it87
-            else "Add 'acpi_enforce_resources=lax' to the kernel command line, "
-            "or disable hardware monitoring in BIOS."
+            # `BRD-o` / curator SBR-06: no BIOS "hardware monitoring" option is
+            # known on any vendor's board, so that remedy is not offered.
+            else "Add 'acpi_enforce_resources=lax' to the kernel command line."
         )
         problems.append(
             {

@@ -178,6 +178,28 @@ class TestDetectProblems:
         assert "most port" not in it87
         assert "MMIO" not in fix_for("nct6775")
 
+    def test_non_it87_acpi_fix_offers_no_bios_monitoring_switch(self):
+        # Curator SBR-06 (2026-10-22): `BRD-o` dropped "disable hardware
+        # monitoring in BIOS" from the System State card because no vendor's
+        # board is known to have that option; this card kept it, so the two
+        # disagreed on one screen.
+        def fix_for(driver: str) -> str:
+            diag = _healthy(
+                acpi_conflicts=[
+                    AcpiConflictInfo(
+                        io_range="0x290", claimed_by="ACPI", conflicts_with_driver=driver
+                    )
+                ]
+            )
+            problems = detect_readiness_problems(diag, duty_drift=NO_DRIFT)
+            return next(p["fix"] for p in problems if p["key"] == "acpi")
+
+        nct = fix_for("nct6775")
+        assert "acpi_enforce_resources=lax" in nct
+        assert "BIOS" not in nct
+        # Opposite branch: the ITE card keeps its driver-local remedy.
+        assert "ignore_resource_conflict=1" in fix_for("it87")
+
     def test_module_collision_is_critical(self):
         diag = _healthy(
             module_collisions=[

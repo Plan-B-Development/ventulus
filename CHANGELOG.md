@@ -5,6 +5,25 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Fixed
+
+- **ASUS boards using `asus_wmi_sensors` are no longer told a BIOS update is the fix for WMI
+  fan stops.** The app and docs said a BIOS with WMI method version 2 or later should fix
+  fans stopping or sticking. The driver only loads on such a BIOS, so it could not help, and
+  the kernel documentation queued for 7.4 now says only that a more recent BIOS "might help".
+  The guidance keeps the kernel's soak-test advice.
+- **"Device or resource busy" from `modprobe nct6687` is no longer read as an ACPI
+  conflict first.** nct6687d builds from 2026-10-18 reserve the same I/O ports as the
+  in-kernel `nct6683`, so the usual cause is `nct6683` still holding the chip. The driver
+  setup guide now has you check for and unload it before reaching for
+  `acpi_enforce_resources=lax`.
+- The readiness card for a non-ITE ACPI port conflict no longer suggests disabling hardware
+  monitoring in the BIOS, an option no vendor's board is known to have; the System State
+  card already said so.
+- Hardware docs: the X670E AORUS MASTER and X870E AORUS MASTER X3D carry SYS_FAN7_PUMP and
+  SYS_FAN8_PUMP on an ITE IT5701 controller (seen on Windows; no Linux report yet), and the
+  `asus_ec_sensors` board counts now cite kernel 7.3 rather than its release candidates.
+
 ## [5.4.0] — 2026-10-19
 
 Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.3.0 is the current daemon

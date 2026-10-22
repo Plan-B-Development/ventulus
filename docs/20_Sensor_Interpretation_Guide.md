@@ -326,13 +326,17 @@ this. The more frequently the WMI interface is polled the greater the potential
 for this to happen. Until you have subjected your computer to an extended soak
 test while polling the sensors frequently, don't leave you computer unattended.
 Upgrading to new BIOS version with method version greater than or equal to two
-should rectify the issue."* When users report
-stuck-fan or artificially-low fan behaviour on a supported ASUS WMI board, the
-durable fix is a BIOS update to a WMI method version ≥ 2, NOT a kernel
-workaround. The driver refuses to bind below version 2 in any case.
+should rectify the issue."* That last sentence cannot help anyone running the
+driver: it refuses to bind when the BIOS reports a method version below two, so
+every system it loads on already meets it. The kernel doc queued for 7.4 replaces
+it with *"Upgrading to a more recent BIOS version might help"*
+([hwmon patch, 2026-10-16](https://patch.msgid.link/20261016163509.249020-1-heyheyco@gmail.com)).
+When users report stuck-fan or artificially-low fan behaviour on a supported ASUS
+WMI board, no fix is known: a newer BIOS may help, and the soak test is the
+kernel's advice.
 
 All classifications carry a standing note about potential WMI polling issues
-and the BIOS-update remedy.
+and the soak test.
 
 ### gigabyte_wmi (Gigabyte WMI interface)
 

@@ -168,8 +168,10 @@ names no safe polling rate, so neither does this guide. The driver reads each WM
 sensor group from the BIOS at most about once a second however many programs read its
 files, so extra readers add no WMI calls. What to do:
 
-- Update to a BIOS whose WMI method version is 2 or later; the driver refuses older
-  versions, and the kernel says a newer one should fix the misbehaviour.
+- Do not count on a BIOS version to fix it. The driver only loads when the BIOS
+  reports WMI method version 2 or later, so that version is not the remedy; the
+  kernel doc queued for 7.4 says only that a more recent BIOS "might help"
+  ([hwmon patch, 2026-10-16](https://patch.msgid.link/20261016163509.249020-1-heyheyco@gmail.com)).
 - Run an extended soak test while polling before you leave the machine unattended.
 
 Every `asus_wmi_sensors` classification carries a standing note about this.

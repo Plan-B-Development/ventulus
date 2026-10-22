@@ -64,7 +64,7 @@ box.
 
 **Extra sensors:** several ASUS Z690 / Z790 ROG boards are on the upstream
 `asus_ec_sensors` list (hwmon device name `asusec`). The list grows with every kernel
-(55 boards in 7.2, 60 in the 7.3 release candidates), so check
+(55 boards in 7.2, 60 in 7.3), so check
 [docs.kernel.org/hwmon/asus_ec_sensors.html](https://docs.kernel.org/hwmon/asus_ec_sensors.html)
 for the kernel you run. The LGA1700 entries in 7.2 are:
 
@@ -76,7 +76,7 @@ for the kernel you run. The LGA1700 entries in 7.2 are:
 - ROG STRIX Z790-H GAMING WIFI
 - ROG STRIX Z790-I GAMING WIFI
 
-The 7.3 release candidates add ROG MAXIMUS Z790 HERO and ProArt Z690-CREATOR WIFI.
+Kernel 7.3 adds ROG MAXIMUS Z790 HERO and ProArt Z690-CREATOR WIFI.
 
 `asus_ec_sensors` provides semantic sensor labels (VRM, T_Sensor, Water_In/Out,
 Chipset) but **no** PWM write path: it is sensor enrichment only.

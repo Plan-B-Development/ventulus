@@ -699,13 +699,14 @@ def _classify_asus_ec(label: str, lower_label: str) -> SensorClassification:
 def _classify_asus_wmi(label: str, lower_label: str) -> SensorClassification:
     """ASUS WMI sensors -- trust labels but note polling caveat.
 
-    Reference: https://docs.kernel.org/hwmon/asus_wmi_sensors.html — the
-    kernel doc explicitly cites the BIOS-update remedy for the PRIME
-    X470-PRO firmware bug, so the user note carries that pointer.
+    Reference: https://docs.kernel.org/hwmon/asus_wmi_sensors.html. Its old
+    "method version ≥ 2 should rectify the issue" cannot help: the driver only
+    binds on a BIOS reporting version ≥ 2. The doc queued for 7.4 says only
+    that a more recent BIOS "might help" (curator SBR-01, 2026-10-22).
     """
     base_notes = [
         "Some ASUS WMI implementations may stick with aggressive polling",
-        "Durable fix is a BIOS update to WMI method version ≥ 2 "
+        "No BIOS version is a known fix; a more recent BIOS might help "
         "(per kernel doc asus_wmi_sensors.html)",
     ]
     if "cpu" in lower_label:

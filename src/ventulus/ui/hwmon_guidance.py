@@ -1290,7 +1290,7 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
                 "Do not use this driver for fan control — look for the board's "
                 "Super I/O driver (usually nct6775) as the actual PWM write endpoint.",
                 "The board list grows with every kernel (55 boards in 7.2, 60 in "
-                "the 7.3 release candidates) and a newer entry is not in older "
+                "7.3) and a newer entry is not in older "
                 "kernels — the LTS kernels 6.18 and 6.12 carry fewer. Check "
                 "docs.kernel.org for the kernel you run. From 7.3 an unconnected "
                 "T_Sensor or water-probe socket reads as unavailable instead of a "
@@ -1313,9 +1313,10 @@ CHIP_GUIDANCE_DB: list[ChipGuidance] = [
             "The kernel warns that some ASUS BIOS WMI implementations are buggy — "
             "fans stopping, fans stuck at maximum, or readings freezing — and that "
             "the risk grows with polling. It advises a soak test before leaving "
-            "the machine unattended. A BIOS whose WMI method version is 2 or later "
-            "'should rectify the issue' (the driver refuses older versions since "
-            "kernel 5.17).",
+            "the machine unattended. No BIOS version is a known fix: the driver "
+            "only loads when the BIOS reports WMI method version 2 or later, so "
+            "that version is not the remedy, and the kernel doc queued for 7.4 "
+            "says only that a more recent BIOS 'might help'.",
         ],
         known_issues=[
             "Sensor-enrichment driver only — does NOT provide PWM write capability. "
@@ -1600,8 +1601,8 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "The kernel names no safe polling rate. The driver itself calls the "
             "BIOS at most about once a second per sensor group, however many "
             "programs read it, so extra readers do not add WMI calls. The kernel's "
-            "advice is a soak test before leaving the machine unattended, and a "
-            "BIOS with WMI method version 2 or later.",
+            "advice is a soak test before leaving the machine unattended; a more "
+            "recent BIOS 'might help', but no version is a known fix.",
             "These drivers provide sensor enrichment only — they are NOT the "
             "PWM write path. Look for the board's Super I/O driver for actual fan "
             "control (on these AM4 boards usually an ITE IT8665E, out-of-tree it87).",
@@ -1849,8 +1850,8 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
             "or readings freezing, more likely the more often it is polled — and "
             "name the PRIME X470-PRO as particularly bad.",
             "The kernel names no safe polling rate. Its advice is a soak test "
-            "while polling before you leave the machine unattended, and a BIOS "
-            "whose WMI method version is 2 or later. The driver calls the BIOS "
+            "while polling before you leave the machine unattended; a more recent "
+            "BIOS 'might help', but no version is a known fix. The driver calls the BIOS "
             "at most about once a second per sensor group however many programs "
             "read it.",
             "asus_wmi_sensors is sensor enrichment ONLY — it never provides "
@@ -2296,16 +2297,14 @@ VENDOR_QUIRKS_DB: list[VendorQuirk] = [
         details=[
             "The in-tree asus_ec_sensors driver (hwmon name 'asusec') "
             "carries a per-board list that GROWS with every kernel "
-            "release — 55 boards in 7.2, 60 in the 7.3 release "
-            "candidates — so any list "
+            "release — 55 boards in 7.2, 60 in 7.3 — so any list "
             "reproduced here would be wrong within a release. Check "
             "your own board against "
             "docs.kernel.org/hwmon/asus_ec_sensors.html for the "
             "kernel you actually run. Intel LGA1700 coverage in 7.2 is "
             "the ROG MAXIMUS Z690 FORMULA, ROG MAXIMUS Z790 EXTREME "
             "and five ROG STRIX Z690 / Z790 boards; 7.3 adds the ROG "
-            "MAXIMUS Z790 HERO and ProArt Z690-CREATOR WIFI (7.3 "
-            "release candidates). No Z890 "
+            "MAXIMUS Z790 HERO and ProArt Z690-CREATOR WIFI. No Z890 "
             "or B860 board is on the list. Where supported, the driver "
             "provides semantic sensor labels (VRM, T_Sensor, "
             "Water_In/Out, Chipset).",
