@@ -72,7 +72,7 @@ def fingerprint(parts: Iterable[str]) -> str:
 
     Sorted before hashing, so the same set of facts in a different order is the
     same occurrence — the daemon does not promise an order for
-    ``acpi_conflicts`` or ``module_collisions``, and treating a reordering as a
+    ``module_collisions``, and treating a reordering as a
     new occurrence would un-silence on a refetch that found nothing new.
 
     Empty input yields ``""``, i.e. "this item has only one shape", rather than

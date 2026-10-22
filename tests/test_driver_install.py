@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from ventulus.api.models import (
-    AcpiConflictInfo,
     BoardInfo,
     HardwareDiagnosticsResult,
     HwmonChipInfo,
@@ -295,9 +294,6 @@ def _diag(**kw) -> HardwareDiagnosticsResult:
         kernel_modules=[KernelModuleInfo(name="it87", loaded=True, in_mainline=False)],
         thermal_safety=ThermalSafetyInfo(state="normal", cpu_sensor_found=True),
         expected_chips=["it8696", "it87952"],
-        acpi_conflicts=[
-            AcpiConflictInfo(io_range="0a40-0a4f", claimed_by="ACPI", conflicts_with_driver="it87")
-        ],
         **kw,
     )
 
@@ -307,8 +303,8 @@ def test_readiness_fixes_follow_the_family():
     arch = {p["key"]: p["fix"] for p in detect_readiness_problems(_diag(), duty_drift=NO_DRIFT)}
     set_install_family(InstallFamily.DEBIAN)
     deb = {p["key"]: p["fix"] for p in detect_readiness_problems(_diag(), duty_drift=NO_DRIFT)}
-    assert {"dual_chip", "acpi", "bios_revert"} <= arch.keys()
-    for key in ("dual_chip", "acpi", "bios_revert"):
+    assert {"dual_chip", "bios_revert"} <= arch.keys()
+    for key in ("dual_chip", "bios_revert"):
         assert "it87-dkms-git" in arch[key], key
         assert "frankcrawford/it87" in deb[key], key
         assert not _AUR.search(deb[key]), key

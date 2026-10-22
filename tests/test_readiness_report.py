@@ -147,58 +147,22 @@ class TestDetectProblems:
         keys = {p["key"] for p in detect_readiness_problems(diag, duty_drift=NO_DRIFT)}
         assert "vendor_quirk" not in keys
 
-    def test_acpi_detected(self):
+    def test_acpi_conflicts_raise_no_card(self):
+        # SBR-07: the daemon read these from `/proc/ioports`, which never lists
+        # an ACPI OpRegion, so every entry an older daemon sends is a false
+        # positive — rendered with the it87 remedy even on a Nuvoton board.
         diag = _healthy(
             acpi_conflicts=[
-                AcpiConflictInfo(io_range="0x290", claimed_by="ACPI", conflicts_with_driver="it87")
+                AcpiConflictInfo(io_range="0x290", claimed_by="ACPI", conflicts_with_driver="it87"),
+                AcpiConflictInfo(
+                    io_range="0x290", claimed_by="ACPI", conflicts_with_driver="nct6775"
+                ),
             ]
         )
-        keys = {p["key"] for p in detect_readiness_problems(diag, duty_drift=NO_DRIFT)}
-        assert "acpi" in keys
-
-    def test_acpi_fix_scopes_the_mmio_claim_to_the_chips_it_covers(self):
-        # BLD-04 (2026-10-15): MMIO avoids the ACPI port claim only on the
-        # IT8688E/8689E/8696E/8698E; X399 (IT8686E + IT8792E) and the Z890
-        # AORUS MASTER's IT87952E still needed the parameter. The it87 card must
-        # not promise "most" boards, and the non-it87 card must not mention MMIO.
-        def fix_for(driver: str) -> str:
-            diag = _healthy(
-                acpi_conflicts=[
-                    AcpiConflictInfo(
-                        io_range="0x290", claimed_by="ACPI", conflicts_with_driver=driver
-                    )
-                ]
-            )
-            problems = detect_readiness_problems(diag, duty_drift=NO_DRIFT)
-            return next(p["fix"] for p in problems if p["key"] == "acpi")
-
-        it87 = fix_for("it87")
-        assert "IT8688E, IT8689E, IT8696E and IT8698E" in it87
-        assert "ignore_resource_conflict=1" in it87
-        assert "most port" not in it87
-        assert "MMIO" not in fix_for("nct6775")
-
-    def test_non_it87_acpi_fix_offers_no_bios_monitoring_switch(self):
-        # Curator SBR-06 (2026-10-22): `BRD-o` dropped "disable hardware
-        # monitoring in BIOS" from the System State card because no vendor's
-        # board is known to have that option; this card kept it, so the two
-        # disagreed on one screen.
-        def fix_for(driver: str) -> str:
-            diag = _healthy(
-                acpi_conflicts=[
-                    AcpiConflictInfo(
-                        io_range="0x290", claimed_by="ACPI", conflicts_with_driver=driver
-                    )
-                ]
-            )
-            problems = detect_readiness_problems(diag, duty_drift=NO_DRIFT)
-            return next(p["fix"] for p in problems if p["key"] == "acpi")
-
-        nct = fix_for("nct6775")
-        assert "acpi_enforce_resources=lax" in nct
-        assert "BIOS" not in nct
-        # Opposite branch: the ITE card keeps its driver-local remedy.
-        assert "ignore_resource_conflict=1" in fix_for("it87")
+        assert len(diag.acpi_conflicts) == 2  # precondition: the entries arrived
+        problems = detect_readiness_problems(diag, duty_drift=NO_DRIFT)
+        assert "acpi" not in {p["key"] for p in problems}
+        assert not any("ignore_resource_conflict" in p["fix"] for p in problems)
 
     def test_module_collision_is_critical(self):
         diag = _healthy(

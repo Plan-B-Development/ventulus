@@ -77,7 +77,7 @@ def _diag_with_revert(header_id: str, count: int) -> HardwareDiagnosticsResult:
     )
 
 
-def _diag_acpi_and_revert() -> HardwareDiagnosticsResult:
+def _diag_old_daemon_acpi_and_revert() -> HardwareDiagnosticsResult:
     return _diag(
         hwmon=HwmonDiagnostics(
             total_headers=1, writable_headers=1, enable_revert_counts={"pwm1": 5}
@@ -195,18 +195,21 @@ def test_condition_cards_carry_conditions_only_not_advisories():
 def test_issue_cards_are_severity_sorted_descending():
     ranks = [
         severity_display(c.severity).rank
-        for c in build_condition_cards(_diag_acpi_and_revert(), duty_drift=NO_DRIFT).cards
+        for c in build_condition_cards(
+            _diag_old_daemon_acpi_and_revert(), duty_drift=NO_DRIFT
+        ).cards
     ]
     assert ranks == sorted(ranks, reverse=True)
 
 
-def test_issue_card_carries_detail_for_acpi():
-    cards = {
-        c.key: c for c in build_condition_cards(_diag_acpi_and_revert(), duty_drift=NO_DRIFT).cards
-    }
-    assert "acpi" in cards
-    assert cards["acpi"].detail and "conflicts with it87" in cards["acpi"].detail
-    assert cards["acpi"].doc_url  # doc-link button present
+def test_an_older_daemons_acpi_conflicts_raise_no_card():
+    """SBR-07: `acpi_conflicts` came from `/proc/ioports`, which never lists an
+    ACPI OpRegion; an older daemon's entries are false positives."""
+    diag = _diag_old_daemon_acpi_and_revert()
+    assert diag.acpi_conflicts  # precondition: the entries arrived
+    keys = {c.key for c in build_condition_cards(diag, duty_drift=NO_DRIFT).cards}
+    assert "bios_revert" in keys  # the other condition in the fixture still renders
+    assert "acpi" not in keys
 
 
 # ── Safety & GPU ────────────────────────────────────────────────────────────
@@ -442,11 +445,11 @@ def test_registry_chip_tooltip_from_guidance():
 
 
 def test_build_system_state_vm_counts_and_labels():
-    # This fixture has no chips_detected, so it trips acpi + bios_revert +
-    # no_chips = 3 warn-level problems.
-    vm = build_system_state_vm(_diag_acpi_and_revert(), duty_drift=NO_DRIFT)
-    assert vm.issues_requiring_attention == 3
-    assert vm.issue_count_label == "3 ACTION REQUIRED"
+    # This fixture has no chips_detected, so it trips bios_revert + no_chips =
+    # 2 warn-level problems; its ACPI entries count for nothing (SBR-07).
+    vm = build_system_state_vm(_diag_old_daemon_acpi_and_revert(), duty_drift=NO_DRIFT)
+    assert vm.issues_requiring_attention == 2
+    assert vm.issue_count_label == "2 ACTION REQUIRED"
     assert vm.issue_count_state == "warn"
     assert vm.summary_line.startswith("1 PWM header")
 
@@ -525,25 +528,3 @@ def test_thermal_state_maps_cover_the_wire_vocabulary():
             f"{name} carries {sorted(keys - wire)}, which no daemon emits; "
             "invented keys hide the fact that a real one is unhandled"
         )
-
-
-@pytest.mark.parametrize(
-    ("driver", "remedy"),
-    [("nct6775", "acpi_enforce_resources=lax"), ("it87", "ignore_resource_conflict=1")],
-)
-def test_acpi_card_tip_names_a_remedy_and_no_bios_monitoring_option(driver, remedy):
-    """`BRD-o`: the card's tip used to offer "disable ACPI hardware monitoring in
-    BIOS" — an option found on no vendor's board. Presence first (each branch
-    still names its remedy), then the absence on both branches."""
-    from ventulus.services.system_state_view import build_acpi_detail
-
-    diag = HardwareDiagnosticsResult(
-        acpi_conflicts=[
-            AcpiConflictInfo(
-                io_range="0x0290-0x0299", claimed_by="\\AMW0.SHWM", conflicts_with_driver=driver
-            )
-        ]
-    )
-    detail = build_acpi_detail(diag)
-    assert detail is not None and remedy in detail
-    assert "hardware monitoring" not in detail.lower()

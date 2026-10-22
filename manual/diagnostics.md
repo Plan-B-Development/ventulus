@@ -163,9 +163,6 @@ one-line fix, and a link to the relevant documentation:
 - a Super-I/O chip that did not appear (the dual-chip warning; see
   ["Some of my fan headers are missing"](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up));
 - a *Driver module collision* or *Conflicting driver modules loaded*;
-- an *ACPI I/O port conflict* (for `it87`, prefer the driver-local
-  `options it87 ignore_resource_conflict=1`; the system-wide
-  `acpi_enforce_resources=lax` is the fallback, and the only option for `nct6775`);
 - *BIOS/EC reclaiming fan control*;
 - every PWM header read-only, or no hwmon chips at all;
 - a GPU with fan control disabled or unavailable;
@@ -225,8 +222,8 @@ Neither can silence a real problem. The **N ACTION REQUIRED** count keeps counti
 quietened conditions, and a line under the list says how many are hidden, so the page
 never claims your system is ready while fan control is broken. A silence is recorded
 against what the machine said at the time: it comes back if the problem is later
-confirmed or gets worse (dismiss an ACPI conflict for two address ranges, and a third
-range speaks again; BIOS-reclaim warnings come back if contention climbs into the HIGH
+confirmed or gets worse (dismiss a driver collision for one pair of modules, and a second
+pair speaks again; BIOS-reclaim warnings come back if contention climbs into the HIGH
 band). It does *not* come back when things improve: dismiss a note, run **Test fan
 control**, and a clean result leaves it dismissed.
 
@@ -446,8 +443,8 @@ Secure Boot is on. If the driver is already loaded but found no chip, the update
 commands come first.
 
 - The report is **passive and read-only**: the daemon combines signals it already has
-  (the board table, bound hwmon chips, `/proc/modules`, the kernel log, ACPI port
-  overlaps). It never loads a module or changes your system.
+  (the board table, bound hwmon chips, `/proc/modules`, the kernel log). It never
+  loads a module or changes your system.
 - **Detection is not control.** A card means a chip is present and a driver exists,
   not that fan control works. Loading the driver, and a fan test, confirm that.
 - On a non-x86 machine the section says detection is unavailable.

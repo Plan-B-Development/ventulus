@@ -20,12 +20,12 @@ from __future__ import annotations
 from PySide6.QtWidgets import QLabel, QSplitter, QWidget
 
 from ventulus.api.models import (
-    AcpiConflictInfo,
     BoardInfo,
     ConnectionState,
     HardwareDiagnosticsResult,
     HwmonChipInfo,
     HwmonDiagnostics,
+    KernelModuleInfo,
     OperationMode,
 )
 from ventulus.services.app_state import AppState
@@ -66,11 +66,9 @@ def _busy_diag() -> HardwareDiagnosticsResult:
             enable_revert_counts={LONG_HEADER_ID: 996},
         ),
         board=BoardInfo(vendor="ASUS", name="ProArt X870E-CREATOR WIFI", bios_version="1234"),
-        kernel_modules=[],
-        acpi_conflicts=[
-            AcpiConflictInfo(
-                io_range="0x0290-0x0299", claimed_by="ACPI", conflicts_with_driver="it87"
-            )
+        kernel_modules=[
+            KernelModuleInfo(name="nct6683", loaded=True, in_mainline=True),
+            KernelModuleInfo(name="nct6687", loaded=True, in_mainline=False),
         ],
     )
 

@@ -1657,6 +1657,16 @@ and the GUI parser defaults to `[]`:
   it is readable, the driver's `Unsupported chip (DEVID=…)` line is `pr_debug`,
   so a blocked secondary never appears in it. Not authoritative: the source
   of truth for "what works" is `hwmon.chips_detected`.
+- `acpi_conflicts: list[AcpiConflictInfo]` (`io_range`, `claimed_by`,
+  `conflicts_with_driver`): **always `[]` on daemons after 5.3.0** (SBR-07). It stays
+  on the wire so older clients keep parsing. Older daemons filled it by matching
+  `/proc/ioports` lines containing "ACPI" against fixed Super-I/O windows. The
+  kernel never lists an ACPI OpRegion there, only the fixed FADT blocks
+  (PM1a, PM timer, GPE), so a real OpRegion conflict was never reported and every
+  entry was a false positive. The real signal is the kernel log line
+  `ACPI Warning: SystemIO range … conflicts with OpRegion …`, which
+  `ProtectKernelLogs=true` hides from the daemon. Clients ignore the field; this
+  GUI renders no card for it, whatever the daemon version.
 
 #### Board firmware counts
 
@@ -2405,8 +2415,9 @@ calls it.
     `pwm_read_only`, `pwm_control_unverified`, `pwm_control_failed` (DEC-456),
     `monitor_only_fans_present`,
     `sensors_unavailable`, `unknown_sensors_present`, and, when a Super-I/O chip is
-    detected but its driver is not bound, `superio_driver_unloaded` /
-    `superio_acpi_conflict` (DEC-202). Render a code you do not recognise. **`superio_driver_unloaded` covers two
+    detected but its driver is not bound, `superio_driver_unloaded` (DEC-202). Daemons
+    up to 5.3.0 could also emit `superio_acpi_conflict`, retired with
+    `acpi_conflicts` (SBR-07). Render a code you do not recognise. **`superio_driver_unloaded` covers two
     distinct states despite its name** (DEC-327): the driver is not loaded at all,
     **or** it is loaded and failed to bind. The `code` is deliberately stable
     across both (the GUI keys knowledge-base entries and acknowledgement state
@@ -2441,8 +2452,8 @@ only Super-I/O call is the opt-in `POST /inventory/superio/probe`. Documented fo
 the daemon surface it still is.
 
 Passive Super-I/O chip detection. **Read-only**: the daemon composes signals it
-already has (DMI board table, bound hwmon chips, `/proc/modules`, `/dev/kmsg`,
-ACPI `/proc/ioports` overlaps) into a per-chip report. **The `/dev/kmsg` leg never
+already has (DMI board table, bound hwmon chips, `/proc/modules`, `/dev/kmsg`) into a
+per-chip report. **The `/dev/kmsg` leg never
 fires in the packaged deployment**: the systemd unit sets `ProtectKernelLogs=true`,
 which denies it, so no chip carries `kernel_log` evidence there (the same cause as the
 always-empty `kernel_detected_chips`, § GET /diagnostics/hardware). The daemon never
@@ -2489,8 +2500,10 @@ Fields (`responses.rs::SuperIoResponse`; additive fields use
   out-of-tree driver that is not the one loaded, `risk_notes` carries the signing
   note. A chip found by the active port probe gets the same notes. All of it is
   prose for display.
-- `acpi_conflict_drivers: list[str]`: driver names whose ISA I/O range collides
-  with an ACPI OperationRegion (omitted when empty).
+- `acpi_conflict_drivers: list[str]`: **never sent by daemons after 5.3.0** (SBR-07).
+  Older daemons derived it from the same `/proc/ioports` match as
+  `acpi_conflicts` (§ GET /diagnostics/hardware), which cannot see an ACPI
+  OpRegion. Omitted when empty. This GUI ignores it.
 - `notes: list[str]`: report-level notes; on x86 always includes the honest
   "detection proves a chip is present, not that fan control is available" caveat
   (on non-x86, where `arch_supported:false`, it instead carries a single
@@ -2502,12 +2515,12 @@ Fields (`responses.rs::SuperIoResponse`; additive fields use
   (flag off / no `CAP_SYS_RAWIO` / kernel lockdown / no `/dev/port`). Show this
   as the disabled button's tooltip.
 
-The same detection also enriches **`GET /inventory/readiness`** with up to two
-**aggregate** items (one per code, regardless of how many chips match):
+The same detection also enriches **`GET /inventory/readiness`** with at most one
+**aggregate** item, however many chips match:
 `superio_driver_unloaded` (severity `warning`, `reboot_may_be_required: true`,
 because loading a module often needs a reboot to re-run the Super-I/O scan; the matched
-chips are listed in the item's `detail`) and `superio_acpi_conflict` (severity
-`warning`, `reboot_may_be_required: false`). Board-specific "load *this* driver"
+chips are listed in the item's `detail`). Daemons up to 5.3.0 could add
+`superio_acpi_conflict` (severity `warning`), retired with `acpi_conflicts`. Board-specific "load *this* driver"
 guidance thus joins the generic `no_pwm_controls` item. These items use the same
 `ReadinessItem` shape (`code`, `severity`, `component`, `summary`, `detail`,
 `recommended_action`, and the `blocks_monitoring` / `blocks_control` /
@@ -2633,8 +2646,9 @@ returns the passive report with a `notes[]` entry, and probes nothing, when:
 - **a run finished less than 10 s ago**: a single-flight cooldown; the note asks
   the user to try again in a few seconds.
 
-Otherwise it skips a base that `/proc/ioports` shows reserved (by a driver or an
-ACPI OperationRegion) and probes the rest; with both reserved, a note says so.
+Otherwise it skips a base that `/proc/ioports` shows reserved (by a driver, or by
+one of the firmware's fixed ACPI blocks; an ACPI OpRegion never appears there) and
+probes the rest; with both reserved, a note says so.
 
 **Response:** the same `SuperIoResponse` shape as the `GET`, with any
 probe-identified chips appended to `chips[]` (each carries `evidence: ["port_probe"]`

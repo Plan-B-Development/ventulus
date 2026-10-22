@@ -219,9 +219,16 @@ def test_superio_empty_and_non_x86():
     assert non_x86.arch_supported is False and non_x86.arch_note
 
 
-def test_superio_acpi_conflict_note():
+def test_superio_notes_ignore_acpi_conflict_drivers():
+    # SBR-07: only an older daemon sends `acpi_conflict_drivers`, read from a
+    # `/proc/ioports` that never lists an ACPI OpRegion.
     panel = build_superio_panel(
-        SuperIoReport(arch_supported=True, chips=[_unbound_chip()], acpi_conflict_drivers=["it87"])
+        SuperIoReport(
+            arch_supported=True,
+            chips=[_unbound_chip()],
+            acpi_conflict_drivers=["it87"],
+            notes=["Detection confirms a chip is present."],
+        )
     )
-    assert "ACPI firmware claims" in panel.notes_text
-    assert "it87" in panel.notes_text
+    assert "Detection confirms a chip is present." in panel.notes_text
+    assert "ACPI" not in panel.notes_text

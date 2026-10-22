@@ -81,6 +81,8 @@ _DOC: dict[str, tuple[str, str]] = {
     "superio_driver_unloaded": _doc(
         "loading-an-in-kernel-super-io-driver", "Loading a Super-I/O driver"
     ),
+    # Retired in the daemon (SBR-07); only an older daemon still sends it, and
+    # its rollup counts it, so it keeps rendering until both are upgraded.
     "superio_acpi_conflict": _doc("acpi-io-port-conflicts", "ACPI I/O-port conflicts"),
     "sensors_unavailable": _doc("quarantined-or-unclassified-sensors", "Quarantined sensors"),
     "unknown_sensors_present": _doc("quarantined-or-unclassified-sensors", "Unclassified sensors"),

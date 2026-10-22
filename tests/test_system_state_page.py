@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
 )
 
 from ventulus.api.models import (
-    AcpiConflictInfo,
     BoardInfo,
     ConnectionState,
     GpuDiagnosticsInfo,
@@ -72,12 +71,12 @@ def _diag(**overrides) -> HardwareDiagnosticsResult:
     return HardwareDiagnosticsResult(**defaults)
 
 
-def _diag_acpi() -> HardwareDiagnosticsResult:
+def _diag_conflict() -> HardwareDiagnosticsResult:
+    """One condition card with a doc link: two drivers loaded for one chip."""
     return _diag(
-        acpi_conflicts=[
-            AcpiConflictInfo(
-                io_range="0x0290-0x0299", claimed_by="ACPI", conflicts_with_driver="it87"
-            )
+        kernel_modules=[
+            KernelModuleInfo(name="nct6683", loaded=True, in_mainline=True),
+            KernelModuleInfo(name="nct6687", loaded=True, in_mainline=False),
         ]
     )
 
@@ -118,7 +117,7 @@ def test_hw_diag_ok_publishes_board_to_app_state(qtbot):
     page, state = _page(qtbot)
     assert state.board_info.vendor == ""  # precondition: nothing published yet
 
-    page._on_hw_diag_ok(_diag_acpi())
+    page._on_hw_diag_ok(_diag_conflict())
 
     assert state.board_info.vendor == "ASUS"
     assert state.board_info.name == "ProArt X870E"
@@ -168,22 +167,22 @@ def test_hw_diag_ok_board_reaches_the_label_resolver(qtbot):
 
 def test_render_populates_issue_cards(qtbot):
     page, _ = _page(qtbot)
-    page._render(_diag_acpi())
+    page._render(_diag_conflict())
     cards = [
         w for w in page.findChildren(QFrame) if w.objectName().startswith("SystemState_IssueCard_")
     ]
-    assert cards  # at least one issue card (acpi + no chips etc.)
+    assert cards  # at least one issue card (module_conflict)
 
 
 def test_doc_link_button_opens_url(qtbot, monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: calls.append(url.toString()))
     page, _ = _page(qtbot)
-    page._render(_diag_acpi())
-    btn = page.findChild(QPushButton, "SystemState_IssueDoc_acpi")
+    page._render(_diag_conflict())
+    btn = page.findChild(QPushButton, "SystemState_IssueDoc_module_conflict")
     assert btn is not None
     btn.click()
-    assert calls == ["https://wiki.archlinux.org/title/Lm_sensors"]
+    assert calls == ["https://wiki.archlinux.org/title/Fan_speed_control"]
 
 
 def test_gauge_shows_high_contention(qtbot):
@@ -344,7 +343,7 @@ def test_gpu_restore_gate_enabled_when_profile_does_not(qtbot):
 def test_showevent_renders_from_cache_without_worker(qtbot):
     state = _state()
     diag = DiagnosticsService(state)
-    diag.last_hw_diagnostics = _diag_acpi()
+    diag.last_hw_diagnostics = _diag_conflict()
     page = SystemStatePage(state=state, diagnostics_service=diag)
     qtbot.addWidget(page)
     page.showEvent(QShowEvent())
@@ -365,7 +364,7 @@ def test_showevent_latches_and_never_double_fetches(qtbot):
 def test_set_theme_rerenders(qtbot):
     state = _state()
     diag = DiagnosticsService(state)
-    diag.last_hw_diagnostics = _diag_acpi()
+    diag.last_hw_diagnostics = _diag_conflict()
     page = SystemStatePage(state=state, diagnostics_service=diag)
     qtbot.addWidget(page)
     page.set_theme(None)  # renders from cache without raising
@@ -374,7 +373,7 @@ def test_set_theme_rerenders(qtbot):
 
 def test_no_diagnostics_objectnames_leak(qtbot):
     page, _ = _page(qtbot)
-    page._render(_diag_acpi())
+    page._render(_diag_conflict())
     for child in page.findChildren(QWidget):
         assert not child.objectName().startswith("Diagnostics_"), child.objectName()
         assert not child.objectName().startswith("ReadinessReport_"), child.objectName()
@@ -453,7 +452,7 @@ def test_on_gpu_restore_ok_logs_and_messages(qtbot):
 def test_open_readiness_report_creates_dialog(qtbot):
     state = _state()
     diag = DiagnosticsService(state)
-    diag.last_hw_diagnostics = _diag_acpi()
+    diag.last_hw_diagnostics = _diag_conflict()
     page = SystemStatePage(state=state, diagnostics_service=diag)
     qtbot.addWidget(page)
     page._open_readiness_report()

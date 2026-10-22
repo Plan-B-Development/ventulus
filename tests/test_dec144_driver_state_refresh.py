@@ -132,30 +132,6 @@ class TestRemediationOrdering:
         )
         assert "mmio=on" not in fix
 
-    def test_readiness_acpi_fix_orders_update_first_for_it87(self):
-        from ventulus.api.models import AcpiConflictInfo
-
-        diag = HardwareDiagnosticsResult(
-            hwmon=HwmonDiagnostics(
-                chips_detected=[HwmonChipInfo(chip_name="it8689", header_count=5)],
-                total_headers=5,
-                writable_headers=5,
-            ),
-            board=BoardInfo(vendor=VENDOR_GB, name="Generic"),
-            kernel_modules=[KernelModuleInfo(name="it87", loaded=True, in_mainline=False)],
-            thermal_safety=ThermalSafetyInfo(state="normal", cpu_sensor_found=True),
-            acpi_conflicts=[
-                AcpiConflictInfo(
-                    io_range="0a40-0a4f", claimed_by="ACPI", conflicts_with_driver="it87"
-                )
-            ],
-        )
-        problems = {p["key"]: p for p in detect_readiness_problems(diag, duty_drift=NO_DRIFT)}
-        assert "acpi" in problems
-        fix = problems["acpi"]["fix"]
-        assert fix.find("out-of-tree it87 driver") != -1
-        assert fix.find("out-of-tree it87 driver") < fix.find("ignore_resource_conflict")
-
 
 # ── 2. IT8665E mmio=off escape hatch ───────────────────────────────
 

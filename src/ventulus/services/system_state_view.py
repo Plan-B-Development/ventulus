@@ -406,34 +406,6 @@ class SystemStateVM:
 # ─── Detail-box builders (Qt-free reimplementations of the inlined blocks) ──
 
 
-def build_acpi_detail(diag: HardwareDiagnosticsResult) -> str | None:
-    """HTML detail for the ACPI issue card (reimplements the inlined block)."""
-    if not diag.acpi_conflicts:
-        return None
-    lines: list[str] = []
-    has_it87 = False
-    for c in diag.acpi_conflicts:
-        lines.append(
-            f"{escape(c.io_range)} claimed by '{escape(c.claimed_by)}' "
-            f"— conflicts with {escape(c.conflicts_with_driver)}"
-        )
-        if c.conflicts_with_driver == "it87":
-            has_it87 = True
-    if has_it87:
-        lines.append(
-            "Tip (ITE chips): prefer driver-local 'ignore_resource_conflict=1' "
-            "('options it87 ignore_resource_conflict=1' in /etc/modprobe.d/it87.conf) "
-            "over the system-wide 'acpi_enforce_resources=lax' kernel parameter."
-        )
-    else:
-        lines.append(
-            # `BRD-o`: no BIOS "ACPI hardware monitoring" option is known on any
-            # vendor's board, so that half of this tip was dropped.
-            "Tip: add 'acpi_enforce_resources=lax' to kernel parameters."
-        )
-    return "<br>".join(lines)
-
-
 def build_module_collision_detail(diag: HardwareDiagnosticsResult) -> str | None:
     """HTML detail for the module-collision card: the daemon's pairs, then the GUI-only ones."""
     parts: list[str] = []
@@ -463,8 +435,6 @@ def _issue_card_from_problem(diag: HardwareDiagnosticsResult, problem: dict) -> 
     key = problem["key"]
     if key in ("module_collision", "module_conflict"):
         detail = build_module_collision_detail(diag)
-    elif key == "acpi":
-        detail = build_acpi_detail(diag)
     elif key == "dual_chip":
         # Inputs (the `X87-d` firmware count, the `BRD-j` fanless chips) are
         # gathered once, in readiness_report, for this card and its condition.
@@ -614,8 +584,8 @@ def condition_fingerprint(diag: HardwareDiagnosticsResult, key: str) -> str:
     """What produced this condition, as a digest (DEC-359).
 
     The fingerprint is what makes a silence an *occurrence* rather than a
-    permanent mute: dismiss "ACPI I/O port conflict" for the two ranges you know
-    about, and a third range makes it a new occurrence that speaks again.
+    permanent mute: dismiss "Driver module collision" for the one pair you know
+    about, and a second pair makes it a new occurrence that speaks again.
 
     Three of these deserve their reasoning recorded, because the obvious choice
     is wrong in each:
@@ -657,10 +627,6 @@ def condition_fingerprint(diag: HardwareDiagnosticsResult, key: str) -> str:
     if key == "dual_chip":
         detected = {c.chip_name for c in hw.chips_detected}
         return health_ack.fingerprint(set(expected_board_chips(diag).chips) - detected)
-    if key == "acpi":
-        return health_ack.fingerprint(
-            f"{c.io_range}:{c.claimed_by}:{c.conflicts_with_driver}" for c in diag.acpi_conflicts
-        )
     if key == "bios_revert":
         reverts = getattr(hw, "enable_revert_counts", None) or {}
         if not reverts:

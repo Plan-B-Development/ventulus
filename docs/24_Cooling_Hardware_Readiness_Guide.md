@@ -178,8 +178,10 @@ matching ([Driver Setup](../manual/driver-setup.md#it87-v20-renames-your-chips))
 
 If your firmware's ACPI tables claim the same I/O ports the Super-I/O driver needs,
 the driver may refuse to bind (under the default `acpi_enforce_resources=strict`),
-typically failing with *Device or resource busy*. The page lists the affected
-driver(s). Prefer a BIOS update where one addresses the conflict; otherwise the
+typically failing with *Device or resource busy*. Ventulus cannot see this itself
+(its sandbox hides the kernel log, the only place the kernel reports it), so check:
+`sudo dmesg | grep -i "conflicts with OpRegion"`. Daemons up to 5.3.0 raised a readiness item for it from a check
+that could not see a real conflict; ignore that item. Prefer a BIOS update where one addresses the conflict; otherwise the
 remedies differ by driver, and they are **not** equally safe:
 
 - **`it87` (ITE): prefer the driver-local option.** Add

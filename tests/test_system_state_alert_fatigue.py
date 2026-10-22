@@ -723,14 +723,15 @@ def test_a_condition_can_be_dismissed_and_the_pill_still_counts_it():
 def test_a_changed_condition_speaks_again():
     """The occurrence rule for conditions: the fingerprint is the evidence.
 
-    Sampled on `acpi`, whose fingerprint can genuinely move, rather than on a
-    binary condition whose fingerprint is constant — a binary one would pass
-    with the fingerprint deleted entirely (the project rulebook: pick the sample that
-    can move).
+    Sampled on `module_collision`, whose fingerprint (the colliding pairs) can
+    genuinely move, rather than on a binary condition whose fingerprint is
+    constant — a binary one would pass with the fingerprint deleted entirely
+    (the project rulebook: pick the sample that can move). It was `acpi` until
+    SBR-07 retired that card.
     """
-    from ventulus.api.models import AcpiConflictInfo
+    from ventulus.api.models import ModuleCollisionInfo
 
-    def _with(conflicts):
+    def _with(collisions):
         return HardwareDiagnosticsResult(
             hwmon=HwmonDiagnostics(
                 chips_detected=[HwmonChipInfo(chip_name="it8696")],
@@ -738,30 +739,28 @@ def test_a_changed_condition_speaks_again():
                 writable_headers=8,
             ),
             board=BoardInfo(vendor=_GIGABYTE, name="X870E"),
-            acpi_conflicts=conflicts,
+            module_collisions=collisions,
             thermal_safety=ThermalSafetyInfo(state="normal", cpu_sensor_found=True),
             cpu_vendor="AMD",
         )
 
-    one = _with(
-        [AcpiConflictInfo(io_range="0x290", claimed_by="ACPI", conflicts_with_driver="it87")]
-    )
+    one = _with([ModuleCollisionInfo(module_a="nct6687", module_b="nct6775")])
     two = _with(
         [
-            AcpiConflictInfo(io_range="0x290", claimed_by="ACPI", conflicts_with_driver="it87"),
-            AcpiConflictInfo(io_range="0x300", claimed_by="ACPI", conflicts_with_driver="it87"),
+            ModuleCollisionInfo(module_a="nct6687", module_b="nct6775"),
+            ModuleCollisionInfo(module_a="nct6683", module_b="nct6687"),
         ]
     )
-    token = _condition(one, "acpi").silence.token
-    assert _condition(one, "acpi").silence.token != _condition(two, "acpi").silence.token, (
-        "precondition: a second conflict must be a different occurrence"
+    token = _condition(one, "module_collision").silence.token
+    assert token != _condition(two, "module_collision").silence.token, (
+        "precondition: a second collision must be a different occurrence"
     )
 
     silenced = SilenceState(dismissed=frozenset({token}))
-    assert "acpi" not in {
+    assert "module_collision" not in {
         c.key for c in build_condition_cards(one, silence=silenced, duty_drift=NO_DRIFT).cards
     }
-    assert "acpi" in {
+    assert "module_collision" in {
         c.key for c in build_condition_cards(two, silence=silenced, duty_drift=NO_DRIFT).cards
     }, "a condition whose evidence changed must speak again"
 

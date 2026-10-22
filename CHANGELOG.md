@@ -17,9 +17,14 @@ rename. Version numbers carry on from Control-OFC.
   in-kernel `nct6683`, so the usual cause is `nct6683` still holding the chip. The driver
   setup guide now has you check for and unload it before reaching for
   `acpi_enforce_resources=lax`.
-- The readiness card for a non-ITE ACPI port conflict no longer suggests disabling hardware
-  monitoring in the BIOS, an option no vendor's board is known to have; the System State
-  card already said so.
+- **The *ACPI I/O port conflict* card is gone; it could only ever be a false alarm.** The
+  daemon built it from `/proc/ioports`, where the kernel never lists the ACPI regions that
+  cause a real conflict, so it missed every real one and could fire on harmless firmware
+  ranges, sometimes with it87 advice on an MSI or ASRock Nuvoton board. The System State page,
+  the readiness report and the Hardware page's Super-I/O notes no longer show it, even with an
+  older daemon (an older daemon's *ACPI claims a Super-I/O chip's I/O ports* readiness item
+  still lists until the daemon is updated; ignore it). To check for a real conflict, run
+  `sudo dmesg | grep -i "conflicts with OpRegion"`; the hardware docs and manual now say so.
 - Hardware docs: the X670E AORUS MASTER and X870E AORUS MASTER X3D carry SYS_FAN7_PUMP and
   SYS_FAN8_PUMP on an ITE IT5701 controller (seen on Windows; no Linux report yet), and the
   `asus_ec_sensors` board counts now cite kernel 7.3 rather than its release candidates.

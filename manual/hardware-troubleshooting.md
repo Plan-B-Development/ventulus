@@ -112,8 +112,9 @@ Open the **System State** page:
 - If the headers are writable but a fan test reports *BIOS/EC reverted pwm_enable*,
   the firmware is taking control back: see
   [The BIOS keeps taking fan control back](#the-bios-keeps-taking-fan-control-back).
-- If an ACPI resource conflict blocks the driver, an *ACPI I/O port conflict* card
-  says so. For `it87`, prefer `options it87 ignore_resource_conflict=1`;
+- If an ACPI resource conflict blocks the driver, the kernel log says so:
+  `sudo dmesg | grep -i "conflicts with OpRegion"`. Ventulus cannot check this for you, because the daemon's
+  sandbox hides the kernel log. For `it87`, prefer `options it87 ignore_resource_conflict=1`;
   `acpi_enforce_resources=lax` is the system-wide fallback, and the only option for
   `nct6775`.
 

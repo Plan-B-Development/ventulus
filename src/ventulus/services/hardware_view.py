@@ -301,16 +301,9 @@ def _action_vm(m: MergedReadinessItem) -> RecommendedActionVM:
 
 
 def _notes_text(report: SuperIoReport) -> str:
-    notes = list(report.notes)
-    if report.acpi_conflict_drivers:
-        notes.insert(
-            0,
-            "ACPI firmware claims the I/O ports of: "
-            + ", ".join(report.acpi_conflict_drivers)
-            + " — under acpi_enforce_resources=strict (the default) the driver may "
-            "refuse to bind.",
-        )
-    return "\n\n".join(notes)
+    # `acpi_conflict_drivers` is not shown (SBR-07): only an older daemon sends
+    # it, and its `/proc/ioports` source could not see an ACPI OpRegion.
+    return "\n\n".join(report.notes)
 
 
 def _superio_row(c) -> SuperIoRowVM:

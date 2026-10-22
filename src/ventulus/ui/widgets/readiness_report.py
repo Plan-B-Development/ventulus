@@ -323,31 +323,10 @@ def _base_conditions(diag: HardwareDiagnosticsResult) -> list[dict]:
             }
         )
 
-    if diag.acpi_conflicts:
-        has_it87 = any(c.conflicts_with_driver == "it87" for c in diag.acpi_conflicts)
-        fix = (
-            f"Update the out-of-tree it87 driver first ({update_hint('it87')}): "
-            "2026-03+ builds avoid the port claim via MMIO on the IT8688E, "
-            "IT8689E, IT8696E and IT8698E; "
-            "if the bind still fails, add "
-            "'options it87 ignore_resource_conflict=1' to "
-            "/etc/modprobe.d/it87.conf (preferred for ITE chips), or add "
-            "'acpi_enforce_resources=lax' to the kernel command line."
-            if has_it87
-            # `BRD-o` / curator SBR-06: no BIOS "hardware monitoring" option is
-            # known on any vendor's board, so that remedy is not offered.
-            else "Add 'acpi_enforce_resources=lax' to the kernel command line."
-        )
-        problems.append(
-            {
-                "key": "acpi",
-                "label": "ACPI I/O port conflict",
-                "fix": fix,
-                "doc_url": "https://wiki.archlinux.org/title/Lm_sensors",
-                "doc_title": "Arch Wiki: lm_sensors",
-                "severity": "warn",
-            }
-        )
+    # SBR-07: no ACPI I/O-port conflict card. The daemon's only source,
+    # `/proc/ioports`, never lists an ACPI OpRegion, so every card it raised
+    # was a false positive (often with the it87 remedy on a Nuvoton board);
+    # ignoring `acpi_conflicts` also hides an older daemon's.
 
     reverts = getattr(hw, "enable_revert_counts", None) or {}
     # DEC-360: a reclaim the watchdog remediated hours ago is history, not a

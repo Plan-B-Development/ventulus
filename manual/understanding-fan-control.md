@@ -84,7 +84,7 @@ You do not have to discover any of the above by hand. By design, the daemon, `ve
 
 Four GUI features turn the concepts above into concrete answers:
 
-- **The System State page** names your board and Super I/O chips, says which driver each chip needs and whether it is loaded, counts writable headers, and flags BIOS interference and ACPI conflicts. Start here.
+- **The System State page** names your board and Super I/O chips, says which driver each chip needs and whether it is loaded, counts writable headers, and flags BIOS interference. Start here.
 - **The Hardware page's Hardware Readiness Checklist** is the daemon's own go/no-go answer to "is this machine set up for fan control?", with the next step for anything that is not ready.
 - **Test Control**, on each header's card on the **Hardware** page, writes a known value to that header, waits a few seconds, and reports what actually happened: control works, the BIOS reverted it, or the value was ignored. This is how you confirm a header is genuinely controllable instead of guessing.
 - **Rescan Hardware**, in the footer, re-checks the hardware after you load a driver or change a BIOS setting.

@@ -661,7 +661,6 @@ class DemoService:
                 KernelModuleInfo(name="amdgpu", loaded=True, in_mainline=True),
                 KernelModuleInfo(name="nvme", loaded=True, in_mainline=True),
             ],
-            acpi_conflicts=[],
             board=BoardInfo(
                 vendor="Gigabyte",
                 name="X870E AORUS MASTER",

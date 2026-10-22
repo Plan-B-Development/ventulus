@@ -958,17 +958,26 @@ via ACPI OpRegions. When this happens, the kernel refuses to let the hwmon
 driver bind to those ports, even though the ACPI claim is cosmetic (the
 BIOS firmware doesn't actively use the ports at runtime).
 
-Common conflict ranges:
+Super I/O windows such a claim can overlap:
 - `0x0290–0x0299`: Nuvoton NCT6775
 - `0x0290–0x029F`: ITE IT87
 - `0x04E0–0x04EF`: Nuvoton NCT6775 (secondary)
-- `0x0A20–0x0A2F`: ITE IT87 (alternate)
+- `0x0A20–0x0A2F`: ITE IT87 (alternate), or the Nuvoton NCT668x EC on MSI and ASRock
+  boards (`nct6683`, `nct6687`, `nct6686`)
 - `0x0A40–0x0A4F`: ITE IT87 (secondary dual-chip)
 - `0x0A60–0x0A6F`: ITE IT87 (secondary dual-chip)
 - `0x0B10–0x0B1F`: ITE IT87952E (secondary on the Z790 AORUS MASTER)
 
-The daemon detects these by comparing `/proc/ioports` ACPI entries against
-known SIO I/O ranges.
+Ventulus cannot detect a conflict for you. The kernel never lists an ACPI OpRegion in
+`/proc/ioports`; it reports the conflict only in the kernel log, which the daemon's
+sandbox cannot read. Check the log yourself:
+
+```bash
+sudo dmesg | grep -i "conflicts with OpRegion"
+```
+
+A hit reads `ACPI Warning: SystemIO range 0x…-0x… conflicts with OpRegion …`, usually
+followed by `ACPI: OSL: Resource conflict; ACPI support missing from driver?`.
 
 **Fix options:**
 1. **Preferred (driver-local, it87 only):** the driver option
