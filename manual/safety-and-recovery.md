@@ -26,7 +26,7 @@ this page links to them rather than repeating them. Read the notice on the
 | **Another sensor a curve uses stops updating** | That curve stops, and its fans hold their current speed. They are never lowered because a reading froze. The fan role's card shows *Not controlled* | Check the sensor, or pick another for the curve |
 | **A device disappears** (an OpenFAN controller unplugged, a driver unloaded) | The daemon can no longer reach it, so its fans keep whatever the device was last told. A fan role none of whose fans can be reached shows *Not controlled*. When an OpenFAN controller comes back, the daemon writes each fan's speed again; a motherboard chip whose driver comes back needs a daemon restart before its headers return | Reconnect or reload it, then `sudo systemctl restart ventulusd` for a motherboard chip |
 | **A profile is invalid** | The daemon refuses to start it, and the profile that was running keeps running; the app shows why. A profile naming a sensor this machine does not have still starts: that fan role is skipped and its fans hold their speed. If the saved profile cannot load at boot, the daemon starts with none, so the BIOS runs the fans and the thermal emergency still acts | Fix the profile and press **Apply** again. The journal says why a profile did not load at boot |
-| **A write to a fan fails** | The fan keeps the speed it had. The daemon records the failure in its journal (`hwmon write failed for …`); the app does not show it yet. A write that succeeds but does not hold is reported instead, as **Fan duty is not holding** | Look in the **Logs** page's **Journal** tab: [A fan's speed shows, but the fan cannot be controlled](hardware-troubleshooting.md#a-fans-speed-shows-but-the-fan-cannot-be-controlled) |
+| **A write to a fan fails** | The fan keeps the speed it had, and a thermal emergency cannot raise it either. After three failed writes in a row the **System State** page shows **Fan speed cannot be set**, naming the fan, and the daemon's journal names the error (`hwmon write failed for …`). The card clears once a write lands. A write that succeeds but does not hold is reported instead, as **Fan duty is not holding** | Look in the **Logs** page's **Journal** tab: [A fan's speed shows, but the fan cannot be controlled](hardware-troubleshooting.md#a-fans-speed-shows-but-the-fan-cannot-be-controlled) |
 
 None of this can promise that the hardware obeyed. Each hand-back step gives up after
 a few seconds so that the daemon can always exit, and a chip or card that has
@@ -52,7 +52,10 @@ it, and what is left to you.
   page.
 - **Taking a header from the BIOS.** A profile or a fan test switches a header to
   manual mode, and from then on the BIOS's own fan curve no longer runs it. The
-  daemon's rules take over, and every stop gives the header back. A header your
+  daemon's rules take over, and every stop gives the header back as the daemon found
+  it. If another program still held it in manual mode at that moment, it goes back to
+  manual mode, not to the BIOS, and the **System State** page shows **Header was
+  already in manual mode**. A header your
   profile does not control stays with the BIOS, whose curve reads its own sensor; the
   daemon's 40 % missing-sensor floor does not reach it.
 - **Fan tests, Identify and Discover Control Path.** Each changes a header's speed
@@ -124,7 +127,8 @@ distribution, your kernel and its fan-driver boot parameters, the loaded kernel 
 the fan drivers DKMS built, Secure Boot and whether the kernel loads only signed
 drivers, your board, fan chips and headers, the fan-control services installed and
 whether each runs, the daemon's thermal and readiness state, each fan's speed and duty,
-the app's event log and the last 100 lines of the daemon's journal.
+each header's control mode, the app's event log and the last 100 lines of the
+daemon's journal.
 [System Health § Export Support Bundle](diagnostics.md#export-support-bundle) lists
 everything in it.
 
@@ -134,8 +138,6 @@ The bundle does not include the following. Add what applies to your problem:
 sudo dmesg | grep -iE 'it87|nct6|w836|f718'       # the fan drivers' kernel messages
 ```
 
-- each header's control mode, from the command under
-  [Migrating § Check that nothing still holds a header](migrating.md#check-that-nothing-still-holds-a-header);
 - other fan programs the bundle does not know (CoreCtrl, your own units and
   scripts), from the commands under
   [Migrating § Step 1](migrating.md#step-1--take-stock);

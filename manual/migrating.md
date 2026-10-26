@@ -150,7 +150,9 @@ too.
 Keep this list: Step 4 compares against it. This check matters because the Ventulus
 daemon gives each header back exactly as it found it the first time it took it. A
 header the old program still holds at that moment would later be given back to that
-program's last speed instead of to the BIOS.
+program's last speed instead of to the BIOS. If that happens, the **System State**
+page shows **Header was already in manual mode** for that header: stop and disable
+the old program, then reboot.
 
 ## Step 4 — Let Ventulus take over, and check it
 

@@ -978,7 +978,9 @@ class DiagnosticsService(QObject):
                 }
                 for h in self._state.hwmon_headers
             ]
-            # Fan state snapshot (RPM + last commanded PWM for all fans)
+            # Fan state snapshot: speed, last commanded duty, and for a header its
+            # live control mode, whether the daemon found it in manual mode, and
+            # whether its writes are failing (None where the daemon did not say).
             bundle["fan_state"] = [
                 {
                     "id": f.id,
@@ -986,6 +988,9 @@ class DiagnosticsService(QObject):
                     "rpm": f.rpm,
                     "last_commanded_pwm": f.last_commanded_pwm,
                     "age_ms": f.age_ms,
+                    "pwm_enable_mode": f.pwm_enable_mode,
+                    "found_in_manual_mode": f.found_in_manual_mode,
+                    "write_failing": f.write_failing,
                 }
                 for f in self._state.fans
             ]

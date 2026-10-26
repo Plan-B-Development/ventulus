@@ -654,12 +654,13 @@ def detect_readiness_problems(
     contract of "conditions derived from `diag` alone".
 
     ``duty_drift`` (DEC-404 S4-12) adds one condition per header the daemon has
-    stopped correcting, from the LIVE poll rather than from `diag`. It is a
+    stopped correcting, per fan whose writes fail, and per header it found in
+    manual mode, from the LIVE poll rather than from `diag`. It is a
     required keyword with no default on purpose: every consumer of this list —
     the page's pill, its cards, the pop-out's verdict and "To fix" — must see the
     same conditions, and a default is how DEC-379's missed caller stayed silent.
-    A drift condition carries an extra ``subject`` (a fan's name — daemon- or
-    user-supplied, so escaped by every consumer) and its own ``fingerprint``.
+    Each carries an extra ``subject`` (a fan's name — daemon- or user-supplied,
+    so escaped by every consumer) and its own ``fingerprint``.
     """
     problems = _base_conditions(diag)
     notes = board_notes(

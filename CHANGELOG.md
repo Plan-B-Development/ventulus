@@ -25,6 +25,19 @@ rename. Version numbers carry on from Control-OFC.
   role, and the daemon's thermal state, emergency causes, pump stalls, cooling advisories,
   readiness summary, unreadable sensors and undriven controls. A control's name is your own
   text, so only its id is included.
+- **System State says when a fan's speed cannot be set.** A **Fan speed cannot be set** card
+  names a motherboard or OpenFAN fan whose last three writes failed, so it is not at the speed
+  Ventulus chose and a thermal emergency cannot raise it; the daemon's journal names the error.
+  It clears once a write lands. Until now the failure showed only in the journal. Needs
+  ventulusd 5.4.0 or later.
+- **System State says when a header was already in manual mode as Ventulus took it.** A
+  **Header was already in manual mode** card names each header something else held in manual
+  mode when the daemon first took it, usually another fan program. Ventulus gives every header
+  back as it found it, so a stop leaves that header in manual mode instead of returning it to
+  the BIOS; the card says to stop the other program and reboot. Needs ventulusd 5.4.0 or
+  later.
+- **The support bundle carries each header's control mode** (`pwm_enable`), and both flags
+  above, so you no longer need to add the mode by hand.
 
 ### Fixed
 

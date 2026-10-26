@@ -20,6 +20,7 @@ from ventulus.api.models import (
     ReadinessRollup,
     SkippedControl,
     UnavailableSensor,
+    parse_fans,
 )
 from ventulus.services.app_state import AppState
 from ventulus.services.diagnostics_service import DiagnosticsService
@@ -168,6 +169,23 @@ def _service() -> DiagnosticsService:
             ],
         )
     )
+    state.set_fans(
+        parse_fans(
+            {
+                "fans": [
+                    {
+                        "id": "hwmon:it8696:it87.2608:pwm1:CPU_FAN",
+                        "source": "hwmon",
+                        "rpm": 900,
+                        "age_ms": 10,
+                        "pwm_enable_mode": 1,
+                        "found_in_manual_mode": True,
+                        "write_failing": False,
+                    }
+                ]
+            }
+        )
+    )
     svc = DiagnosticsService(state=state)
     svc.set_hw_diagnostics(
         HardwareDiagnosticsResult(
@@ -207,6 +225,12 @@ def test_the_bundle_carries_the_new_sections(monkeypatch):
     headers = {h["id"]: h for h in bundle["hwmon_headers"]}
     assert headers["hwmon:it8696:it87.2608:pwm1:CPU_FAN"]["is_writable"] is True
     assert headers["hwmon:asusec:asus-ec-sensors.0:pwm1:pwm1"]["is_writable"] is False
+    cpu_fan = {f["id"]: f for f in bundle["fan_state"]}["hwmon:it8696:it87.2608:pwm1:CPU_FAN"]
+    assert (
+        cpu_fan["pwm_enable_mode"],
+        cpu_fan["found_in_manual_mode"],
+        cpu_fan["write_failing"],
+    ) == (1, True, False)
     status = bundle["daemon_status"]
     assert status["thermal_state"] == "emergency"
     assert status["emergency_causes"] == ["cpu"]

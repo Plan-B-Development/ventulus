@@ -171,6 +171,19 @@ one-line fix, and a link to the relevant documentation:
   puts the duty back each time; after three corrections in a row that do not hold, it
   stops fighting and this card appears, naming the fan. Corrections that did hold are
   not a warning; they show as a count in the Interference Monitor.
+- **Fan speed cannot be set**: the daemon's last writes to that fan, a motherboard
+  header or an OpenFAN fan, all failed, so it may not be at the speed Ventulus chose
+  and a thermal emergency cannot speed it up either. The daemon's journal names the
+  error ([A fan's speed shows, but the fan cannot be controlled](hardware-troubleshooting.md#a-fans-speed-shows-but-the-fan-cannot-be-controlled)).
+  The card clears once a write lands.
+- **Header was already in manual mode**: something had set that header to manual mode
+  before Ventulus first took it, usually another fan program. Ventulus gives every
+  header back as it found it, so when it stops it leaves this one in manual mode at
+  the speed it had, not to the BIOS. Stop and disable the other program, then reboot
+  ([Migrating § Check that nothing still holds a header](migrating.md#check-that-nothing-still-holds-a-header)).
+  Restarting the daemon does not clear it, because the stop puts the header back in
+  manual mode. If the card is back after the reboot with nothing else running, your
+  board starts that header in manual mode itself, and nothing needs doing.
 
 A healthy system shows a single *No active conditions — fan control is available*
 line, and the pill reads **SYSTEM READY**. Conditions clear themselves: fix the cause,
@@ -657,8 +670,10 @@ clipboard, and **Close** discards it. It contains:
 - the daemon's version, capabilities and subsystem status, its thermal state and any
   emergency, pump stall or cooling advisory, its readiness summary, the sensors it
   cannot read and the controls it is not driving (by id: a control's name is your own
-  text, so it stays out), and each fan's RPM and last reported duty (sensor readings
-  are counted, not listed);
+  text, so it stays out), and each fan's RPM and last reported duty, with, for each
+  motherboard header, its control mode (`pwm_enable`), whether the daemon found it in
+  manual mode, and whether its writes are failing (sensor readings are counted, not
+  listed);
 - each motherboard fan header the daemon found: its chip, the driver's label, whether
   it can be written, and its role;
 - your settings, apart from window and chart layout, the export folder, and anything

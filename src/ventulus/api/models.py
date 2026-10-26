@@ -1137,6 +1137,16 @@ class FanReading:
     # stopped rewriting this header. Cleared when a readback agrees again or the
     # command changes. `None` = not reported (older daemon / non-hwmon).
     duty_not_holding: bool | None = None
+    # True when this hwmon header was already in manual mode, at a readable
+    # duty, when the daemon first took it: a stop gives it back in manual mode
+    # at that duty, not to the BIOS. Never cleared while the daemon runs.
+    # `None` = not reported (older daemon / non-hwmon).
+    found_in_manual_mode: bool | None = None
+    # True while the daemon's last writes to this fan (hwmon or OpenFan) have
+    # all failed: three in a row, the latest recent. Cleared when a write lands,
+    # and by age once the engine stops writing the fan. `None` = not reported
+    # (older daemon / GPU fan).
+    write_failing: bool | None = None
 
     def freshness_at(self, poll_interval_ms: int) -> Freshness:
         """This reading's freshness at the daemon's cadence (:func:`freshness_for_age`).

@@ -35,7 +35,7 @@ from ventulus.knowledge.hwmon_label_resolver import clear_libsensors_cache
 from ventulus.services.app_settings_service import AppSettingsService
 from ventulus.services.daemon_features import daemon_supports
 from ventulus.services.diagnostics_service import DiagnosticsService
-from ventulus.services.duty_drift import NO_DRIFT, DutyDriftState, duty_drift_state
+from ventulus.services.duty_drift import NO_DRIFT, DutyDriftState, duty_drift_state, is_drift_key
 from ventulus.services.health_ack import clear_key, prune, silence_key
 from ventulus.services.pump_protection import header_is_pump_protected
 from ventulus.services.pwm_report.runner import RUN_ACTIVE_REASON
@@ -253,6 +253,10 @@ class SystemStatePage(QWidget):
         #: DEC-404 S4-12: the daemon's duty-drift report from the LIVE poll,
         #: read through `_duty_drift()` by every builder on this page.
         self._duty_drift_state: DutyDriftState = NO_DRIFT
+        #: A fan poll has reached the page since it was built or the daemon was
+        #: last lost. Until then the per-fan cards are unknown rather than absent,
+        #: so `_prune_silences` keeps their dismissals.
+        self._drift_polled = False
         #: DEC-456: the tri-state the last render showed, so a headers update
         #: that leaves it unchanged costs no re-render
         #: (`_on_headers_for_verification`).
@@ -781,6 +785,7 @@ class SystemStatePage(QWidget):
         # A drift card is live poll state too: with no daemon to ask, "this header
         # is not holding" is no longer a current fact (S4-12).
         self._duty_drift_state = NO_DRIFT
+        self._drift_polled = False
         self._rerender_last_diagnostics()
 
     def _prune_silences(self, diag) -> None:
@@ -818,7 +823,14 @@ class SystemStatePage(QWidget):
             pwm_control_verified=self._pwm_verified(),
             live_thermal_state=self._live_thermal_state,
         )
-        kept = prune(stored, _live_silence_keys(probe))
+        live = _live_silence_keys(probe)
+        if not self._drift_polled:
+            # The per-fan cards come from the 1 Hz poll, not from `diag`, so a
+            # payload that lands before the first poll cannot say they are gone.
+            # Keep their dismissals: a header found in manual mode outlives a
+            # daemon restart, and its card with it.
+            live |= {silence_key(t) for t in stored if is_drift_key(silence_key(t))}
+        kept = prune(stored, live)
         if kept != stored:
             self._settings_svc.update(dismissed_health_items=kept)
 
@@ -1723,6 +1735,7 @@ class SystemStatePage(QWidget):
         higher correction count — is a new occurrence that a dismissal of the
         last one cannot hide.
         """
+        self._drift_polled = True
         name_of = self._state.fan_display_name if self._state is not None else str
         state = duty_drift_state(fans, name_of)
         if state == self._duty_drift_state:

@@ -352,10 +352,15 @@ count ([System Health § Cooling Hardware](diagnostics.md#cooling-hardware)). Th
   ([Driver Setup § BIOS settings](driver-setup.md#step-5--bios-settings-the-half-people-skip)).
 - **The firmware takes the header back.** See
   [The BIOS keeps taking fan control back](#the-bios-keeps-taking-fan-control-back).
-- **The writes fail.** Permissions are not the cause with Ventulus: the daemon runs as
-  root and writes the files itself. A write the driver refuses is logged in the
-  daemon's journal, which the **Logs** page shows in its inspector's **Journal** tab,
-  or `journalctl -u ventulusd -b | grep 'hwmon write failed'`.
+- **The writes fail.** The **System State** page shows **Fan speed cannot be set**
+  after three failed writes in a row. Permissions are not the cause with Ventulus: the
+  daemon runs as root and writes the files itself. The daemon's journal names the
+  error; the **Logs** page shows it in its inspector's **Journal** tab, or run
+  `journalctl -u ventulusd -b | grep 'write failed'`. *Read-only file system* means
+  the service's sandbox does not cover the device: a drop-in that overrides the
+  unit's `ReadWritePaths=` is the usual cause (`systemctl cat ventulusd` shows every
+  file in effect). Other errors usually mean the driver or the board refused the
+  write.
 - **The speed comes from another fan.** A splitter or a hub reports one fan's speed,
   usually the one on its first connector, while the header drives all of them. A hub
   powered from SATA takes only the PWM signal from the header. An AIO pump on a header

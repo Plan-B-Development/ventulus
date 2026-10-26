@@ -24,8 +24,11 @@ from ventulus.api.models import (
 from ventulus.services.app_state import AppState
 from ventulus.services.duty_drift import (
     NO_DRIFT,
+    FanFlag,
     drift_key,
     duty_drift_state,
+    found_manual_key,
+    write_failing_key,
 )
 from ventulus.services.system_state_view import SilenceState, build_system_state_vm
 from ventulus.ui.widgets.readiness_report import build_readiness_report_html
@@ -144,6 +147,74 @@ def test_each_header_is_its_own_card():
     assert "#" not in drift_key(CPU) and "@" not in drift_key(CPU)
 
 
+# ── Failing writes and a header found in manual mode ────────────────────────
+
+OPENFAN = "openfan:ch03"
+
+
+def _flagged(fid: str, **flags) -> dict:
+    entry = fan(fid, source="openfan" if fid.startswith("openfan:") else "hwmon")
+    entry.update(flags)
+    return entry
+
+
+def test_an_older_daemon_flags_neither():
+    state = _state_from([fan(CPU), fan(OPENFAN, source="openfan")])
+    assert state.write_failing == () and state.found_in_manual_mode == ()
+
+
+def test_the_poll_flags_failing_writes_and_manual_mode_per_fan():
+    state = _state_from(
+        [
+            _flagged(CPU, write_failing=True, found_in_manual_mode=False),
+            _flagged(SYS, write_failing=False, found_in_manual_mode=True),
+            _flagged(OPENFAN, write_failing=True),
+        ],
+        {CPU: "CPU fan", OPENFAN: "Front intake"},
+    )
+    assert state.write_failing == (FanFlag(CPU, "CPU fan"), FanFlag(OPENFAN, "Front intake"))
+    assert state.found_in_manual_mode == (FanFlag(SYS, SYS),)
+
+
+def test_a_fan_whose_writes_fail_raises_one_counted_card_that_is_not_critical():
+    quiet = build_system_state_vm(_diag(), duty_drift=NO_DRIFT)
+    failing = _state_from([_flagged(OPENFAN, write_failing=True)], {OPENFAN: "<b>Front</b>"})
+    vm = build_system_state_vm(_diag(), duty_drift=failing)
+    card = _cards(vm)[write_failing_key(OPENFAN)]
+    assert card.title == "Fan speed cannot be set"
+    assert "&lt;b&gt;Front&lt;/b&gt;" in card.detail and "<b>Front</b>" not in card.detail
+    assert vm.issues_requiring_attention == quiet.issues_requiring_attention + 1
+    assert vm.issue_count_state == "warn", "losing control is ACTION REQUIRED, not CRITICAL"
+
+
+def test_a_header_found_in_manual_mode_raises_one_counted_card():
+    quiet = build_system_state_vm(_diag(), duty_drift=NO_DRIFT)
+    found = _state_from([_flagged(SYS, found_in_manual_mode=True)], {SYS: "Rear exhaust"})
+    vm = build_system_state_vm(_diag(), duty_drift=found)
+    card = _cards(vm)[found_manual_key(SYS)]
+    assert card.title == "Header was already in manual mode"
+    assert "Rear exhaust" in card.detail
+    assert vm.issues_requiring_attention == quiet.issues_requiring_attention + 1
+    assert write_failing_key(SYS) not in _cards(vm), "one fact, one card"
+
+
+def test_the_pop_out_carries_both_cards():
+    both = _state_from(
+        [_flagged(CPU, write_failing=True), _flagged(SYS, found_in_manual_mode=True)]
+    )
+    html = build_readiness_report_html(_diag(), duty_drift=both)
+    assert "Fan speed cannot be set" in html and "Header was already in manual mode" in html
+    clean = build_readiness_report_html(_diag(), duty_drift=NO_DRIFT)
+    assert "Fan speed cannot be set" not in clean
+    assert "Header was already in manual mode" not in clean
+
+
+def test_the_three_per_fan_keys_never_collide():
+    keys = {drift_key(CPU), write_failing_key(CPU), found_manual_key(CPU)}
+    assert len(keys) == 3
+    assert not any("#" in k or "@" in k for k in keys)
+
+
 # ── The live page ────────────────────────────────────────────────────────────
 
 
@@ -176,6 +247,45 @@ def test_the_page_raises_and_drops_the_card_from_the_poll(qtbot):
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     assert not page._duty_drift().not_holding
     assert _title(page, CPU) is None
+
+
+def test_the_page_raises_and_drops_a_failing_write_card_from_the_poll(qtbot):
+    page, state = _page(qtbot)
+    title = f"SystemState_IssueTitle_{write_failing_key(CPU)}"
+    assert page.findChild(QLabel, title) is None, "precondition: no card before the poll"
+    state.set_fans(parse_fans({"fans": [_flagged(CPU, write_failing=True)]}))
+    assert page.findChild(QLabel, title) is not None
+    state.set_fans(parse_fans({"fans": [_flagged(CPU, write_failing=False)]}))
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert page.findChild(QLabel, title) is None
+
+
+def test_a_poll_cards_dismissal_survives_a_render_before_the_first_poll(qtbot):
+    """`/diagnostics/hardware` cannot say a per-fan card is gone: only the poll
+    can. A payload that lands first must not prune its dismissal."""
+    from ventulus.services.diagnostics_service import DiagnosticsService
+    from ventulus.ui.pages.system_state_page import SystemStatePage
+
+    found = _state_from([_flagged(SYS, found_in_manual_mode=True)])
+    token = _cards(build_system_state_vm(_diag(), duty_drift=found))[
+        found_manual_key(SYS)
+    ].silence.token
+    assert token, "precondition: the card can be dismissed"
+    state = AppState()
+    state.set_connection(ConnectionState.CONNECTED)
+    page = SystemStatePage(state=state, diagnostics_service=DiagnosticsService(state))
+    qtbot.addWidget(page)
+    page._settings_svc.update(dismissed_health_items=[token])
+
+    page._on_hw_diag_ok(_diag())
+    assert page._settings_svc.settings.dismissed_health_items == [token], (
+        "a payload before the first poll pruned a poll card's dismissal"
+    )
+    # The discriminator: once a poll says the header is not flagged, the next
+    # payload prunes it, so the first arm is the guard and not a dead prune.
+    state.set_fans(parse_fans({"fans": [fan(SYS)]}))
+    page._on_hw_diag_ok(_diag())
+    assert page._settings_svc.settings.dismissed_health_items == []
 
 
 def test_a_disconnect_clears_the_live_drift(qtbot):
