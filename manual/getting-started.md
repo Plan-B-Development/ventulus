@@ -316,6 +316,46 @@ Ventulus does not bundle its own Python and Qt to get round this: that would be
 several hundred megabytes, and their security fixes would then have to come from
 this project instead of from your distribution.
 
+## After installing
+
+The commands above leave `ventulusd` enabled and running
+(`systemctl is-active ventulusd` prints `active`), so it starts at every boot.
+Before you open Ventulus:
+
+**Reboot, or load the sensor drivers now.** The daemon package lists the common
+motherboard sensor drivers (`nct6775`, `it87` and `w83627ehf`) and the SATA drive
+temperature driver (`drivetemp`) in `/etc/modules-load.d/ventulus.conf`, which
+systemd reads as the machine starts. No package loads them as it installs, so until
+the next boot your motherboard's fans and temperatures can be missing. To skip the
+reboot, load them and then restart the daemon, which looks for fan headers only as
+it starts:
+
+```bash
+sudo systemctl restart systemd-modules-load
+sudo systemctl restart ventulusd
+```
+
+On most machines other than Gigabyte boards, the first command says that the job
+failed, and from then on `systemctl --failed` lists `systemd-modules-load.service`
+after every boot. That is a fault in the package, not in your system, and it stops
+nothing from loading: `nct6775` or `w83627ehf` found no chip on your board, and the
+package's Super-I/O guard, which loads those two, reports that as an error. Every
+other module still loads, including the drivers that match your board. To see which
+of the package's drivers loaded:
+
+```bash
+lsmod | grep -E '^(nct6775|it87|w83627ehf|drivetemp) '
+```
+
+**You do not need to log out.** Ventulus reaches the daemon through a socket that
+every local user can open, so there is no group to join. On KDE Plasma, the system
+tray icon starts at your next login.
+
+You do not need `lm_sensors`, DKMS or an out-of-tree driver to start. Open
+Ventulus and let it show you what your kernel already exposes: the **System State**
+and **Hardware** pages name a driver or setting only when your hardware needs one.
+The [Setup Checklist](setup-checklist.md) takes it from there.
+
 ## First launch
 
 ```bash
