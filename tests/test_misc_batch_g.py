@@ -38,6 +38,7 @@ from tests.test_header_role_picker import LABEL_PUMP, USER_PUMP, _hdr, _role_btn
 from tests.test_header_role_picker import _caps as _picker_caps
 from tests.test_header_role_picker import _page as _picker_page
 from tests.test_header_role_picker import _StubDialog as _PickerDialog
+from tests.test_logs_page import open_bundle_preview
 from tests.test_openfan_roles import CH0, _role
 from tests.test_openfan_roles import _btn as _openfan_btn
 from tests.test_openfan_roles import _outcome as _openfan_outcome
@@ -187,6 +188,8 @@ def _quick_collectors(monkeypatch, diag) -> list[threading.Thread]:
     monkeypatch.setattr(diag, "fetch_journal_entries", journal)
     monkeypatch.setattr(DiagnosticsService, "collect_kernel_modules", staticmethod(lambda: "mods"))
     monkeypatch.setattr(DiagnosticsService, "fetch_kernel_log_amdgpu", staticmethod(lambda: ""))
+    monkeypatch.setattr(DiagnosticsService, "collect_dkms_status", staticmethod(lambda: {}))
+    monkeypatch.setattr(DiagnosticsService, "collect_distribution", staticmethod(lambda: None))
     return seen
 
 
@@ -205,8 +208,9 @@ class TestSupportBundleExport:
         _save_to(monkeypatch, target)
         threads = _quick_collectors(monkeypatch, diag)
 
+        preview = open_bundle_preview(qtbot, page)
         with qtbot.waitSignal(page.bundle_export_finished, timeout=5000) as sig:
-            page.export_bundle()
+            preview.findChild(QPushButton, "SupportBundlePreview_Btn_save").click()
         page.cleanup()
 
         assert sig.args == [True, f"Support bundle saved to {target}"]
@@ -223,8 +227,9 @@ class TestSupportBundleExport:
             raise OSError("disk full")
 
         monkeypatch.setattr("ventulus.paths.atomic_write", boom)
+        preview = open_bundle_preview(qtbot, page)
         with qtbot.waitSignal(page.bundle_export_finished, timeout=5000) as sig:
-            page.export_bundle()
+            preview.findChild(QPushButton, "SupportBundlePreview_Btn_save").click()
         page.cleanup()
 
         assert sig.args == [False, "Support bundle export failed: disk full"]

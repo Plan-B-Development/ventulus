@@ -643,22 +643,32 @@ default), one click does it.
 
 ## Export Support Bundle
 
-The footer's **Export Support Bundle** button, available on every page, saves one JSON
-file (`ventulus_support_bundle.json` by default) containing:
+The footer's **Export Support Bundle** button, available on every page, builds one JSON
+file and shows it to you whole before anything is written. **Save…** saves it
+(`ventulus_support_bundle.json` by default), **Copy** puts the same text on the
+clipboard, and **Close** discards it. It contains:
 
-- the GUI version, your kernel release, the fan- and GPU-driver boot parameters (not
-  the rest of the command line, which names your disks), and the loaded kernel modules;
+- the GUI version, your distribution's name and release (from `/etc/os-release`), your
+  kernel release, the fan- and GPU-driver boot parameters (not the rest of the command
+  line, which names your disks), and the loaded kernel modules;
+- the fan drivers DKMS has built and for which kernels, from `dkms status`. Other DKMS
+  modules (a graphics or network driver, say) are counted, not named;
 - the app's event log, with any OpenFAN board serial number replaced by *(redacted)*;
-- the daemon's version, capabilities and subsystem status, and each fan's RPM and last
-  reported duty (sensor readings are counted, not listed);
+- the daemon's version, capabilities and subsystem status, its thermal state and any
+  emergency, pump stall or cooling advisory, its readiness summary, the sensors it
+  cannot read and the controls it is not driving (by id: a control's name is your own
+  text, so it stays out), and each fan's RPM and last reported duty (sensor readings
+  are counted, not listed);
+- each motherboard fan header the daemon found: its chip, the driver's label, whether
+  it can be written, and its role;
 - your settings, apart from window and chart layout, the export folder, and anything
   you typed as free text (your hardware and cooler notes, the Logs search box). It
   **keeps** machine-specific settings such as sensor classifications and the profile
   and theme folder overrides, because those are often the cause of a problem;
 - the active profile's name, your profiles' names and ids (not their curves), and your
   theme names;
-- your board, BIOS version and detected fan-control chips, once the app has read them
-  from the daemon;
+- your board, BIOS version and detected fan-control chips, and whether Secure Boot is on
+  and the kernel loads only signed drivers, once the app has read them from the daemon;
 - which of the fancontrol, CoolerControl, fan2go, thinkfan and LACT services are
   installed, whether each is running and starts at boot, and whether `fancontrol`'s PID
   file is there;
@@ -666,10 +676,11 @@ file (`ventulus_support_bundle.json` by default) containing:
   replaced by *(redacted)*, and any `amdgpu` kernel messages from this boot (with the
   boot command line cut the same way).
 
-The export runs in the background, so the window stays responsive while the journal is
-read; a banner then says where the file was saved, or why it could not be.
+The bundle is built in the background, so the window stays responsive while the journal
+is read; after **Save…**, a banner says where the file was saved, or why it could not
+be.
 
-Review it before sharing: it names your hardware and may name your folders.
+Read it before sharing: it names your hardware and may name your folders.
 
 ---
 

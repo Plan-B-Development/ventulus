@@ -99,6 +99,7 @@ from ventulus.ui.widgets.alert_center_dialog import AlertCenterDialog
 from ventulus.ui.widgets.alert_status_bar import AlertStatusBar
 from ventulus.ui.widgets.log_event_model import LogEventModel
 from ventulus.ui.widgets.log_row_delegate import LogRowDelegate
+from ventulus.ui.widgets.support_bundle_preview import SupportBundlePreviewDialog
 
 if TYPE_CHECKING:
     from ventulus.api.models import Capabilities
@@ -148,27 +149,43 @@ class _JournalWorker(QObject):
 
 
 class _BundleWorker(QObject):
-    """Finishes a support bundle off the UI thread, on the journal worker's thread.
+    """Builds a support bundle off the UI thread, on the journal worker's thread.
 
     The page takes the GUI-state snapshot on the UI thread first; what runs here
-    (lsmod, journalctl twice, the file write) touches no Qt object or GUI state.
-    Exactly one ``finished`` per request: ``(True, path)`` or ``(False, reason)``.
+    (lsmod, dkms, systemctl, journalctl twice) touches no Qt object or GUI state.
+    Exactly one ``finished`` per request: ``(True, text)``, the file the preview
+    shows and Save writes, or ``(False, reason)``.
     """
 
     finished = Signal(bool, str)
+    #: A save ended: ``(True, path)`` or ``(False, reason)``.
+    saved = Signal(bool, str)
 
     def __init__(self, diag: DiagnosticsService) -> None:
         super().__init__()
         self._diag = diag
 
-    @Slot(object, str)
-    def do_export(self, draft: SupportBundleDraft, path: str) -> None:
+    @Slot(str, str)
+    def do_save(self, text: str, path: str) -> None:
+        """Write the previewed text here rather than on the GUI thread: the write
+        fsyncs, and a stalled network or USB folder would freeze the window."""
+        from ventulus.paths import atomic_write
+
         try:
-            self._diag.finish_support_bundle(draft, Path(path))
+            atomic_write(Path(path), text)
+        except Exception as e:  # reported on the page, never raised into the thread
+            self.saved.emit(False, str(e)[:120])
+            return
+        self.saved.emit(True, path)
+
+    @Slot(object)
+    def do_build(self, draft: SupportBundleDraft) -> None:
+        try:
+            text = self._diag.complete_support_bundle(draft)
         except Exception as e:  # reported on the page, never raised into the thread
             self.finished.emit(False, str(e)[:120])
             return
-        self.finished.emit(True, path)
+        self.finished.emit(True, text)
 
 
 class LogsPage(QWidget):
@@ -177,7 +194,8 @@ class LogsPage(QWidget):
     # Main-thread → worker-thread request (queued). Class attribute so PySide6
     # binds it as a bound signal per instance.
     _journal_request = Signal()
-    _bundle_request = Signal(object, str)
+    _bundle_request = Signal(object)
+    _bundle_save_request = Signal(str, str)
     #: A contextual action asked to leave the page; MainWindow owns the stack.
     navigate_requested = Signal(int)
     #: A support-bundle export ended: ``(ok, message)``. The export is started
@@ -223,6 +241,10 @@ class LogsPage(QWidget):
         self._journal_worker: _JournalWorker | None = None
         self._bundle_worker: _BundleWorker | None = None
         self._bundle_in_flight = False
+        #: Built on the first export and reused, like the readiness report's.
+        self._bundle_preview: SupportBundlePreviewDialog | None = None
+        #: Set by :meth:`cleanup`: a build or save answering after it opens nothing.
+        self._closing = False
         # "Follow" was switched off by scrolling away from the tail, not by the
         # user, so scrolling back to the tail switches it on again.
         self._follow_paused_by_scroll = False
@@ -1289,14 +1311,8 @@ class LogsPage(QWidget):
             self._to_clipboard("\n".join(format_row_line(r) for r in rows))
 
     def export_bundle(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Support Bundle",
-            "ventulus_support_bundle.json",
-            "JSON files (*.json)",
-        )
-        if not path:
-            return
+        """Build a support bundle and show it for review. Nothing is written until
+        the preview's **Save…**; closing it writes nothing."""
         if self._bundle_in_flight:
             self.bundle_export_finished.emit(False, "A support bundle export is already running.")
             return
@@ -1305,14 +1321,65 @@ class LogsPage(QWidget):
         except Exception as e:
             self._on_bundle_finished(False, str(e)[:120])
             return
-        # lsmod and two journalctl runs can take seconds; the GUI must not freeze.
+        # lsmod, dkms and two journalctl runs can take seconds; the GUI must not
+        # freeze.
         self._bundle_in_flight = True
         self._ensure_journal_worker()
-        self._bundle_request.emit(draft, path)
+        self._bundle_request.emit(draft)
 
     @Slot(bool, str)
-    def _on_bundle_finished(self, ok: bool, detail: str) -> None:
+    def _on_bundle_built(self, ok: bool, payload: str) -> None:
         self._bundle_in_flight = False
+        if self._closing:
+            return
+        if not ok:
+            self._on_bundle_finished(False, payload)
+            return
+        if self._bundle_preview is None:
+            self._bundle_preview = SupportBundlePreviewDialog(self)
+            self._bundle_preview.save_requested.connect(self._save_previewed_bundle)
+            self._bundle_preview.copied.connect(self._on_bundle_copied)
+        self._bundle_preview.set_text(payload)
+        self._bundle_preview.show()
+        self._bundle_preview.raise_()
+        self._bundle_preview.activateWindow()
+
+    def _save_previewed_bundle(self) -> None:
+        """Write the previewed text, byte for byte, where the user chooses."""
+        preview = self._bundle_preview
+        if preview is None:
+            return
+        # Taken before the file picker: its nested event loop can deliver a newer
+        # build, and Save must write the bundle the user was reading.
+        text = preview.text()
+        path, _ = QFileDialog.getSaveFileName(
+            preview,
+            "Save Support Bundle",
+            "ventulus_support_bundle.json",
+            "JSON files (*.json)",
+        )
+        if not path:
+            return
+        preview.set_saving(True)
+        self._ensure_journal_worker()
+        self._bundle_save_request.emit(text, path)
+
+    @Slot(bool, str)
+    def _on_bundle_saved(self, ok: bool, detail: str) -> None:
+        preview = self._bundle_preview
+        if self._closing or preview is None:
+            return
+        preview.set_saving(False)
+        if ok:
+            preview.hide()
+        else:
+            preview.show_status(f"Could not save the file: {detail}")
+        self._on_bundle_finished(ok, detail)
+
+    def _on_bundle_copied(self) -> None:
+        self._diag.log_event("info", "gui", "Support bundle copied to the clipboard")
+
+    def _on_bundle_finished(self, ok: bool, detail: str) -> None:
         if ok:
             message = f"Support bundle saved to {detail}"
             self._diag.log_event("info", "gui", message)
@@ -1380,11 +1447,15 @@ class LogsPage(QWidget):
         self._bundle_worker = _BundleWorker(self._diag)
         self._bundle_worker.moveToThread(self._journal_thread)
         self._bundle_request.connect(
-            self._bundle_worker.do_export, Qt.ConnectionType.QueuedConnection
+            self._bundle_worker.do_build, Qt.ConnectionType.QueuedConnection
         )
         self._bundle_worker.finished.connect(
-            self._on_bundle_finished, Qt.ConnectionType.QueuedConnection
+            self._on_bundle_built, Qt.ConnectionType.QueuedConnection
         )
+        self._bundle_save_request.connect(
+            self._bundle_worker.do_save, Qt.ConnectionType.QueuedConnection
+        )
+        self._bundle_worker.saved.connect(self._on_bundle_saved, Qt.ConnectionType.QueuedConnection)
         self._journal_thread.start()
 
     @Slot(str)
@@ -1421,6 +1492,9 @@ class LogsPage(QWidget):
             self._filter_write_timer.stop()
             self._persist_log_filters()
 
+        self._closing = True
+        if self._bundle_preview is not None:
+            self._bundle_preview.close()
         if self._journal_worker is not None:
             QObject.disconnect(self._journal_worker, None, None, None)
         if self._bundle_worker is not None:
@@ -1429,7 +1503,7 @@ class LogsPage(QWidget):
             self._journal_thread.quit()
             # A fetch in flight blocks in subprocess.run for up to
             # JOURNAL_TIMEOUT_S (which then kills the journalctl child), and a
-            # bundle export runs three subprocesses in turn; the queued quit() is
+            # bundle build runs five subprocesses in turn; the queued quit() is
             # only processed once the running slot returns. Waiting the full
             # subprocess budget + margin lets the worker join cleanly on the
             # normal path — the old 2 s wait fell short of the 5 s timeout and

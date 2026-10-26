@@ -784,9 +784,25 @@ def _quick_bundle_collectors(monkeypatch, diag) -> None:
     monkeypatch.setattr(diag, "fetch_journal_entries", lambda: "")
     monkeypatch.setattr(DiagnosticsService, "collect_kernel_modules", staticmethod(lambda: ""))
     monkeypatch.setattr(DiagnosticsService, "fetch_kernel_log_amdgpu", staticmethod(lambda: ""))
+    monkeypatch.setattr(DiagnosticsService, "collect_dkms_status", staticmethod(lambda: {}))
+    monkeypatch.setattr(DiagnosticsService, "collect_distribution", staticmethod(lambda: None))
 
 
-def test_export_bundle_writes_the_chosen_file(qtbot, monkeypatch, tmp_path):
+def open_bundle_preview(qtbot, page):
+    """Start an export and wait for its preview: the bundle is built off the GUI
+    thread, and nothing is written until the preview's Save."""
+    page.export_bundle()
+    qtbot.waitUntil(lambda: page._bundle_preview is not None and bool(page._bundle_preview.text()))
+    preview = page._bundle_preview
+    assert not preview.isHidden(), "the preview is shown once the bundle is built"
+    return preview
+
+
+def _bundle_button(preview, name: str) -> QPushButton:
+    return preview.findChild(QPushButton, f"SupportBundlePreview_Btn_{name}")
+
+
+def test_export_bundle_previews_then_writes_exactly_what_it_showed(qtbot, monkeypatch, tmp_path):
     page, diag = _page(qtbot)
     target = tmp_path / "bundle.json"
     monkeypatch.setattr(
@@ -794,23 +810,77 @@ def test_export_bundle_writes_the_chosen_file(qtbot, monkeypatch, tmp_path):
         lambda *a, **k: (str(target), ""),
     )
     _quick_bundle_collectors(monkeypatch, diag)
-    with qtbot.waitSignal(page.bundle_export_finished, timeout=5000) as sig:
-        page.export_bundle()
-    page.cleanup()
+    try:
+        preview = open_bundle_preview(qtbot, page)
+        assert not target.exists(), "nothing is written before Save"
+        with qtbot.waitSignal(page.bundle_export_finished, timeout=5000) as sig:
+            _bundle_button(preview, "save").click()
+        assert preview.isHidden(), "a saved bundle closes its preview"
+    finally:
+        page.cleanup()
     assert sig.args[0] is True
-    assert target.exists()
+    assert target.read_text() == preview.text()
 
 
-def test_export_bundle_cancel_is_noop(qtbot, monkeypatch):
+def test_closing_the_preview_or_cancelling_the_save_writes_nothing(qtbot, monkeypatch, tmp_path):
     page, diag = _page(qtbot)
-    monkeypatch.setattr(
-        "ventulus.ui.pages.logs_page.QFileDialog.getSaveFileName", lambda *a, **k: ("", "")
-    )
-    called: list[int] = []
-    diag.snapshot_support_bundle = lambda: called.append(1)  # type: ignore[method-assign]
-    page.export_bundle()
-    assert called == []
-    assert page._journal_thread is None, "a cancel starts no worker"
+    _quick_bundle_collectors(monkeypatch, diag)
+    finished: list = []
+    page.bundle_export_finished.connect(lambda *a: finished.append(a))
+    try:
+        preview = open_bundle_preview(qtbot, page)
+        # The autouse modal fixture answers the file picker with "cancelled".
+        _bundle_button(preview, "save").click()
+        assert not preview.isHidden(), "a cancelled save leaves the preview open"
+        _bundle_button(preview, "close").click()
+        assert preview.isHidden()
+    finally:
+        page.cleanup()
+    assert finished == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_copy_puts_the_bundle_on_the_clipboard(qtbot, monkeypatch):
+    page, diag = _page(qtbot)
+    _quick_bundle_collectors(monkeypatch, diag)
+    try:
+        preview = open_bundle_preview(qtbot, page)
+        QApplication.clipboard().setText("")
+        _bundle_button(preview, "copy").click()
+    finally:
+        page.cleanup()
+    assert QApplication.clipboard().text() == preview.text()
+    assert any("copied to the clipboard" in e.message for e in diag.events)
+
+
+def test_save_writes_the_bundle_on_screen_when_save_was_pressed(qtbot, monkeypatch, tmp_path):
+    """The file picker runs a nested event loop, so a second export's build can
+    land while it is open. Save must still write what the user was reading."""
+    page, diag = _page(qtbot)
+    target = tmp_path / "bundle.json"
+    _quick_bundle_collectors(monkeypatch, diag)
+
+    def pick(*_a, **_k):
+        page._on_bundle_built(True, "a newer bundle the user never read\n")
+        return str(target), ""
+
+    monkeypatch.setattr("ventulus.ui.pages.logs_page.QFileDialog.getSaveFileName", pick)
+    try:
+        preview = open_bundle_preview(qtbot, page)
+        shown = preview.text()
+        with qtbot.waitSignal(page.bundle_export_finished, timeout=5000):
+            _bundle_button(preview, "save").click()
+        assert preview.text() != shown, "precondition: a newer build did land"
+    finally:
+        page.cleanup()
+    assert target.read_text() == shown
+
+
+def test_a_build_answering_after_cleanup_opens_nothing(qtbot):
+    page, _diag = _page(qtbot)
+    page.cleanup()
+    page._on_bundle_built(True, "{}\n")
+    assert page._bundle_preview is None
 
 
 def test_export_bundle_failure_surfaces_into_feed(qtbot, monkeypatch, tmp_path):
@@ -825,9 +895,12 @@ def test_export_bundle_failure_surfaces_into_feed(qtbot, monkeypatch, tmp_path):
         raise OSError("disk full")
 
     monkeypatch.setattr("ventulus.paths.atomic_write", boom)
-    with qtbot.waitSignal(page.bundle_export_finished, timeout=5000):
-        page.export_bundle()
-    page.cleanup()
+    try:
+        preview = open_bundle_preview(qtbot, page)
+        with qtbot.waitSignal(page.bundle_export_finished, timeout=5000):
+            _bundle_button(preview, "save").click()
+    finally:
+        page.cleanup()
     assert any("export failed" in e.message for e in diag.events)
     assert any("export failed" in m for m in _messages(page))
 

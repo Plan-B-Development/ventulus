@@ -14,6 +14,17 @@ rename. Version numbers carry on from Control-OFC.
   each time you open the page or press **Refresh**, so you can check that a program you
   stopped is gone. The app reads only systemd's unit states and that PID file, never a fan.
   The support bundle carries the same states under `system.fan_control_software`.
+- **You see the support bundle before it is saved, and can copy it instead.** **Export Support
+  Bundle** now builds the file in the background and shows it whole; **Save…** writes exactly
+  that text, **Copy** puts it on the clipboard, and **Close** writes nothing. Previously the
+  app asked where to save first and wrote the file unseen.
+- **The support bundle answers a triager's first questions.** It now carries your distribution
+  (name and release from `/etc/os-release`), the fan drivers `dkms status` lists and the
+  kernels they are built for (other DKMS modules are counted, not named), Secure Boot and the
+  kernel's signed-drivers verdict, each motherboard header with its label, writability and
+  role, and the daemon's thermal state, emergency causes, pump stalls, cooling advisories,
+  readiness summary, unreadable sensors and undriven controls. A control's name is your own
+  text, so only its id is included.
 
 ### Fixed
 

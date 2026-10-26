@@ -119,19 +119,18 @@ Every change the manual describes, and where to take it back:
 ## Getting help
 
 Start with the support bundle: the **Export Support Bundle** button in the footer
-saves one file with the app and daemon versions, your kernel and its fan-driver boot
-parameters, the loaded kernel modules, your board and fan chips, the fan-control
-services installed and whether each runs, each fan's speed and duty, the app's event
-log and the last 100 lines of the daemon's journal.
+shows you one file, then saves or copies it. It holds the app and daemon versions, your
+distribution, your kernel and its fan-driver boot parameters, the loaded kernel modules,
+the fan drivers DKMS built, Secure Boot and whether the kernel loads only signed
+drivers, your board, fan chips and headers, the fan-control services installed and
+whether each runs, the daemon's thermal and readiness state, each fan's speed and duty,
+the app's event log and the last 100 lines of the daemon's journal.
 [System Health § Export Support Bundle](diagnostics.md#export-support-bundle) lists
 everything in it.
 
-The bundle does not yet include the following. Add what applies to your problem:
+The bundle does not include the following. Add what applies to your problem:
 
 ```bash
-grep -e '^NAME=' -e '^VERSION=' /etc/os-release   # your distribution
-dkms status                                       # out-of-tree drivers, and the kernels they are built for
-mokutil --sb-state                                # Secure Boot, where mokutil is installed
 sudo dmesg | grep -iE 'it87|nct6|w836|f718'       # the fan drivers' kernel messages
 ```
 

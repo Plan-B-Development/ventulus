@@ -78,6 +78,22 @@ LSMOD_TIMEOUT_S = 3
 # Modules we care about for fan / GPU diagnosis. Filtering keeps the bundle
 # small and focused; full lsmod output is rarely needed.
 KERNEL_MODULE_FILTER = ("it87", "nct6", "amdgpu", "k10temp", "asus_ec_sensors")
+DKMS_TIMEOUT_S = 5
+# The out-of-tree fan and sensor drivers a `dkms status` line is kept for, by
+# module name with `-` read as `_`. Every other DKMS module (a GPU or network
+# driver, a game-pad one) says what else is installed and never helps a fan
+# triage, so the bundle counts those lines instead of listing them.
+DKMS_MODULE_FILTER = (
+    "it87",
+    "nct6",
+    "asus_ec_sensors",
+    "asus_wmi_sensors",
+    "zenpower",
+    "liquidtux",
+)
+# The os-release keys that name the distribution and its release; the file's
+# URLs and the rest add nothing.
+_OS_RELEASE_KEYS = ("NAME", "ID", "ID_LIKE", "VERSION", "VERSION_ID", "BUILD_ID")
 
 # GSA-g: the boot parameters the bundle keeps — those of the drivers above, and
 # the few that decide whether a fan driver loads. The rest of the command line
@@ -188,10 +204,14 @@ class DiagEvent:
 
 
 #: The worst case a whole support-bundle export spends in subprocesses (lsmod,
-#: the fan-control software check, the daemon journal, the kernel log), run one
-#: after another.
+#: `dkms status`, the fan-control software check, the daemon journal, the kernel
+#: log), run one after another.
 BUNDLE_SUBPROCESS_BUDGET_S = (
-    LSMOD_TIMEOUT_S + fan_tool_check.SYSTEMCTL_TIMEOUT_S + JOURNAL_TIMEOUT_S + KERNEL_LOG_TIMEOUT_S
+    LSMOD_TIMEOUT_S
+    + DKMS_TIMEOUT_S
+    + fan_tool_check.SYSTEMCTL_TIMEOUT_S
+    + JOURNAL_TIMEOUT_S
+    + KERNEL_LOG_TIMEOUT_S
 )
 
 
@@ -659,6 +679,60 @@ class DiagnosticsService(QObject):
         return "\n".join([header, *matches])
 
     @staticmethod
+    def collect_distribution() -> dict[str, str] | None:
+        """The distribution and its release, from os-release (``_OS_RELEASE_KEYS``),
+        keyed in lower case; ``None`` when there is no readable os-release."""
+        try:
+            release = platform.freedesktop_os_release()
+        except OSError as e:
+            log.debug("os-release unreadable: %s", e)
+            return None
+        return {key.lower(): release[key] for key in _OS_RELEASE_KEYS if key in release}
+
+    @staticmethod
+    def collect_dkms_status() -> dict[str, object]:
+        """The fan-driver lines of ``dkms status`` (``DKMS_MODULE_FILTER``).
+
+        ``{"modules": [...], "other_modules_omitted": n}``, so an empty list is
+        not read as "no DKMS modules", with ``exit_status`` added when dkms
+        failed but still listed modules (one broken tree need not hide the
+        rest); ``{"error": ...}`` when it did not run or printed nothing.
+        """
+        try:
+            result = subprocess.run(
+                ["dkms", "status"],
+                capture_output=True,
+                text=True,
+                timeout=DKMS_TIMEOUT_S,
+            )
+        except FileNotFoundError:
+            return {"error": "dkms is not installed"}
+        except subprocess.TimeoutExpired:
+            return {"error": f"dkms status timed out after {DKMS_TIMEOUT_S}s"}
+        except OSError as e:
+            return {"error": f"dkms status failed: {e}"}
+        if result.returncode != 0 and not result.stdout.strip():
+            return {"error": f"dkms status exited {result.returncode}"}
+
+        kept: list[str] = []
+        omitted = 0
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # dkms 3 prints `name/version, kernel, arch: state`; older releases
+            # `name, version, kernel, arch: state`.
+            name = re.split(r"[/,]", line, maxsplit=1)[0].strip().replace("-", "_")
+            if name.startswith(DKMS_MODULE_FILTER):
+                kept.append(line)
+            else:
+                omitted += 1
+        out: dict[str, object] = {"modules": kept, "other_modules_omitted": omitted}
+        if result.returncode != 0:
+            out["exit_status"] = result.returncode
+        return out
+
+    @staticmethod
     def fetch_kernel_log_amdgpu() -> str:
         """Return recent `amdgpu` / `smu` kernel log lines from journalctl.
 
@@ -779,8 +853,8 @@ class DiagnosticsService(QObject):
 
         The two halves are separate so the Logs page can run the slow one off the
         GUI thread: :meth:`snapshot_support_bundle` reads GUI-owned state and must
-        run on the GUI thread; :meth:`finish_support_bundle` only spawns
-        subprocesses and writes the file.
+        run on the GUI thread; :meth:`complete_support_bundle` only spawns
+        subprocesses and returns the text, which the page previews before saving.
         """
         self.finish_support_bundle(self.snapshot_support_bundle(), path)
 
@@ -808,6 +882,10 @@ class DiagnosticsService(QObject):
                 # finish_support_bundle; the keys are placed here to keep the order.
                 "kernel": None,
                 "kernel_modules": None,
+                # The distribution, and the fan drivers DKMS built and for which
+                # kernels: what a triager otherwise asks for first.
+                "distribution": None,
+                "dkms": None,
                 # The known fan-control services and fancontrol's PID file
                 # (`fan_tool_check`): unit names and systemd states only.
                 "fan_control_software": None,
@@ -860,9 +938,46 @@ class DiagnosticsService(QObject):
                     "openfan_maintenance": (
                         asdict(ds.openfan_maintenance) if ds.openfan_maintenance else None
                     ),
+                    # What the daemon is doing about safety and what it cannot
+                    # drive, from the same poll. Ids and tokens only: a skipped
+                    # control's name is the user's own text, so it stays out.
+                    "uptime_seconds": ds.uptime_seconds,
+                    "thermal_state": ds.thermal_state,
+                    "emergency_causes": list(ds.emergency_causes),
+                    "pump_stalls": [asdict(p) for p in ds.pump_stalls],
+                    "advisories": [asdict(a) for a in ds.advisories],
+                    "readiness": asdict(ds.readiness) if ds.readiness else None,
+                    "unavailable_sensors": [
+                        {"id": u.id, "reason": u.reason, "unavailable_for_ms": u.unavailable_for_ms}
+                        for u in ds.unavailable_sensors
+                    ],
+                    "skipped_controls": [
+                        {
+                            "control_id": c.control_id,
+                            "reason": c.reason,
+                            "skipped_for_ms": c.skipped_for_ms,
+                        }
+                        for c in ds.skipped_controls
+                    ],
                 }
             else:
                 missing.append("daemon_status: daemon not connected or not yet polled")
+            # Each motherboard header and what the daemon can do with it: the
+            # readable and writable channels. `label` is the driver's (or the
+            # daemon's placeholder), never a name the user gave the fan.
+            bundle["hwmon_headers"] = [
+                {
+                    "id": h.id,
+                    "chip_name": h.chip_name,
+                    "label": h.label,
+                    "is_writable": h.is_writable,
+                    "supports_enable": h.supports_enable,
+                    "pwm_mode": h.pwm_mode,
+                    "role": h.role,
+                    "role_source": h.role_source,
+                }
+                for h in self._state.hwmon_headers
+            ]
             # Fan state snapshot (RPM + last commanded PWM for all fans)
             bundle["fan_state"] = [
                 {
@@ -954,6 +1069,9 @@ class DiagnosticsService(QObject):
                     "writable_headers": hd.hwmon.writable_headers,
                     "enable_revert_counts": hd.hwmon.enable_revert_counts,
                 },
+                # DEC-500: Secure Boot, lockdown, module.sig_enforce, and the
+                # daemon's verdict on whether unsigned drivers load.
+                "kernel_security": asdict(hd.kernel_security) if hd.kernel_security else None,
             }
 
         return SupportBundleDraft(bundle, missing, frozenset(serials))
@@ -964,11 +1082,23 @@ class DiagnosticsService(QObject):
         Touches no GUI-owned state, so it may run on a worker thread. Raises on a
         failed write; the caller reports it.
         """
+        from ventulus.paths import atomic_write
+
+        atomic_write(path, self.complete_support_bundle(draft))
+
+    def complete_support_bundle(self, draft: SupportBundleDraft) -> str:
+        """Run the bundle's subprocesses and return the file's text: exactly what
+        :meth:`finish_support_bundle` writes, and what the preview shows.
+
+        Touches no GUI-owned state, so it may run on a worker thread.
+        """
         bundle = draft.bundle
         missing = list(draft.missing)
         serials = set(draft.serials)
         bundle["system"]["kernel"] = self.collect_kernel_info()
         bundle["system"]["kernel_modules"] = self.collect_kernel_modules()
+        bundle["system"]["distribution"] = self.collect_distribution()
+        bundle["system"]["dkms"] = self.collect_dkms_status()
         bundle["system"]["fan_control_software"] = fan_tool_check.probe_fan_tools().to_bundle()
 
         # System journal (daemon logs), without the board's serial (GSA-g). The
@@ -990,6 +1120,4 @@ class DiagnosticsService(QObject):
         if missing:
             bundle["missing_sections"] = missing
 
-        from ventulus.paths import atomic_write
-
-        atomic_write(path, json.dumps(bundle, indent=2) + "\n")
+        return json.dumps(bundle, indent=2) + "\n"

@@ -199,15 +199,19 @@ class TestFooterActionContracts:
         The export finishes on a worker thread; its outcome signal ends it."""
         dest = tmp_path / "bundle.json"
 
-        with (
-            patch(
-                "ventulus.ui.pages.logs_page.QFileDialog.getSaveFileName",
-                return_value=(str(dest), "JSON files (*.json)"),
-            ),
-            qtbot.waitSignal(window.logs_page.bundle_export_finished, timeout=20_000),
+        page = window.logs_page
+        with patch(
+            "ventulus.ui.pages.logs_page.QFileDialog.getSaveFileName",
+            return_value=(str(dest), "JSON files (*.json)"),
         ):
             window.footer.export_bundle_clicked.emit()
-        window.logs_page.cleanup()
+            qtbot.waitUntil(
+                lambda: page._bundle_preview is not None and bool(page._bundle_preview.text()),
+                timeout=20_000,
+            )
+            with qtbot.waitSignal(page.bundle_export_finished, timeout=5000):
+                page._bundle_preview.findChild(QPushButton, "SupportBundlePreview_Btn_save").click()
+        page.cleanup()
 
         assert dest.exists()
         assert dest.stat().st_size > 0
