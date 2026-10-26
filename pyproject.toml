@@ -1,6 +1,6 @@
 [project]
 name = "ventulus"
-version = "5.4.1"
+version = "5.5.0"
 description = "Desktop fan control GUI for the Ventulus daemon"
 requires-python = ">=3.12"
 license = "MIT"

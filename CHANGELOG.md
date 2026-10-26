@@ -5,6 +5,12 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+## [5.5.0] — 2026-10-26
+
+Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.4.0 is the current daemon
+release, and the **Fan speed cannot be set** and **Header was already in manual mode** cards
+below need it. With an older daemon those cards stay hidden.
+
 ### Added
 
 - **System State names other fan-control software.** The Interference Monitor lists the
