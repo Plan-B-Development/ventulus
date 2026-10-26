@@ -35,6 +35,7 @@ from ventulus.services.daemon_features import (  # noqa: F401
     version_tuple,
 )
 from ventulus.services.duty_drift import DutyDriftState, corrections_line, is_drift_key
+from ventulus.services.fan_tool_check import MIGRATING_GUIDE_URL, FanToolState, fan_tools_line
 from ventulus.services.health_ack import Occurrence
 from ventulus.ui.hwmon_guidance import (
     advisory_detail_html,
@@ -307,6 +308,11 @@ class InterferenceVM:
     #: "" when there were none or the daemon does not report them. Never an
     #: alarm: a correction that held is the daemon doing its job.
     corrections_line: str = ""
+    #: Other fan-control software on this machine (`fan_tool_check`), a reading
+    #: like `corrections_line`: "" when it could not be checked.
+    fan_tools_line: str = ""
+    #: The migration guide, offered only when something was found.
+    fan_tools_doc_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -1400,6 +1406,7 @@ def build_system_state_vm(
     live_emergency_causes: Sequence[str] = (),
     silence: SilenceState | None = None,
     duty_drift: DutyDriftState,
+    fan_tools: FanToolState | None = None,
 ) -> SystemStateVM:
     problems = detect_readiness_problems(
         diag, pwm_control_verified=pwm_control_verified, duty_drift=duty_drift
@@ -1438,6 +1445,17 @@ def build_system_state_vm(
             corrections_line=line,
             title=interference.title
             if interference.has_contention
+            else "No BIOS/EC Reclaim Detected",
+        )
+    if fan_tools is not None and (tools_line := fan_tools_line(fan_tools)):
+        # Another program writing fans is interference too, so a running one
+        # takes the "No Interference" headline away, as a correction does.
+        interference = replace(
+            interference,
+            fan_tools_line=tools_line,
+            fan_tools_doc_url=MIGRATING_GUIDE_URL if fan_tools.found_anything else "",
+            title=interference.title
+            if interference.has_contention or not fan_tools.any_running
             else "No BIOS/EC Reclaim Detected",
         )
     return SystemStateVM(

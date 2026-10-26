@@ -514,6 +514,21 @@ def _pin_install_family():
 
 
 @pytest.fixture(autouse=True)
+def _no_host_fan_tools(monkeypatch):
+    """Keep the host's systemd units and ``/run/fancontrol.pid`` out of every
+    test: the System State page and the support bundle read them through
+    ``probe_fan_tools``. A test about the probe calls ``check_fan_tools`` with
+    its own runner and paths; one about a finding pins this itself."""
+    from ventulus.services import fan_tool_check
+
+    monkeypatch.setattr(
+        fan_tool_check,
+        "probe_fan_tools",
+        lambda: fan_tool_check.FanToolState(systemd_checked=False),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_libsensors(monkeypatch):
     """Keep the host's ``/etc/sensors.d`` out of every test (DEC-229).
 

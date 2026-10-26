@@ -95,6 +95,7 @@ if TYPE_CHECKING:
         HwmonVerifyResult,
     )
     from ventulus.services.app_state import AppState
+    from ventulus.services.fan_tool_check import FanToolState
     from ventulus.services.profile_service import ProfileService
 
 log = logging.getLogger(__name__)
@@ -155,6 +156,7 @@ class SystemStatePage(QWidget):
     _gpu_verify_request = Signal(str)
     _gpu_reset_request = Signal(str)
     _hw_diag_request = Signal()
+    _fan_tools_request = Signal()
     _rescan_request = Signal()  # DEC-216: footer Rescan Hardware (relocated from Diagnostics)
     # AIO-MB Phase 3 — the deeper PWM/RPM sweep.
     _char_start_request = Signal(str, object, object, object, object)
@@ -245,6 +247,9 @@ class SystemStatePage(QWidget):
         self._session_acks: set[str] = set()
         self._rescan_in_flight = False  # DEC-216: guards the footer Rescan action
         self._last_rendered_diag: HardwareDiagnosticsResult | None = None
+        #: Other fan-control software, re-read each time the page is shown or
+        #: refreshed; ``None`` until the first read answers.
+        self._fan_tools: FanToolState | None = None
         #: DEC-404 S4-12: the daemon's duty-drift report from the LIVE poll,
         #: read through `_duty_drift()` by every builder on this page.
         self._duty_drift_state: DutyDriftState = NO_DRIFT
@@ -581,6 +586,7 @@ class SystemStatePage(QWidget):
         self._hw_diag_in_flight = True
         self._refresh_btn.setEnabled(False)
         self._health_card.set_summary("Refreshing hardware diagnostics…")
+        self._probe_fan_tools()
         self._fetch_hardware_diagnostics()
 
     def _end_refresh(self) -> None:
@@ -592,6 +598,9 @@ class SystemStatePage(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        # Every show, not once: a user who has just stopped the old program
+        # comes back here to see that it is gone.
+        self._probe_fan_tools()
         cached = self._diag.last_hw_diagnostics
         if cached is not None:
             self._render(cached)  # old tab already fetched → render from cache
@@ -614,6 +623,18 @@ class SystemStatePage(QWidget):
             self._end_refresh()
             return
         self._hw_diag_request.emit()
+
+    def _probe_fan_tools(self) -> None:
+        """Read other fan-control software on the diagnostics worker's thread."""
+        if self._client and self._ensure_hw_diag_worker():
+            self._fan_tools_request.emit()
+
+    @Slot(object)
+    def _on_fan_tools(self, state: FanToolState) -> None:
+        if state == self._fan_tools:
+            return  # the usual answer on a re-show: nothing to redraw
+        self._fan_tools = state
+        self._rerender_last_diagnostics()
 
     @Slot(object)
     def _on_hw_diag_ok(self, result: HardwareDiagnosticsResult) -> None:
@@ -666,6 +687,7 @@ class SystemStatePage(QWidget):
                 allow_acknowledge=settings.board_notes_allow_acknowledge,
                 allow_dismiss=settings.board_notes_allow_dismiss,
             ),
+            fan_tools=self._fan_tools,
         )
         self._health_card.render(vm)
         self._registry_card.set_summary(vm.summary_line)
@@ -996,6 +1018,10 @@ class SystemStatePage(QWidget):
             self._hw_diag_request.connect(w.do_fetch, Qt.ConnectionType.QueuedConnection)
             w.fetch_ok.connect(self._on_hw_diag_ok, Qt.ConnectionType.QueuedConnection)
             w.fetch_error.connect(self._on_hw_diag_error, Qt.ConnectionType.QueuedConnection)
+            self._fan_tools_request.connect(
+                w.do_probe_fan_tools, Qt.ConnectionType.QueuedConnection
+            )
+            w.fan_tools_ok.connect(self._on_fan_tools, Qt.ConnectionType.QueuedConnection)
             # DEC-216: this page now owns the footer's Rescan Hardware action
             # (relocated from the retired Diagnostics page).
             self._rescan_request.connect(w.do_rescan, Qt.ConnectionType.QueuedConnection)

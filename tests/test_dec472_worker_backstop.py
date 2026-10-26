@@ -368,6 +368,33 @@ def test_the_report_controllers_teardown_drops_its_requests_first(qtbot, tmp_pat
     del worker
 
 
+def test_the_fan_tools_probe_ends_in_the_backstop(qapp, caplog, monkeypatch):
+    """`do_probe_fan_tools` calls no daemon and has no error signal: the page
+    keeps no in-flight state for it, so a failed probe answers nobody. It must
+    still end in the backstop, loud before shutdown and quiet after."""
+    from ventulus.services import fan_tool_check
+
+    def boom():
+        raise CLOSED
+
+    monkeypatch.setattr(fan_tool_check, "probe_fan_tools", boom)
+    worker = _HwDiagWorker("/tmp/x.sock")
+    oks: list = []
+    worker.fan_tools_ok.connect(oks.append)
+
+    with caplog.at_level(logging.DEBUG):
+        worker.do_probe_fan_tools()
+    assert oks == []
+    assert [r.levelno for r in caplog.records] == [logging.ERROR]
+
+    caplog.clear()
+    worker.shutdown()
+    with caplog.at_level(logging.DEBUG):
+        worker.do_probe_fan_tools()
+    assert oks == []
+    assert [r.levelno for r in caplog.records] == [logging.DEBUG]
+
+
 def test_every_worker_slot_is_covered_by_this_file():
     """Enumerate the population, then subtract: a slot added later without a
     case here fails, rather than shipping without the backstop unseen."""
@@ -381,6 +408,9 @@ def test_every_worker_slot_is_covered_by_this_file():
         if issubclass(cls, module._SocketWorker) and cls is not module._SocketWorker
     ]
     slots = {(cls, name) for cls in workers for name in vars(cls) if name.startswith("do_")}
-    covered = {(case[1], case[2]) for case in CASES} | {(_PwmReportWorker, "do_call")}
+    covered = {(case[1], case[2]) for case in CASES} | {
+        (_PwmReportWorker, "do_call"),
+        (_HwDiagWorker, "do_probe_fan_tools"),
+    }
     assert len(workers) >= 9, "precondition: the worker classes were found"
     assert slots - covered == set(), f"slots with no backstop case: {sorted(slots - covered)}"

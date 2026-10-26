@@ -94,7 +94,7 @@ Some hardware has its own path, whatever the rows above say:
 
 Only one program should drive a fan header. `pwm` / `pwm_enable` are single sysfs values, so the **last writer wins**: two controllers overwrite each other and the fans oscillate. The readiness report's *BIOS interference* counter cannot tell an embedded controller apart from another program: competing software shows up as the same "reverted / reclaimed" pattern. Other projects document the same conflict: CoolerControl [warns against running LACT and CoolerControl on the same AMD GPU](https://docs.coolercontrol.org/devices/gpus#conflicts-with-lact) ("erratic fan behavior, with each application's settings being overwritten by the other"), and fan2go [logs third-party PWM changes](https://github.com/markusressel/fan2go) as another program "competing with fan2go".
 
-Check for the usual suspects, including ones that start at boot but are not running right now, and disable each one that is enabled or running:
+Check for the usual suspects, including ones that start at boot but are not running right now, and disable each one that is enabled or running. The **Interference Monitor** on **System State** names the known ones it finds; the commands also catch the rest:
 
 ```bash
 # Installed fan-control services, and whether each starts at boot

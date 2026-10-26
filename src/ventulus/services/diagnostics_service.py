@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ventulus.constants import APP_VERSION, EXPECTED_API_VERSION
+from ventulus.services import fan_tool_check
 from ventulus.services.alerts import transition_to_fields, transition_to_log
 from ventulus.services.app_state import AppState
 
@@ -187,8 +188,11 @@ class DiagEvent:
 
 
 #: The worst case a whole support-bundle export spends in subprocesses (lsmod,
-#: the daemon journal, the kernel log), run one after another.
-BUNDLE_SUBPROCESS_BUDGET_S = LSMOD_TIMEOUT_S + JOURNAL_TIMEOUT_S + KERNEL_LOG_TIMEOUT_S
+#: the fan-control software check, the daemon journal, the kernel log), run one
+#: after another.
+BUNDLE_SUBPROCESS_BUDGET_S = (
+    LSMOD_TIMEOUT_S + fan_tool_check.SYSTEMCTL_TIMEOUT_S + JOURNAL_TIMEOUT_S + KERNEL_LOG_TIMEOUT_S
+)
 
 
 @dataclass(frozen=True)
@@ -804,6 +808,9 @@ class DiagnosticsService(QObject):
                 # finish_support_bundle; the keys are placed here to keep the order.
                 "kernel": None,
                 "kernel_modules": None,
+                # The known fan-control services and fancontrol's PID file
+                # (`fan_tool_check`): unit names and systemd states only.
+                "fan_control_software": None,
             },
             "events": [
                 {
@@ -962,6 +969,7 @@ class DiagnosticsService(QObject):
         serials = set(draft.serials)
         bundle["system"]["kernel"] = self.collect_kernel_info()
         bundle["system"]["kernel_modules"] = self.collect_kernel_modules()
+        bundle["system"]["fan_control_software"] = fan_tool_check.probe_fan_tools().to_bundle()
 
         # System journal (daemon logs), without the board's serial (GSA-g). The
         # Logs page shows the same lines unscrubbed: they stay on this machine.

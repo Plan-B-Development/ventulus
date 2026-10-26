@@ -309,6 +309,18 @@ class _HwDiagWorker(_SocketWorker):
     # list[HwmonHeader], adopted OpenFan port ("" when none) — DEC-266
     rescan_ok = Signal(object, str)
     rescan_error = Signal(str, str)  # category ('unavailable'|'error'), message
+    fan_tools_ok = Signal(object)  # FanToolState
+
+    @Slot()
+    def do_probe_fan_tools(self) -> None:
+        """Look for other fan-control software (``fan_tool_check``). Local, not
+        a daemon call; here because ``systemctl`` can block on a stuck systemd."""
+        from ventulus.services import fan_tool_check
+
+        try:
+            self.fan_tools_ok.emit(fan_tool_check.probe_fan_tools())
+        except Exception as e:
+            self._backstop(e, "the fan-control software check", None)
 
     @Slot()
     def do_fetch(self) -> None:

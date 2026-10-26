@@ -43,6 +43,10 @@ grep -rsE '^[^#]*(it87|nct6|w83|f71|thinkpad)' /etc/modprobe.d /etc/modules-load
 cat /proc/cmdline
 ```
 
+On **System State**, the **Interference Monitor** names any of the fancontrol,
+CoolerControl, fan2go, thinkfan or LACT services it finds running or starting at boot,
+and a `fancontrol` started by hand; the commands find the rest as well.
+
 An `ls` that says *No such file or directory* means no `fancontrol` is running by
 hand, and a `grep` that prints nothing found nothing. Check cron as well
 (`crontab -l` and `sudo crontab -l`) if you ever set fan speeds from a scheduled job.
@@ -156,8 +160,10 @@ program's last speed instead of to the BIOS.
    **Hardware ▸ Cooling Hardware**, and each chip and its driver in the **Hardware
    Registry** on System State. If some are missing, see
    [Setup Checklist § Step 4](setup-checklist.md#step-4--read-your-result).
-3. **Nothing else is running:** Step 1's service commands show nothing running and
-   nothing enabled, and `/run/fancontrol.pid` is gone.
+3. **Nothing else is running:** the **Interference Monitor** on System State reads
+   *No known fan-control service is running or set to start at boot*, Step 1's
+   service commands show nothing running and nothing enabled, and
+   `/run/fancontrol.pid` is gone.
 4. **A fan test passes:** run **Test Control** on a chassis fan, as in
    [Setup Checklist § Step 6](setup-checklist.md#step-6--verify-control-end-to-end).
 5. **A profile runs:** create and apply one, as in

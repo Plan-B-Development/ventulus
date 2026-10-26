@@ -144,7 +144,7 @@ a problem you have just fixed is still reported.
 | **Conditions** | One card for each problem the daemon has observed on this machine, with its fix |
 | **Board notes for this hardware** (collapsed) | Documented quirks for your board and chip, with what this machine says about each |
 | **Hardware Registry** | Each detected Super-I/O or sensor chip: status, chip, driver, driver status, whether the driver is in the mainline kernel, and its PWM header count. Hover a row for the chip's known issues |
-| **Interference Monitor** | Per-header reclaim counts, and any duty the daemon had to correct |
+| **Interference Monitor** | Per-header reclaim counts, any duty the daemon had to correct, and other fan-control software on this machine |
 | **Safety & GPU Limits** | The **CPU Thermal State** row, a row per AMD discrete GPU, kernel advisories, and the firmware's fan speed range |
 | **Advanced actions** (collapsed) | Fan and GPU tests, and **Restore GPU Fan to Automatic** |
 
@@ -247,6 +247,16 @@ header. Once an hour has passed with no reclaim, the warning stands down and the
 reads **Past Interference**, keeping the count as a record. What the counts mean, and
 what to do about them, is in
 [The BIOS keeps taking fan control back](hardware-troubleshooting.md#the-bios-keeps-taking-fan-control-back).
+
+Below the gauge, the card names any other fan-control program it finds: the
+services of fancontrol, CoolerControl, fan2go, thinkfan and LACT that are running or
+start at boot, a `fancontrol` started by hand, and a `fancontrol` that was killed
+without putting its fans back. It reads them each time you open the page or press
+**Refresh**, and **Migrating Guide** opens
+[Migrating from Another Fan Program](migrating.md) when it finds one. A program
+running now also turns a **No Interference Detected** heading into **No BIOS/EC
+Reclaim Detected**, since it is interference too. CoreCtrl and your own scripts are
+not on the list.
 
 **Safety & GPU Limits** carries:
 
@@ -649,6 +659,9 @@ file (`ventulus_support_bundle.json` by default) containing:
   theme names;
 - your board, BIOS version and detected fan-control chips, once the app has read them
   from the daemon;
+- which of the fancontrol, CoolerControl, fan2go, thinkfan and LACT services are
+  installed, whether each is running and starts at boot, and whether `fancontrol`'s PID
+  file is there;
 - the last 100 lines of the daemon's journal, with any OpenFAN board serial number
   replaced by *(redacted)*, and any `amdgpu` kernel messages from this boot (with the
   boot command line cut the same way).

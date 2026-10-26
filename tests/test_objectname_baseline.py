@@ -41,6 +41,9 @@ SYSTEM_STATE_OBJECTNAMES = frozenset(
         # name (it has no visible label). Deliberate addition.
         "SystemState_Combo_verifyHeader_A11yLabel",
         "SystemState_Bar_speedRange",
+        # The Interference Monitor's other-fan-software reading and its link to
+        # the migration guide (`fan_tool_check`) — a deliberate addition.
+        "SystemState_Btn_fanToolsDoc",
         "SystemState_Btn_openReport",
         # DEC-358: forced refetch of `/diagnostics/hardware`. The page rendered
         # a cache that nothing could retake, beside a report button hidden in a
@@ -74,6 +77,7 @@ SYSTEM_STATE_OBJECTNAMES = frozenset(
         # DEC-404 S4-3: the Interference Monitor's duty-corrections reading
         # (DEC-406) — a deliberate addition.
         "SystemState_Label_dutyCorrections",
+        "SystemState_Label_fanTools",
         "SystemState_Label_gpuModel",
         "SystemState_Label_headerId",
         "SystemState_Label_interferenceExplain",

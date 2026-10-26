@@ -120,8 +120,9 @@ Every change the manual describes, and where to take it back:
 
 Start with the support bundle: the **Export Support Bundle** button in the footer
 saves one file with the app and daemon versions, your kernel and its fan-driver boot
-parameters, the loaded kernel modules, your board and fan chips, each fan's speed and
-duty, the app's event log and the last 100 lines of the daemon's journal.
+parameters, the loaded kernel modules, your board and fan chips, the fan-control
+services installed and whether each runs, each fan's speed and duty, the app's event
+log and the last 100 lines of the daemon's journal.
 [System Health § Export Support Bundle](diagnostics.md#export-support-bundle) lists
 everything in it.
 
@@ -136,7 +137,8 @@ sudo dmesg | grep -iE 'it87|nct6|w836|f718'       # the fan drivers' kernel mess
 
 - each header's control mode, from the command under
   [Migrating § Check that nothing still holds a header](migrating.md#check-that-nothing-still-holds-a-header);
-- other fan programs on the machine, from the commands under
+- other fan programs the bundle does not know (CoreCtrl, your own units and
+  scripts), from the commands under
   [Migrating § Step 1](migrating.md#step-1--take-stock);
 - what you did, what you expected, and what happened instead.
 

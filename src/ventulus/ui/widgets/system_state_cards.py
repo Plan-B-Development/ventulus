@@ -600,6 +600,25 @@ class InterferenceCard(ContentSizedCard):
         self._corrections_label.setWordWrap(True)
         self._corrections_label.setVisible(False)
         v.addWidget(self._corrections_label)
+        # Other fan-control software on this machine, read by the GUI itself
+        # (`fan_tool_check`): a reading too, with the migration guide beside it.
+        self._fan_tools_label = QLabel("")
+        self._fan_tools_label.setObjectName("SystemState_Label_fanTools")
+        self._fan_tools_label.setProperty("class", "CardMeta")
+        self._fan_tools_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._fan_tools_label.setWordWrap(True)
+        self._fan_tools_label.setVisible(False)
+        v.addWidget(self._fan_tools_label)
+        self._fan_tools_doc_url = ""
+        self._fan_tools_doc_btn = make_button(
+            "Migrating Guide ↗", "secondary", object_name="SystemState_Btn_fanToolsDoc"
+        )
+        self._fan_tools_doc_btn.clicked.connect(self._open_fan_tools_doc)
+        self._fan_tools_doc_btn.setVisible(False)
+        doc_row = QHBoxLayout()
+        doc_row.addWidget(self._fan_tools_doc_btn)
+        doc_row.addStretch(1)
+        v.addLayout(doc_row)
         self._actions_layout = QVBoxLayout()
         self._actions_layout.setContentsMargins(0, 0, 0, 0)
         v.addLayout(self._actions_layout)
@@ -607,6 +626,10 @@ class InterferenceCard(ContentSizedCard):
     #: (token, acknowledged) / (token) — DEC-359, same shape as HealthCard's.
     note_acknowledged = Signal(str, bool)
     note_dismissed = Signal(str)
+
+    def _open_fan_tools_doc(self) -> None:
+        if self._fan_tools_doc_url:
+            QDesktopServices.openUrl(QUrl(self._fan_tools_doc_url))
 
     def render(self, vm) -> None:
         if vm.has_contention:
@@ -624,6 +647,10 @@ class InterferenceCard(ContentSizedCard):
         self._interference_explain.setText(vm.explanation)
         self._corrections_label.setText(vm.corrections_line)
         self._corrections_label.setVisible(bool(vm.corrections_line))
+        self._fan_tools_label.setText(vm.fan_tools_line)
+        self._fan_tools_label.setVisible(bool(vm.fan_tools_line))
+        self._fan_tools_doc_url = vm.fan_tools_doc_url
+        self._fan_tools_doc_btn.setVisible(bool(vm.fan_tools_doc_url))
         # Demote-not-delete: the gauge, the count and the header keep rendering
         # exactly as they did; `severity_state` is what the VM neutralises. The
         # reading stays true and only the alarm stops (DEC-359).

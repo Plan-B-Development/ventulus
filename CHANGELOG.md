@@ -5,6 +5,16 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Added
+
+- **System State names other fan-control software.** The Interference Monitor lists the
+  fancontrol, CoolerControl, fan2go, thinkfan and LACT services that are running or start at
+  boot, a `fancontrol` started by hand, and one that was killed without putting its fans back
+  (`/run/fancontrol.pid` left over), with a button to the migration guide. It re-reads them
+  each time you open the page or press **Refresh**, so you can check that a program you
+  stopped is gone. The app reads only systemd's unit states and that PID file, never a fan.
+  The support bundle carries the same states under `system.fan_control_software`.
+
 ### Fixed
 
 - **The in-app Secure Boot advice now says that enrolling a key needs the shim boot loader.**
