@@ -426,7 +426,7 @@ Three strips frame every page:
 | Strip | What it shows |
 |-------|---------------|
 | **Top ribbon** (every page) | The daemon's connection state with a status light (*Demo — simulated* in demo mode), the daemon's uptime, a thermal pill (both blank while disconnected), and **Alerts** with a count. Click it to jump to the **Logs** page, the single surface that lists them |
-| **Status banner** (under the ribbon, on every page except the Dashboard, which has its own status strip) | Connection (green "Connected", yellow "Degraded" or red "Disconnected"; "Demo — simulated" in demo mode), the active profile (or "No profile"), the number of warnings (not clickable; use **Alerts**), and a **DEMO** badge in demo mode |
+| **Status banner** (under the ribbon, on every page except the Dashboard, which has its own status strip) | Connection (green "Connected" or red "Disconnected"; "Demo — simulated" in demo mode), the active profile (or "No profile"), the number of warnings (not clickable; use **Alerts**), and a **DEMO** badge in demo mode |
 | **Footer** (every page) | How long ago the last poll arrived, the mode, the thermal state (click it for the detail), a hardware-readiness chip, a health light, **Rescan Hardware** and **Export Support Bundle**. The mode is "Automatic" (the daemon runs your fans), "Read-only" (the daemon is not connected; it clears on the next successful poll) or "Demo mode" |
 
 Two banners can appear across the top of the window when the GUI and the daemon do not fit together:

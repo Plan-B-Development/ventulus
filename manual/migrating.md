@@ -94,7 +94,9 @@ What each one does to the fans as it stops:
   them, and a `/run/fancontrol.pid` with no `fancontrol` running
   (`pgrep -a fancontrol` prints nothing) is left over. A reboot clears both.
 - **CoolerControl** sets each header back to the mode it read when `coolercontrold`
-  started ([source](https://gitlab.com/coolercontrol/coolercontrol/-/blob/main/coolercontrold/daemon/src/repositories/hwmon/fans.rs)).
+  started ([source](https://gitlab.com/coolercontrol/coolercontrol/-/blob/main/coolercontrold/daemon/src/repositories/hwmon/fans.rs)),
+  except on the ThinkPad and ASUS laptop fan drivers, which it hands back in automatic
+  mode ([source](https://gitlab.com/coolercontrol/coolercontrol/-/blob/main/coolercontrold/daemon/src/repositories/hwmon/devices.rs)).
 - **fan2go** restores each fan's original control mode, unless its configuration sets
   `onExit` to something else ([README](https://github.com/markusressel/fan2go#advanced-options)).
 
