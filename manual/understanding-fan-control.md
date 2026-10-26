@@ -53,6 +53,20 @@ Mainline Linux already includes drivers for many chips (for example `nct6775` co
 
 So "my motherboard fans don't show up" usually means the driver for your Super I/O chip is not loaded yet, not that your board is unsupported. The **Hardware** page identifies your chip and names the package to install. Installing a driver changes how your system loads modules, and some steps change how it boots: [Driver Setup](driver-setup.md) has each step, what it risks, and how to undo it.
 
+## The pieces, and which one is Ventulus
+
+Guides and forum answers mix up several kinds of software. Only some of them are needed, and only one should decide your fan speeds:
+
+| Piece | Examples | What it does | Does Ventulus need it? |
+|---|---|---|---|
+| Kernel driver, part of the kernel | `nct6775`, `it87` (older ITE chips, the IT87952E from Linux 6.3 and the IT8689E from 7.1), `k10temp`, `coretemp`, `nzxt-kraken3` | Exposes a chip's sensors and fan controls under hwmon. It comes with the kernel and updates with it | Yes, for the chips it covers. There is nothing to install |
+| Out-of-tree driver, built with DKMS | [`frankcrawford/it87`](https://github.com/frankcrawford/it87), [`nct6687d`](https://github.com/Fred78290/nct6687d) | The same job, for chips the kernel's own driver cannot drive. DKMS rebuilds it for every new kernel | Only where your chip needs one, and it needs looking after: see [Driver Setup § Staying current](driver-setup.md#staying-current) |
+| Monitoring utility | `lm_sensors` (`sensors`, `sensors-detect`) | Prints what hwmon exposes; `sensors-detect` probes the hardware for chips | No. `sensors` is handy for cross-checking |
+| Fan-control program | Ventulus, `fancontrol`, CoolerControl, fan2go, thinkfan, LACT, CoreCtrl | Decides each fan's speed and writes it to the kernel's fan controls | One per fan. Ventulus is one of these, so another must not drive the fans Ventulus drives |
+| Tool that talks to a USB device directly | `liquidctl` on a cooler with no kernel driver | Reaches the device without hwmon | No. Ventulus reaches a cooler only through a kernel driver, so a cooler with none is invisible to it |
+
+Ventulus itself is three parts: the daemon, `ventulusd`, which reads the sensors and writes the fans through hwmon; the app, `ventulus`; and on KDE Plasma the tray icon, `ventulus-tray`. The app and the tray only ask the daemon.
+
 ## Why the BIOS can fight Linux (Smart Fan / Q-Fan)
 
 Motherboard firmware has its own fan controller. Gigabyte calls it Smart Fan, ASUS calls it Q-Fan, and others have similar names. When it is enabled, the firmware periodically rewrites the fan registers, flipping `pwmN_enable` back from manual to automatic. The result is the classic symptom: *Linux says the fan is at 50%, but it keeps running at full speed.*

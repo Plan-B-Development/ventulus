@@ -57,6 +57,16 @@ Rule of thumb by vendor (full matrix: [Hardware Compatibility](../docs/19_Hardwa
 
 ## Step 2 — Prerequisites (DKMS + kernel headers)
 
+Steps 2 to 4 install an out-of-tree driver. At a glance:
+
+- **Purpose:** make your board's fan chip visible and writable when the kernel's own driver cannot drive it.
+- **You need:** your chip identified (Step 1) and the driver the **Hardware** page names for it; kernel headers for the kernel you run, DKMS, git and a compiler (this step); and, on a kernel that loads only signed modules, a key enrolled once ([Secure Boot](#secure-boot-and-dkms-modules)).
+- **What stays on your system:** the driver, which DKMS rebuilds for every kernel you install, and any file you add under `/etc/modprobe.d/` or `/etc/modules-load.d/`. It needs looking after: see [Staying current](#staying-current).
+- **Expected result:** your chip's name in `/sys/class/hwmon/hwmon*/name`, the chip **BOUND** in the **Hardware Registry**, and **Test Control** passing on a header (Step 4).
+- **If it fails:** a build error is usually missing or mismatched headers (this step). A `modprobe` error is covered under [Secure Boot](#secure-boot-and-dkms-modules) and [Module parameters](#module-parameters-you-may-actually-need). A driver that loads but shows no fans is covered in [Hardware Troubleshooting](hardware-troubleshooting.md).
+- **Undo:** [Rollback](#rollback--undoing-everything).
+- **Safety:** install only the driver recommended for your chip (see *Don't guess* above). While a fan chip has no working driver, the BIOS runs its fans on its own curve, so keep that curve free of 0% points ([Step 5](#step-5--bios-settings-the-half-people-skip)).
+
 Out-of-tree drivers are rebuilt against your kernel by **DKMS**, which needs the **headers for the exact kernel you boot**, plus git and a compiler to build the driver:
 
 ```bash
@@ -259,6 +269,18 @@ Then verify end-to-end in the GUI:
 3. On the **Hardware** page, press **Test Control** on a *non-critical chassis fan* header's card (not CPU/pump). A **"PWM control is working correctly"** result is the finish line; [Fan Tests and Reports](fan-tests.md#test-pwm-control) explains the other results.
 4. If the test reports the BIOS reverting control, go to Step 5.
 
+### Is the loaded driver the one you installed?
+
+The kernel ships its own `it87`, so a `modprobe it87` that succeeds does not prove that your DKMS build is the one running. Check the copy that is loaded now:
+
+```bash
+cat /sys/module/it87/taint      # or nct6687: an O here means the out-of-tree build; empty means the kernel's own
+modinfo -F filename it87        # the file modprobe loads: under updates/dkms/ (Arch, Debian, Ubuntu) or extra/ (Fedora) for a DKMS build
+dkms status                     # the kernels DKMS has built the driver for
+```
+
+The `taint` file lists the module's flags ([kernel ABI](https://docs.kernel.org/admin-guide/abi-testing.html#abi-sys-module-taint)): `O` marks a module built outside the kernel tree, and `E` that the kernel could not verify its signature, because it is unsigned or signed with a key this machine has not enrolled. If the file does not exist, the module is not loaded at all. `dkms status` should list the kernel you are running (`uname -r`) as `installed`; if it does not, that kernel loads its own driver (see [After a kernel update](#after-a-kernel-update)). A note such as *(Original modules exist)* only means the kernel has its own copy too, which the DKMS build is loaded in place of. Ventulus reads the same flags for `it87`: when the loaded one is the kernel's own and cannot drive your chip, the missing-chip warning says so.
+
 ## Secure Boot and DKMS modules
 
 With UEFI **Secure Boot** enabled, the kernels of Debian, Ubuntu and Fedora load only modules signed by a key they trust (on Arch that depends on how you set up Secure Boot). An out-of-tree module is either unsigned or signed with a key the firmware does not know yet, so the install *builds* fine but the module is rejected at **load** time ([Ubuntu wiki: UEFI/SecureBoot/DKMS](https://wiki.ubuntu.com/UEFI/SecureBoot/DKMS)). That is a classic dead end, because `dkms status` says *installed* while `modprobe` fails with one of:
@@ -295,6 +317,15 @@ sudo systemctl reboot
 ```
 
 (Use the path DKMS printed, if it differs.) `mokutil` asks you to choose a one-time password. As the machine restarts, a blue **MOK Manager** screen appears: choose **Enroll MOK**, confirm, and enter that password. From then on the kernel trusts every module DKMS signs with that key, including the rebuilds after each kernel update. On Fedora with the akmods build instead (`make akmod`), akmods signs with its own key: run `sudo kmodgenca -a`, then enroll `/etc/pki/akmods/certs/public_key.der` the same way.
+
+Enrolling the key, at a glance:
+
+- **Purpose:** let a kernel that loads only signed modules load the driver DKMS built, now and after every kernel update.
+- **You need:** the shim boot loader, which Debian, Ubuntu and Fedora use for Secure Boot, and a keyboard at the machine for the **MOK Manager** screen.
+- **Expected result:** `mokutil --test-key /var/lib/dkms/mok.pub` says the key is already enrolled, and `modprobe` loads the driver.
+- **If it fails:** the MOK Manager screen waits only a few seconds for a key press before the machine boots on. If you missed it, the request is still queued (`mokutil --list-new` lists it): reboot and watch for the screen.
+- **Undo:** `sudo mokutil --delete /var/lib/dkms/mok.pub`, reboot, and confirm the deletion in MOK Manager.
+- **Safety:** the kernel loads anything signed with that key, so the private half, `/var/lib/dkms/mok.key`, must stay readable by root alone, as DKMS creates it.
 
 **On Arch and CachyOS,** read the **Module signing** line before you change anything. Their kernels do not refuse unsigned modules just because Secure Boot is on: they lock down only when a `lockdown=` kernel parameter asks them to, and they enforce signatures only with `module.sig_enforce=1` ([Arch Wiki: Secure Boot](https://wiki.archlinux.org/title/Unified_Extensible_Firmware_Interface/Secure_Boot); for CachyOS's kernels, [linux-cachyos PR #863](https://github.com/CachyOS/linux-cachyos/pull/863)). If the line says *This kernel loads unsigned drivers*, Secure Boot is not what stops your driver. If the kernel does refuse them because you added one of those parameters, try these in order:
 
@@ -339,6 +370,15 @@ Two warnings: never use the it87 `force_id` parameter outside testing (upstream:
 
 There is also nothing to gain by running it on these boards. As of 2026-08-26 `sensors-detect` has **no entry for device IDs 0x8688, 0x8689, 0x8696 or 0x8698**, so it cannot identify an IT8688E, IT8689E, IT8696E or IT8698E (the primary chip on essentially every modern Gigabyte board), and it has no NCT6686D entry either. On exactly the boards where running it can do harm, it has nothing useful to tell you.
 
+Setting a parameter, at a glance:
+
+- **Purpose:** change how a driver binds to or drives your chip, only in a situation the table lists.
+- **Steps:** add the line to a file named after the driver, such as `/etc/modprobe.d/it87.conf` (`sudoedit /etc/modprobe.d/it87.conf` opens it), and reboot. To apply it without a reboot, stop the daemon first so that it hands every header back, then reload the driver and start the daemon again: `sudo systemctl stop ventulusd`, `sudo modprobe -r it87 && sudo modprobe it87`, `sudo systemctl start ventulusd`.
+- **Expected result:** `modprobe -c | grep '^options it87'` shows the line (it reads every file the way `modprobe` does), and the symptom from the table is gone.
+- **If it fails:** the kernel ignores an option it does not know and loads the driver anyway; `sudo dmesg | grep -i 'unknown parameter'` shows a misspelt one.
+- **Undo:** remove the line, or the file, and reboot.
+- **Safety:** the warnings above. An option meant for another board can make a driver misread the chip.
+
 ## Rollback — undoing everything
 
 Every change above is reversible:
@@ -367,8 +407,19 @@ If you created `/etc/modprobe.d/ventulus-superio-local.conf` while [recovering a
 
 ## Staying current
 
-- **Kernel updates:** DKMS rebuilds the module automatically when a new kernel + matching headers are installed. If fans disappear right after a kernel update, the usual cause is missing/mismatched headers, so re-check Step 2 (on Debian and Ubuntu, the headers metapackage it names).
-- **Driver updates:** an out-of-tree driver picks up upstream fixes only when you *rebuild* it ([Updating the driver](#updating-the-driver)). Do this before troubleshooting any fan-control regression. On a Gigabyte board, a build from 2026-09-09 on renames your chips, which changes nothing in Ventulus: see [it87 v2.0 renames your chips](#it87-v20-renames-your-chips). On an Intel Z890 / B860 Gigabyte board, builds from 2026-09-09 to 2026-10-01 can fail to load; rebuild (see [Module parameters you may actually need](#module-parameters-you-may-actually-need)). (If a current build *fails to compile*, see upstream [issue #108](https://github.com/frankcrawford/it87/issues/108) for a known `-Werror=unused-function` toolchain failure.)
+An out-of-tree driver is not a one-time install. DKMS rebuilds it for every kernel, and it changes only when you rebuild it. Over its life:
+
+| When | What happens | What to check or do |
+|---|---|---|
+| **A kernel update** | DKMS builds the driver for the new kernel, provided that kernel's headers are installed (on Debian and Ubuntu, the headers metapackage from Step 2), and signs it with the same key | After the first boot into the new kernel: `dkms status` lists it as *installed*, and your fans are on the Dashboard |
+| **The build fails for a new kernel** | That kernel loads its own driver, or none, so the fan headers only the out-of-tree driver could provide disappear from Ventulus. Meanwhile the BIOS runs those fans on its own curve | [After a kernel update](#after-a-kernel-update). If the driver cannot build for that kernel yet, boot the previous one: Debian, Ubuntu and Fedora keep it in the boot menu, while Arch replaces it unless you also have a second kernel package such as `linux-lts`, with its own headers. For a build that *fails to compile*, see upstream [issue #108](https://github.com/frankcrawford/it87/issues/108), a known `-Werror=unused-function` toolchain failure |
+| **Upstream fixes a bug** | Nothing changes on your machine until you rebuild | [Updating the driver](#updating-the-driver). Rebuild before you troubleshoot any fan-control regression |
+| **A new build changes behaviour** | it87 builds from 2026-09-09 rename Gigabyte chips, which changes nothing in Ventulus; on Intel Z890 / B860 Gigabyte boards, builds from 2026-09-09 to 2026-10-01 can fail to load | [it87 v2.0 renames your chips](#it87-v20-renames-your-chips); for the load failure, rebuild (see [Module parameters you may actually need](#module-parameters-you-may-actually-need)) |
+| **The kernel gains a driver for your chip** | The out-of-tree driver becomes optional, as for the IT8689E from Linux 7.1 | [IT8689E: the kernel's own driver](#it8689e-the-kernels-own-driver-from-linux-71) |
+| **Secure Boot** | Each rebuild is signed with the key you enrolled | Nothing, once the key is enrolled ([Secure Boot](#secure-boot-and-dkms-modules)) |
+| **You no longer need it** | | [Rollback](#rollback--undoing-everything) |
+
+To check which copy of the driver is running at any point, see [Is the loaded driver the one you installed?](#is-the-loaded-driver-the-one-you-installed)
 
 ## AMD GPU fan control prerequisite (RDNA3+)
 
@@ -404,6 +455,14 @@ How to add a kernel parameter, per bootloader, with the same steps as `man ventu
 On Debian and Ubuntu, a file under `/etc/default/grub.d/` that also sets `GRUB_CMDLINE_LINUX_DEFAULT` replaces the line in `/etc/default/grub`; `grep -r GRUB_CMDLINE_LINUX_DEFAULT /etc/default/` shows every place it is set.
 
 Reboot, confirm the parameter took effect with `cat /proc/cmdline`, then run **Test GPU Fan Control** (on the **System State** page) to verify end-to-end. A wrong kernel command line can prevent the system from booting. The warning at the top of this page applies here in full.
+
+At a glance:
+
+- **Purpose:** let an RX 7000 or RX 9000 card accept fan-curve writes.
+- **Expected result:** `cat /proc/cmdline` shows the parameter, the GPU's row on **Safety & GPU Limits** says the bit is set, and **Test GPU Fan Control** passes.
+- **If the machine does not boot:** edit the entry at the boot menu for one boot (in GRUB and systemd-boot, press `e` on it), delete the parameter and boot. Then take it out of the file and, if the table gives your bootloader a command, run it again.
+- **Undo:** remove the parameter from the same file, run the same command, and reboot. On Fedora: `sudo grubby --update-kernel=ALL --remove-args=amdgpu.ppfeaturemask`. The card's own fan curve then runs the fan, and a profile can no longer drive it.
+- **Safety:** from Linux 6.13 the kernel marks itself *tainted* with the bit set, as described above; that is expected.
 
 ## Where to go next
 
