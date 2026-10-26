@@ -65,7 +65,7 @@ On some boards a correctly installed driver still loses to the BIOS. [Test PWM C
 
 `pwmN` and `pwmN_enable` are single values, and the **last writer wins**. If two programs both drive the same header (say Ventulus and a leftover `fancontrol` service), they overwrite each other every second and the fan oscillates.
 
-So pick one fan controller per header. Before letting Ventulus manage your fans, stop other fan software (fancontrol, CoolerControl, fan2go, and GPU tools like LACT / CoreCtrl for GPU fans). The [Setup Checklist](setup-checklist.md#step-5--stop-competing-fan-control-software) lists the usual suspects and how to disable them.
+So pick one fan controller per header. Before letting Ventulus manage your fans, stop other fan software (fancontrol, CoolerControl, fan2go, and GPU tools like LACT / CoreCtrl for GPU fans). The [Setup Checklist](setup-checklist.md#step-5--stop-competing-fan-control-software) lists the usual suspects and how to disable them, and [Migrating from Another Fan Program](migrating.md) covers a full switch, including which of the old program's drivers to keep.
 
 ## Why DKMS, Secure Boot, kernel headers, and boot parameters can matter
 

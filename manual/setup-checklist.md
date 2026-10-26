@@ -4,7 +4,7 @@ This page is the **ordered path** from a fresh install to verified, working fan 
 
 New to how Linux fan control works? [Understanding Motherboard Fan Control](understanding-fan-control.md) is a short, plain-English primer on the concepts this checklist puts into practice (hwmon, Super I/O chips, drivers, and BIOS settings). It is optional background: you can follow the steps below without it.
 
-**A clean install, or a switch from another program?** If no other fan-control program has run on this machine, follow the steps in order. If one has (`fancontrol`, CoolerControl, fan2go, thinkfan, or a GPU tool such as LACT or CoreCtrl), do [Step 5](#step-5--stop-competing-fan-control-software) first, before anything else. Keep any motherboard driver you installed for it, such as an `it87` or `nct6687d` DKMS package: Ventulus uses the same kernel drivers.
+**A clean install, or a switch from another program?** If no other fan-control program has run on this machine, follow the steps in order. If one has (`fancontrol`, CoolerControl, fan2go, thinkfan, or a GPU tool such as LACT or CoreCtrl), start with [Migrating from Another Fan Program](migrating.md): it says what to keep, what to stop and how to check that Ventulus has taken over, and links back here for the steps the two share. Keep any motherboard driver you installed for the old program, such as an `it87` or `nct6687d` DKMS package: Ventulus uses the same kernel drivers.
 
 > **Before you start.** Some steps link to pages that install third-party kernel
 > modules, change UEFI/BIOS settings or kernel boot parameters, or change how fans
@@ -112,6 +112,8 @@ sudo systemctl disable --now thinkfan.service        # thinkfan
 ```
 
 Do this before you run your first fan test or apply your first profile. The daemon gives each header back exactly as it found it when it first took it, so a header another program still holds at that moment is later given back to that program's setting rather than to the BIOS. If you have already run a test or a profile, reboot once the other program is disabled.
+
+Switching for good? [Migrating from Another Fan Program](migrating.md) covers the whole switch: which drivers and settings to keep, how to check that nothing still holds a header, and what you can clean up afterwards.
 
 Also worth knowing:
 

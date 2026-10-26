@@ -12,6 +12,7 @@ This manual covers every page, setting, and feature of the application.
 
 1. [Getting Started](getting-started.md): Installation, first launch, and connecting to the daemon
 2. [Setup Checklist](setup-checklist.md): Ordered path from fresh install to verified fan control: sensors → readiness → drivers/BIOS → verify → first profile
+   - [Migrating from Another Fan Program](migrating.md): Switching from fancontrol, CoolerControl, fan2go or another tool: what to keep, what to stop, and how to check that Ventulus has taken over
 3. [Dashboard](dashboard.md): Real-time overview of fans, sensors, and system health
 4. [Controls](controls.md): Profiles, fan roles, curves, and manual override
 5. [Settings](settings.md): Application preferences, themes, and backup/restore
