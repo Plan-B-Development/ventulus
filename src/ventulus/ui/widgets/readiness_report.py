@@ -216,7 +216,8 @@ def _dual_chip_driver_fix(diag: HardwareDiagnosticsResult) -> str:
     if signing_applies(missing, it87, diag.kernel_release, _signed_modules_only(diag)):
         fix += (
             " This kernel only loads signed drivers, so the out-of-tree it87 must be "
-            "signed with a key enrolled with 'sudo mokutil --import'."
+            "signed with a key enrolled with 'sudo mokutil --import', which needs the "
+            "shim boot loader (a key enrolled in the firmware with sbctl does not count)."
         )
     return fix
 

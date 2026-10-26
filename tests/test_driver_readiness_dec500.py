@@ -372,8 +372,10 @@ def test_the_signing_cause_is_shown_only_where_it_can_be_the_cause(signed_only, 
     html = dual_chip_warning_for(diag)
     assert ("only loads signed drivers" in html) is shown
     assert ("Key was rejected by service" in html) is shown
+    assert ("shim boot loader" in html) is shown
     (cond,) = _dual_chip_conditions(diag)
     assert ("only loads signed drivers" in cond["fix"]) is shown
+    assert ("shim boot loader" in cond["fix"]) is shown
 
 
 def test_no_signing_cause_where_the_kernels_own_driver_drives_the_missing_chip():

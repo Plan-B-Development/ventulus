@@ -238,6 +238,7 @@ def test_secure_boot_note_on_every_non_arch_family():
             notes = " ".join(install_guide(module, family).notes)
             assert "Secure Boot" in notes
             assert "mokutil --import" in notes
+            assert "shim boot loader" in notes
             assert "/var/lib/dkms/mok.pub" in notes
             assert "/var/lib/shim-signed/mok/MOK.der" in notes
     # Arch kernels do not tie module signing to Secure Boot; no note there.

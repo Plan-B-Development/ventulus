@@ -260,7 +260,9 @@ _SECURE_BOOT_NOTE = (
     "('Public certificate (MOK): …' — /var/lib/dkms/mok.pub, or "
     "/var/lib/shim-signed/mok/MOK.der on Ubuntu). Enrol that file once with "
     "'sudo mokutil --import <file>', choose a one-time password, reboot, and pick "
-    "'Enroll MOK' in the blue MOK Manager screen."
+    "'Enroll MOK' in the blue MOK Manager screen. That screen comes from the shim boot "
+    "loader, which Debian, Ubuntu and Fedora boot through with Secure Boot on; a key "
+    "enrolled in the firmware with sbctl does not count for modules."
 )
 
 # Fred78290/nct6687d's `make akmod` runs `dnf install akmods

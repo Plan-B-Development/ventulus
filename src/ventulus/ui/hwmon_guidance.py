@@ -2996,7 +2996,14 @@ def signed_driver_html() -> str:
         "rejected by service</i> or <i>Operation not permitted</i>. DKMS signs the "
         "driver as it builds it and prints the certificate it used; enrol it once "
         "with <code>sudo mokutil --import &lt;file&gt;</code>, reboot, and choose "
-        "<i>Enroll MOK</i> in the MOK Manager screen.<br><br>"
+        "<i>Enroll MOK</i> in the MOK Manager screen. That screen comes from the shim "
+        "boot loader, which Debian, Ubuntu and Fedora boot through with Secure Boot on. "
+        "A key enrolled in the firmware with <code>sbctl</code> does not count for "
+        "drivers, so without shim the kernel loads only drivers signed with a key built "
+        "into it: the manual's "
+        '<a href="https://github.com/Plan-B-Development/ventulus/blob/main/'
+        'manual/driver-setup.md#secure-boot-and-dkms-modules">Secure Boot and DKMS '
+        "modules</a> section has what to do then.<br><br>"
     )
 
 

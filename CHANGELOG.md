@@ -5,6 +5,15 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The in-app Secure Boot advice now says that enrolling a key needs the shim boot loader.**
+  The Hardware page's driver steps, the missing-chip warning and the readiness report told
+  you to enroll the DKMS key with `mokutil` without saying that the MOK Manager screen comes
+  from shim. Debian, Ubuntu and Fedora boot through shim with Secure Boot on; a machine set up
+  with `sbctl` alone does not, and a key enrolled in the firmware that way does not count for
+  drivers. The missing-chip warning links to the manual's Secure Boot section for that case.
+
 ## [5.4.1] — 2026-10-22
 
 Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.3.1 is the current daemon
