@@ -900,4 +900,4 @@ advisories* in **Settings → Prompts & Dismissals**.
 
 ---
 
-Previous: [Profiles and Curves Reference](profiles-and-curves.md) | Next: [Driver Setup](driver-setup.md) | Back to [Table of Contents](README.md)
+Previous: [Profiles and Curves Reference](profiles-and-curves.md) | Next: [Safety and Recovery](safety-and-recovery.md) | Back to [Table of Contents](README.md)

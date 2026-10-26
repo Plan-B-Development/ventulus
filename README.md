@@ -135,11 +135,13 @@ from the project's GitHub Pages site; the daemon never connects to the network.
 **User manual** ([contents](manual/README.md)):
 [Getting Started](manual/getting-started.md) ·
 [Setup Checklist](manual/setup-checklist.md) ·
+[Migrating from Another Fan Program](manual/migrating.md) ·
 [Understanding Motherboard Fan Control](manual/understanding-fan-control.md) ·
 [Driver Setup](manual/driver-setup.md) ·
 [Updates](manual/updates.md) ·
 [OpenFAN Controller](manual/openfan-controller.md) ·
-[Hardware Troubleshooting](manual/hardware-troubleshooting.md)
+[Hardware Troubleshooting](manual/hardware-troubleshooting.md) ·
+[Safety and Recovery](manual/safety-and-recovery.md)
 
 **Hardware reference:**
 

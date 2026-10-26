@@ -163,7 +163,8 @@ already runs faster keeps its speed, so these rules can raise a fan but never lo
 Whenever one of these is acting, the footer's thermal chip, a banner on the Dashboard
 and an alert say so. The daemon's
 [User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md#safety)
-has the full operator-level detail.
+has the full operator-level detail. What each rule means for you when the app closes,
+the daemon stops or a device disappears is in [Safety and Recovery](safety-and-recovery.md).
 
 ## Where to go next
 

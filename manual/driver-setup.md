@@ -403,7 +403,7 @@ sudo rm -f /etc/modprobe.d/it87.conf /etc/modprobe.d/nct6687.conf \
 sudo systemctl reboot
 ```
 
-If you created `/etc/modprobe.d/ventulus-superio-local.conf` while [recovering a missing chip](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up), leave it unless you are sure the package's guard covers your board (`sudo journalctl -b -t ventulus-superio-guard` shows a line per module it declined): removing it lets `nct6775` and `w83627ehf` probe again. BIOS changes are rolled back in BIOS setup (restore Smart Fan / Q-Fan to its default profile). If you use snapshots (e.g. `snapper` / Timeshift on CachyOS), taking one before Step 3 gives you a one-command rollback as well.
+If you created `/etc/modprobe.d/ventulus-superio-local.conf` while [recovering a missing chip](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up), leave it unless you are sure the package's guard covers your board (`sudo journalctl -b -t ventulus-superio-guard` shows a line per module it declined): removing it lets `nct6775` and `w83627ehf` probe again. BIOS changes are rolled back in BIOS setup (restore Smart Fan / Q-Fan to its default profile). If you use snapshots (e.g. `snapper` / Timeshift on CachyOS), taking one before Step 3 gives you a one-command rollback as well. Every other change the manual describes, with how to undo it, is in the [undo index](safety-and-recovery.md#undo-index).
 
 ## Staying current
 
@@ -474,4 +474,4 @@ At a glance:
 
 ---
 
-Previous: [Hardware Troubleshooting](hardware-troubleshooting.md) | Next: [Understanding Motherboard Fan Control](understanding-fan-control.md) | Back to [Table of Contents](README.md)
+Previous: [Safety and Recovery](safety-and-recovery.md) | Next: [Understanding Motherboard Fan Control](understanding-fan-control.md) | Back to [Table of Contents](README.md)
