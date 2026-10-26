@@ -1,6 +1,6 @@
 # Setup Checklist — Sensors & Fan Control
 
-This page is the **ordered path** from a fresh install to verified, working fan control: install → sensors → readiness → drivers/BIOS → verify → first profile. Do the steps in order. Each one links to a deeper page for the detail. Ventulus is packaged for Arch Linux and its derivatives, Debian 13, Ubuntu 26.04 and Fedora 44; where a command differs between them, the linked page gives each one.
+This page is the **ordered path** from a fresh install to verified, working fan control: install → sensors → readiness → drivers/BIOS → verify → first profile. Do the steps in order. Each one links to a deeper page for the detail. Ventulus is packaged for Arch Linux and its derivatives, Debian 13, Ubuntu 26.04 and Fedora 44 and 45; where a command differs between them, the linked page gives each one.
 
 New to how Linux fan control works? [Understanding Motherboard Fan Control](understanding-fan-control.md) is a short, plain-English primer on the concepts this checklist puts into practice (hwmon, Super I/O chips, drivers, and BIOS settings). It is optional background: you can follow the steps below without it.
 
@@ -57,23 +57,31 @@ Open the **System State** page (the daemon's hardware snapshot is fetched in the
 
 ## Step 5 — Stop competing fan-control software
 
-Only one program should drive a fan header. `pwm` / `pwm_enable` are single sysfs values, so the **last writer wins**: two controllers overwrite each other and the fans oscillate. The readiness report's *BIOS interference* counter cannot tell an embedded controller apart from another program: competing software shows up as the same "reverted / reclaimed" pattern. Other projects document the same conflict: CoolerControl [warns against running LACT and CoolerControl on the same AMD GPU](https://docs.coolercontrol.org/hardware-support.html) ("erratic fan behavior, with each application's settings being overwritten by the other"), and fan2go [logs third-party PWM changes](https://github.com/markusressel/fan2go) as another program "competing with fan2go".
+Only one program should drive a fan header. `pwm` / `pwm_enable` are single sysfs values, so the **last writer wins**: two controllers overwrite each other and the fans oscillate. The readiness report's *BIOS interference* counter cannot tell an embedded controller apart from another program: competing software shows up as the same "reverted / reclaimed" pattern. Other projects document the same conflict: CoolerControl [warns against running LACT and CoolerControl on the same AMD GPU](https://docs.coolercontrol.org/devices/gpus#conflicts-with-lact) ("erratic fan behavior, with each application's settings being overwritten by the other"), and fan2go [logs third-party PWM changes](https://github.com/markusressel/fan2go) as another program "competing with fan2go".
 
-Check for the usual suspects and disable any that are active:
+Check for the usual suspects, including ones that start at boot but are not running right now, and disable each one that is enabled or running:
 
 ```bash
-systemctl list-units --type=service | grep -iE 'fancontrol|coolercontrol|fan2go'
+# Installed fan-control services, and whether each starts at boot
+systemctl list-unit-files --type=service --no-pager | grep -iE 'fancontrol|coolercontrol|fan2go|thinkfan'
+# Which of them is running now
+systemctl list-units --type=service --no-pager | grep -iE 'fancontrol|coolercontrol|fan2go|thinkfan'
+# fancontrol started by hand rather than as a service: this file exists while it runs
+ls /run/fancontrol.pid
 
 # For each hit, e.g.:
 sudo systemctl disable --now fancontrol.service      # lm_sensors' fancontrol
 sudo systemctl disable --now coolercontrold.service  # CoolerControl
 sudo systemctl disable --now fan2go.service          # fan2go
+sudo systemctl disable --now thinkfan.service        # thinkfan
 ```
+
+Do this before you run your first fan test or apply your first profile. The daemon gives each header back exactly as it found it when it first took it, so a header another program still holds at that moment is later given back to that program's setting rather than to the BIOS. If you have already run a test or a profile, reboot once the other program is disabled.
 
 Also worth knowing:
 
 - **LACT / CoreCtrl** (GPU tools): pick one owner for each GPU fan. A GPU that no Ventulus profile has driven is left alone, even when the daemon stops or restarts, so one of these tools can own it. Once a profile has driven a GPU, the daemon puts it back on its firmware curve when the profile stops naming it (deactivated, or switched to a profile without it) or when the daemon stops. **Restore GPU Fan to Automatic** hands it back at once, and the daemon then leaves it alone until a profile is next activated or the daemon restarts.
-- **`pwmconfig`** (lm_sensors' interactive prober) stops fans while it tests. Fine as a one-off diagnostic, but only run it while `ventulusd` is stopped.
+- **`pwmconfig`** (lm_sensors' interactive setup for `fancontrol`) is not needed with Ventulus: [Discover Control Path](fan-tests.md#discover-control-path) finds which fan each header drives without stopping any, and **Test Control** checks that the header responds. [`pwmconfig`](https://github.com/lm-sensors/lm-sensors/blob/master/prog/pwm/pwmconfig) stops each fan in turn for about 5 seconds, refuses to start while `fancontrol` is running, writes a `fancontrol` configuration (`/etc/fancontrol` unless you choose another path), and leaves every header it tested at full speed. If you run it anyway, stop `ventulusd` first, and reboot before you start it again so that the BIOS has the headers back: otherwise the daemon finds them at full speed and gives them back that way.
 
 ## Step 6 — Verify control end-to-end
 

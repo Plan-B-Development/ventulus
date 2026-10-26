@@ -73,7 +73,7 @@ These come up only on some systems, and the [Driver Setup](driver-setup.md) page
 
 - **DKMS** rebuilds an out-of-tree driver every time your kernel updates, so the driver keeps working after upgrades.
 - **Kernel headers** matching your *running* kernel are what DKMS builds against. A mismatch is the most common reason a driver "installs" but never loads.
-- **Secure Boot**, when enabled, refuses to load unsigned out-of-tree modules: the driver builds but is rejected at load time. You either disable Secure Boot or sign the module.
+- **Secure Boot**, when enabled, makes the Debian, Ubuntu and Fedora kernels refuse unsigned out-of-tree modules (Arch and CachyOS kernels refuse them only when you have set that up yourself): the driver builds but is rejected at load time. The fix is to enroll the key DKMS signs the driver with; turning Secure Boot off is the last resort.
 - **Boot parameters** (the kernel command line) are needed in one specific case: AMD **GPU** fan control on RDNA3+ cards needs `amdgpu.ppfeaturemask=0xfff7ffff` (any mask with bit `0x4000` set works). Motherboard fan control needs no boot parameter.
 
 Most boards need none of these. When one *is* needed, the **System State** page says so, and Driver Setup has the steps, including how to undo them.

@@ -89,11 +89,16 @@ identify your board's chips **without probing the hardware**. Treat
 chips in a way these chips do not like, causing problems ranging from SMBus lockup to
 permanent hardware damage (a rare case, thankfully)"
 ([sensors-detect(8)](https://man.archlinux.org/man/extra/lm_sensors/sensors-detect.8.en)).
-If you do run it, accept its conservative defaults rather than answering yes to every
-probe, and **never run it after boot on a Gigabyte board**. It can wedge the Super-I/O
-bridge so that a second chip vanishes, the package's guard cannot stop it (it probes
-the ports itself rather than loading a module), and **a reboot may not bring the chip
-back: power down at the wall**, because the bridge keeps standby power (see
+Its default answers are not a safe mode: the Super-I/O scan, which writes to I/O ports
+0x2E and 0x4E to find the chip, defaults to *yes*, and the
+[script](https://github.com/lm-sensors/lm-sensors/blob/master/prog/detect/sensors-detect)
+itself calls it only "usually safe"; the man page warns that `--auto`, which takes
+every default, "isn't necessarily safe". If you do run it, answer each question yourself, and do not force a probe it
+would skip by default. **Never run it after boot on a Gigabyte board.** Its Super-I/O
+scan can wedge the Super-I/O bridge so that a second chip vanishes, the package's
+guard cannot stop it (it probes the ports itself rather than loading a module), and
+**a reboot may not bring the chip back: power down at the wall**, because the bridge
+keeps standby power (see
 ["Some of my fan headers are missing"](#some-of-my-fan-headers-are-missing--only-5-of-8-show-up)).
 
 ## "All my hwmon headers show as read-only"
