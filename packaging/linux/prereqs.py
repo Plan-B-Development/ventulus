@@ -1,6 +1,10 @@
-"""Whether this system's Python can run the Ventulus GUI from the tarball (DEC-499).
+"""Whether this system's Python can run Ventulus from the tarball (DEC-499).
 
-    python3 -I -B prereqs.py <libdir>
+    python3 -I -B prereqs.py [--cli] <libdir>
+
+``--cli`` checks only what ventulus-diag needs (``install.sh --cli-only``,
+DEC-503): Python and the requirements in :data:`CLI_REQUIREMENTS`, then that
+the CLI imports. Without it, everything the GUI needs.
 
 <libdir> holds the ``ventulus`` package and its ``.dist-info``, as the tarball
 carries them. The requirements are the ``Requires-Dist`` lines of that
@@ -21,6 +25,10 @@ from email.parser import Parser
 from pathlib import Path
 
 MIN_PYTHON = (3, 12)
+
+#: The runtime requirements ventulus-diag imports; every other one is the GUI's.
+#: Debian's and Fedora's ventulus-diag packages depend on the same set.
+CLI_REQUIREMENTS = frozenset({"httpx"})
 
 _REQUIREMENT = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*\(?([^;()]*)\)?\s*(?:;(.*))?$")
 _CLAUSE = re.compile(r"^\s*(>=|<=|==|!=|<|>)\s*([0-9][0-9A-Za-z.]*)\s*$")
@@ -80,7 +88,7 @@ def requirements(libdir: Path) -> list[tuple[str, str]]:
     return out
 
 
-def problems(libdir: Path) -> list[str]:
+def problems(libdir: Path, *, cli: bool = False) -> list[str]:
     found = []
     if sys.version_info < MIN_PYTHON:
         found.append(
@@ -89,6 +97,8 @@ def problems(libdir: Path) -> list[str]:
             )
         )
     for name, spec in requirements(libdir):
+        if cli and name not in CLI_REQUIREMENTS:
+            continue
         try:
             have = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
@@ -98,6 +108,13 @@ def problems(libdir: Path) -> list[str]:
             found.append(f"{name} {have} is installed; Ventulus needs {spec}")
     if found:
         return found  # the checks below would only repeat these
+    if cli:
+        sys.path.insert(0, str(libdir))
+        try:
+            import ventulus.diag.cli
+        except ImportError as exc:
+            found.append(f"ventulus-diag cannot load: {exc}")
+        return found
 
     # A module the metadata cannot name: Debian and Ubuntu split PySide6 per Qt
     # module, and pyqtgraph imports QtOpenGL. Importing the GUI finds them all.
@@ -126,10 +143,14 @@ def problems(libdir: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: python3 -I -B prereqs.py <libdir>", file=sys.stderr)
+    args = argv[1:]
+    cli = args[:1] == ["--cli"]
+    if cli:
+        args = args[1:]
+    if len(args) != 1:
+        print("usage: python3 -I -B prereqs.py [--cli] <libdir>", file=sys.stderr)
         return 2
-    found = problems(Path(argv[1]))
+    found = problems(Path(args[0]), cli=cli)
     for line in found:
         print(f"  - {line}")
     return 1 if found else 0

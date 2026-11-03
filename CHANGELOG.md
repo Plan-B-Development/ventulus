@@ -23,6 +23,14 @@ rename. Version numbers carry on from Control-OFC.
 
 ### Changed
 
+- **Ventulus is now two packages: `ventulus` and `ventulus-diag`.** `ventulus-diag` holds the
+  program's Python code and the `ventulus-diag` tool, and needs only Python and httpx, so a
+  machine with no desktop can install it beside `ventulusd` without Qt. `ventulus` adds
+  the GUI and depends on the `ventulus-diag` of the same version, so `pacman -Syu`,
+  `apt upgrade` and `dnf upgrade` bring it in. Each release attaches both, in every format
+  but the tarball, which carries both: `install.sh --cli-only` installs `ventulus-diag`
+  alone. If you install from release files rather than a repository, install both (see
+  Getting Started).
 - **A report's safety text no longer says "even if Ventulus is closed".** It now says "even
   if the program that started it is closed", since the CLI can start a run too. A report run
   by `ventulus-diag` names it in its environment section instead of "Ventulus GUI".

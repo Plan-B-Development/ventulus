@@ -227,6 +227,8 @@ jobs:
 
       # Exactly one of each, named for this version, or nothing is published: a
       # missing format would otherwise ship a Release that silently lacks it.
+      # Each format but the tarball is two packages, ventulus and ventulus-diag
+      # (DEC-503); the tarball carries both.
       # fc44 fc45: rpm-package's matrix, one build per Fedora release. -1-: the
       # release procedure above resets the PKGBUILD's pkgrel to 1 for every tag;
       # change both together.
@@ -235,7 +237,7 @@ jobs:
           set -euo pipefail
           v="${RELEASE_TAG#v}"
           cd dist
-          expected="ventulus-$v-1-any.pkg.tar.zst ventulus_$v-1_all.deb ventulus-$v-1.fc44.noarch.rpm ventulus-$v-1.fc45.noarch.rpm ventulus-$v-noarch.tar.gz"
+          expected="ventulus-$v-1-any.pkg.tar.zst ventulus-diag-$v-1-any.pkg.tar.zst ventulus_$v-1_all.deb ventulus-diag_$v-1_all.deb ventulus-$v-1.fc44.noarch.rpm ventulus-$v-1.fc45.noarch.rpm ventulus-diag-$v-1.fc44.noarch.rpm ventulus-diag-$v-1.fc45.noarch.rpm ventulus-$v-noarch.tar.gz"
           n=0
           for f in $expected; do
             [ -f "$f" ] || { echo "::error::$f was not built"; ls -l; exit 1; }
@@ -630,9 +632,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Only the depends=(...) array, so a makedepends/optdepends or comment
-          # mention can never stand in for the real runtime floor.
-          dep="$(awk '/^depends=\(/{f=1} f{print} f&&/\)/{exit}' packaging/PKGBUILD \
+          # Only a depends=(...) array, so a makedepends/optdepends or comment
+          # mention can never stand in for the real runtime floor. Both packages
+          # declare it (DEC-503) and a test holds the two equal; the first is read.
+          dep="$(awk '/^[[:space:]]*depends=\(/{f=1} f{print} f&&/\)/{exit}' packaging/PKGBUILD \
                  | grep -oE "'ventulusd[^']*'" | head -n1 | tr -d "'")" || dep=''
           case "$dep" in
             '')

@@ -1,27 +1,42 @@
 #!/bin/bash
-# stage.sh <flavour> <wheel> <mandir> <destroot>
+# stage.sh <flavour> <part> <wheel> <mandir> <destroot>
 #
-# Installs every file of the ventulus GUI package for Debian/Ubuntu (deb), Fedora
-# (rpm) or the tarball into <destroot>, laid out as on the target system. This
-# is the one file list for those three formats (DEC-499); it mirrors
-# packaging/PKGBUILD's package(), and tests/test_packaging_linux.py holds the
-# two together. Run from the repository root.
+# Installs every file of one of the two Ventulus packages for Debian/Ubuntu
+# (deb), Fedora (rpm) or the tarball into <destroot>, laid out as on the target
+# system. This is the one file list for those three formats (DEC-499); it
+# mirrors packaging/PKGBUILD's package_ventulus-diag() and package_ventulus(),
+# and tests/test_packaging_linux.py holds the two together. Run from the
+# repository root.
 #
 #   flavour  deb | rpm | tarball
+#   part     cli  the ventulus-diag package: the whole Python library, its
+#                 .dist-info and the ventulus-diag program (DEC-503)
+#            gui  the ventulus package: the ventulus program, its desktop entry,
+#                 icon, branding and documentation; it depends on ventulus-diag
+#                 of the same version and on the Qt stack
 #   wheel    the wheel build.sh built: pure Python, the same bytes in every format
-#   mandir   holds ventulus.1, rendered from man/ventulus.1.scd
+#   mandir   holds ventulus.1 and ventulus-diag.1, rendered from man/*.scd
 #
-# Where the Python code goes:
-#   deb      a private directory, /usr/share/ventulus, with a launcher in /usr/bin
+# Where the Python code goes (part cli):
+#   deb      a private directory, /usr/share/ventulus, with launchers in /usr/bin
 #            (Debian Python Policy), so one .deb serves every Python 3 version
 #   rpm      site-packages of the Python running this script (build it on the
-#            Fedora release it is for), with the entry point as /usr/bin/ventulus
-#   tarball  /usr/local/lib/ventulus, with a launcher in /usr/local/bin
-# Each keeps the wheel's .dist-info: the GUI reads its own version there, and
-# without it the version is "dev" and its daemon-version checks are off.
+#            Fedora release it is for), with launchers in /usr/bin
+#   tarball  /usr/local/lib/ventulus, with launchers in /usr/local/bin
+# The library keeps the wheel's .dist-info: both programs read their version
+# there, and without it the version is "dev" and the daemon-version checks are off.
 set -euo pipefail
 
-flavour=$1 wheel=$2 mandir=$3 dest=$4
+flavour=$1 part=$2 wheel=$3 mandir=$4 dest=$5
+
+case "$part" in
+    cli) pkg=ventulus-diag ;;
+    gui) pkg=ventulus ;;
+    *)
+        echo "stage.sh: unknown part '$part' (cli or gui)" >&2
+        exit 2
+        ;;
+esac
 
 case "$flavour" in
     deb)
@@ -31,7 +46,7 @@ case "$flavour" in
         libdir=/usr/share/ventulus
         assets=/usr/share/ventulus/assets
         zsh_dir=/usr/share/zsh/vendor-completions
-        license_dir=/usr/share/doc/ventulus
+        license_dir=/usr/share/doc/$pkg
         license_name=copyright
         installer=dpkg
         ;;
@@ -40,7 +55,7 @@ case "$flavour" in
         libdir=$(python3 -c 'import sys; print("/usr/lib/python%d.%d/site-packages" % sys.version_info[:2])')
         assets=/usr/share/ventulus/assets
         zsh_dir=/usr/share/zsh/site-functions
-        license_dir=/usr/share/licenses/ventulus
+        license_dir=/usr/share/licenses/$pkg
         license_name=LICENSE
         installer=rpm
         ;;
@@ -51,7 +66,7 @@ case "$flavour" in
         libdir=/usr/local/lib/ventulus
         assets=/usr/local/lib/ventulus/assets
         zsh_dir=/usr/local/share/zsh/site-functions
-        license_dir=/usr/local/share/licenses/ventulus
+        license_dir=/usr/local/share/licenses/$pkg
         license_name=LICENSE
         installer=ventulus-tarball
         ;;
@@ -65,11 +80,28 @@ share=$prefix/share
 doc=$share/doc/ventulus
 put() { install -D -m "$1" -- "$2" "$dest$3"; }
 
+# The program's launcher. Where the modules are private, it puts their directory
+# first on the path, so an unrelated `ventulus` elsewhere cannot shadow them.
+launcher() { # launcher <program> <module> <function>
+    local tmp
+    tmp=$(mktemp)
+    {
+        echo '#!/usr/bin/python3'
+        echo 'import sys'
+        [ "$flavour" = rpm ] || echo "sys.path.insert(0, \"$libdir\")"
+        echo "from $2 import $3"
+        echo "sys.exit($3())"
+    } > "$tmp"
+    put 755 "$tmp" "$prefix/bin/$1"
+    rm -f -- "$tmp"
+}
+
 # The wheel holds the package and its .dist-info and nothing else; anything more
 # (a .data directory, a second package) would need a place here, so it stops
 # the build. RECORD goes: the package manager, or the tarball's MANIFEST, owns
 # these files, and pip must not remove them. INSTALLER says who did install them.
-python3 - "$wheel" "$dest$libdir" "$installer" << 'EOF'
+stage_library() {
+    python3 - "$wheel" "$dest$libdir" "$installer" << 'EOF'
 import os
 import sys
 import zipfile
@@ -92,20 +124,23 @@ meta = target / dist_info[0]
 (meta / "INSTALLER").write_text(installer + "\n")
 os.chmod(meta / "INSTALLER", 0o644)
 EOF
+}
 
-# The program. Where the modules are private, the launcher puts their directory
-# first on the path, so an unrelated `ventulus` elsewhere cannot shadow them.
-launcher=$(mktemp)
-{
-    echo '#!/usr/bin/python3'
-    echo 'import sys'
-    [ "$flavour" = rpm ] || echo "sys.path.insert(0, \"$libdir\")"
-    echo 'from ventulus.main import main'
-    echo 'sys.exit(main())'
-} > "$launcher"
-put 755 "$launcher" "$prefix/bin/ventulus"
-rm -f -- "$launcher"
+if [ "$part" = cli ]; then
+    stage_library
+    launcher ventulus-diag ventulus.diag.cli main
+    put 644 "$mandir/ventulus-diag.1" "$share/man/man1/ventulus-diag.1"
+    put 644 completions/ventulus-diag.bash "$share/bash-completion/completions/ventulus-diag"
+    put 644 completions/_ventulus-diag "$zsh_dir/_ventulus-diag"
+    put 644 completions/ventulus-diag.fish "$share/fish/vendor_completions.d/ventulus-diag.fish"
+    # The bundled fonts are in the library, so their OFL texts travel with it (DEC-208).
+    put 644 LICENSE "$license_dir/$license_name"
+    put 644 src/ventulus/ui/fonts/OFL-DMSans.txt "$license_dir/OFL-DMSans.txt"
+    put 644 src/ventulus/ui/fonts/OFL-SpaceGrotesk.txt "$license_dir/OFL-SpaceGrotesk.txt"
+    exit 0
+fi
 
+launcher ventulus ventulus.main main
 put 644 packaging/ventulus.desktop "$share/applications/ventulus.desktop"
 put 644 assets/branding/app_icon/app_icon.svg "$share/icons/hicolor/scalable/apps/ventulus.svg"
 # Loaded by the About dialog and the sidebar (paths.assets_dir()).
@@ -127,8 +162,6 @@ for refdoc in docs/19_*.md docs/20_*.md docs/21_*.md docs/22_*.md docs/23_*.md d
     put 644 "$refdoc" "$doc/docs/${refdoc##*/}"
 done
 
-# NOTICE.md and the bundled fonts' OFL texts travel with the licence (DEC-208, DEC-260).
+# NOTICE.md records the GUI's dependencies whose licences carry obligations (DEC-260).
 put 644 LICENSE "$license_dir/$license_name"
 put 644 NOTICE.md "$license_dir/NOTICE.md"
-put 644 src/ventulus/ui/fonts/OFL-DMSans.txt "$license_dir/OFL-DMSans.txt"
-put 644 src/ventulus/ui/fonts/OFL-SpaceGrotesk.txt "$license_dir/OFL-SpaceGrotesk.txt"

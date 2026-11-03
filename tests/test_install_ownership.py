@@ -235,3 +235,34 @@ def test_every_query_this_module_builds_is_read_only(tmp_path):
     install_ownership._repository_configured(InstallMethod.PACMAN, probe)
     programs = {call[0] for call in fake.calls}
     assert programs == {"pacman", "dpkg-query", "rpm", "pacman-conf"}
+
+
+@pytest.mark.parametrize(
+    ("tool", "answer", "method"),
+    [
+        ("pacman", "ventulus-diag\n", InstallMethod.PACMAN),
+        ("dpkg-query", f"ventulus-diag: {MODULE}\n", InstallMethod.DEB),
+        ("rpm", "ventulus-diag\n", InstallMethod.RPM),
+    ],
+)
+def test_the_library_package_owns_the_gui_since_the_split(tmp_path, tool, answer, method):
+    """DEC-503: the modules belong to ventulus-diag, which the ventulus package
+    depends on at its own version, so its owner names the GUI's install too."""
+    fake = FakeSystem(tools=(tool,), answers={tool: (0, answer)})
+    got = gui_ownership(MODULE, app_version="6.0.0", probe=fake.probe(tmp_path))
+    assert got.method is method
+
+
+def test_the_daemon_is_not_owned_by_the_guis_library_package(tmp_path):
+    fake = FakeSystem(tools=("pacman",), answers={"pacman": (0, "ventulus-diag\n")})
+    got = daemon_ownership(_daemon_binary(tmp_path), probe=fake.probe(tmp_path))
+    assert got.method is not InstallMethod.PACMAN
+
+
+def test_two_owners_are_not_ownership_even_when_both_are_ours(tmp_path):
+    fake = FakeSystem(
+        tools=("dpkg-query",),
+        answers={"dpkg-query": (0, f"ventulus, ventulus-diag: {MODULE}\n")},
+    )
+    got = gui_ownership(MODULE, app_version="6.0.0", probe=fake.probe(tmp_path))
+    assert got.method is not InstallMethod.DEB

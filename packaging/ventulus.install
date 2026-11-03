@@ -4,6 +4,7 @@ post_install() {
 
    Launch:        ventulus  (or via your application menu)
    Demo mode:     ventulus --demo
+   Fan tests:     ventulus-diag  (the diagnostic CLI; man ventulus-diag)
 
    The GUI requires ventulusd to be running. If it isn't yet:
      sudo systemctl enable --now ventulusd

@@ -7,6 +7,28 @@ Standards-Version: 4.7.0
 Homepage: https://github.com/Plan-B-Development/ventulus
 Rules-Requires-Root: no
 
+Package: ventulus-diag
+Architecture: all
+# DEC-503: the whole Python library and the ventulus-diag program, without the
+# Qt stack, so a machine with no desktop can run the diagnostics. Up to 5.5.x
+# these files were the ventulus package's: Breaks and Replaces let them move
+# here when one of those is upgraded (Debian Policy 7.6.1). Any older ventulus
+# is broken by this build in fact, since each depends on its own ventulus-diag
+# (= its version); apt upgrades the two together.
+# The floors are pyproject.toml's; ventulusd's is constants.DAEMON_MINIMUM_VERSION
+# (tests/test_packaging_linux.py holds both equal).
+Depends: ${misc:Depends}, ${python3:Depends}, python3 (>= 3.12),
+ ventulusd (>= 3.0.0),
+ python3-httpx (>= 0.27)
+Breaks: ventulus (<< ${binary:Version})
+Replaces: ventulus (<< ${binary:Version})
+Description: Diagnostics for the Ventulus fan control daemon
+ ventulus-diag runs the tests that deliberately drive fans for investigation:
+ the PWM Test Report, PWM characterisation, control-path discovery and
+ validation sessions. Each is a ventulusd diagnostic, which the daemon checks,
+ performs and undoes; the tool asks for confirmation before anything changes
+ a fan speed. It needs no desktop.
+
 Package: ventulus
 Architecture: all
 # The floors are pyproject.toml's (tests/test_packaging_linux.py holds them
@@ -16,6 +38,7 @@ Architecture: all
 # exits 2 on --import when it cannot start the agent, even though the key
 # imported, and the update check refuses any non-zero exit.
 Depends: ${misc:Depends}, ${python3:Depends}, python3 (>= 3.12),
+ ventulus-diag (= ${binary:Version}),
  ventulusd (>= 3.0.0),
  python3-pyside6.qtcore (>= 6.6), python3-pyside6.qtgui, python3-pyside6.qtwidgets,
  python3-pyside6.qtnetwork, python3-pyside6.qtopengl, python3-pyside6.qtopenglwidgets,

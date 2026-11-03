@@ -1,31 +1,16 @@
 # Maintainer: Plan-B-Development <Mitchell.R.Palmer@gmail.com>
-pkgname=ventulus
+pkgbase=ventulus
+# DEC-503: two packages from one wheel. ventulus-diag carries the whole Python
+# library and the ventulus-diag program, so a machine with no desktop gets the
+# diagnostics without the Qt stack; ventulus adds the GUI and depends on the
+# ventulus-diag of the same build, so `pacman -Syu` brings it in on upgrade.
+pkgname=(ventulus-diag ventulus)
 pkgver=5.5.0
 pkgrel=1
-pkgdesc="PySide6 desktop GUI for the Ventulus fan control daemon"
 arch=('any')
 url="https://github.com/Plan-B-Development/ventulus"
-license=('MIT' 'OFL-1.1')
-# python-colorama: required transitive runtime dep — pyqtgraph imports
-# `colorama.win32`/`colorama.winterm` unconditionally at module load
-# (the platform check happens after the import). Arch's
-# `python-pyqtgraph` package omits the dep upstream; declaring it here
-# is load-bearing on clean systems. See DEC-103. Do not remove.
-# The ventulusd floor is `DAEMON_MINIMUM_VERSION` in src/ventulus/constants.py
-# (the daemon that canonicalises it87 v2.0 chip names, DEC-442); a test keeps
-# this line equal to it. This is what the GUI *requires*, not the ship-time
-# pairing — bump only when that floor moves.
-depends=('ventulusd>=3.0.0' 'python' 'pyside6' 'python-httpx'
-         'python-pyqtgraph' 'python-numpy' 'python-colorama'
-         'hicolor-icon-theme')
-# The Ventulus rename (DEC-493): this package is control-ofc-gui renamed, and
-# `pacman -Syu` swaps it in. Settings, profiles and saved reports are imported
-# from the old directories at first start.
-replaces=('control-ofc-gui')
-conflicts=('control-ofc-gui')
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools' 'scdoc')
-install=ventulus.install
-source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+source=("$pkgbase-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
 # Self-referential by construction: the tarball GitHub generates for the tag
 # CONTAINS this file, so any sha256 written here changes the tree, the tag, and
 # therefore the hash it claims to pin. SKIP is the only honest value. Integrity
@@ -35,15 +20,16 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {
-    cd "$pkgname-$pkgver"
+    cd "$pkgbase-$pkgver"
     python -m build --wheel --no-isolation
 
-    # Render man page from scdoc source.
+    # Render the man pages from their scdoc sources.
     scdoc < man/ventulus.1.scd > ventulus.1
+    scdoc < man/ventulus-diag.1.scd > ventulus-diag.1
 }
 
 check() {
-    cd "$pkgname-$pkgver"
+    cd "$pkgbase-$pkgver"
     # Byte-compilation only (2026-07-21 audit PKG-4): the full pytest suite
     # (2600+ tests) runs in ci.yml with QT_QPA_PLATFORM=offscreen. The
     # makepkg build container installs only base-devel + build tooling, not
@@ -52,11 +38,73 @@ check() {
     python -m compileall -q src/
 }
 
-package() {
-    cd "$pkgname-$pkgver"
+package_ventulus-diag() {
+    pkgdesc="Diagnostics for the Ventulus fan control daemon: hardware tests, reports and validation sessions"
+    license=('MIT' 'OFL-1.1')
+    # The floor is DAEMON_MINIMUM_VERSION, as for the GUI below. httpx is the
+    # library's one dependency outside the standard library: nothing the CLI
+    # imports needs Qt, pyqtgraph or numpy (tests/test_ventulus_diag.py holds that).
+    # namcap reports pyside6, shiboken6, python-numpy and python-pyqtgraph as
+    # undeclared here: the GUI's modules in the library import them, and only the
+    # ventulus package, which declares them, runs those. Expected, not a defect.
+    depends=('ventulusd>=3.0.0' 'python' 'python-httpx')
+    cd "$pkgbase-$pkgver"
 
-    # Install Python package (creates /usr/bin/ventulus from entry point)
+    # The whole library and its entry points; /usr/bin/ventulus is the GUI's.
     python -m installer --destdir="$pkgdir" dist/*.whl
+    rm -f -- "$pkgdir/usr/bin/ventulus"
+
+    # Man page (rendered in build()).
+    install -Dm644 ventulus-diag.1 \
+        "$pkgdir/usr/share/man/man1/ventulus-diag.1"
+
+    # Shell completions — installed unconditionally; missing shells ignore them.
+    install -Dm644 completions/ventulus-diag.bash \
+        "$pkgdir/usr/share/bash-completion/completions/ventulus-diag"
+    install -Dm644 completions/_ventulus-diag \
+        "$pkgdir/usr/share/zsh/site-functions/_ventulus-diag"
+    install -Dm644 completions/ventulus-diag.fish \
+        "$pkgdir/usr/share/fish/vendor_completions.d/ventulus-diag.fish"
+
+    # Licence
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    # Bundled font licences — DM Sans + Space Grotesk ship inside the library;
+    # OFL-1.1 §2 wants the licence carried alongside the fonts (DEC-208).
+    install -Dm644 src/ventulus/ui/fonts/OFL-DMSans.txt \
+        "$pkgdir/usr/share/licenses/$pkgname/OFL-DMSans.txt"
+    install -Dm644 src/ventulus/ui/fonts/OFL-SpaceGrotesk.txt \
+        "$pkgdir/usr/share/licenses/$pkgname/OFL-SpaceGrotesk.txt"
+}
+
+package_ventulus() {
+    pkgdesc="PySide6 desktop GUI for the Ventulus fan control daemon"
+    license=('MIT')
+    # python-colorama: required transitive runtime dep — pyqtgraph imports
+    # `colorama.win32`/`colorama.winterm` unconditionally at module load
+    # (the platform check happens after the import). Arch's
+    # `python-pyqtgraph` package omits the dep upstream; declaring it here
+    # is load-bearing on clean systems. See DEC-103. Do not remove.
+    # The ventulusd floor is `DAEMON_MINIMUM_VERSION` in src/ventulus/constants.py
+    # (the daemon that canonicalises it87 v2.0 chip names, DEC-442); a test keeps
+    # this line equal to it. This is what the GUI *requires*, not the ship-time
+    # pairing — bump only when that floor moves.
+    depends=("ventulus-diag=$pkgver-$pkgrel"
+             'ventulusd>=3.0.0' 'python' 'pyside6' 'python-httpx'
+             'python-pyqtgraph' 'python-numpy' 'python-colorama'
+             'hicolor-icon-theme')
+    # The Ventulus rename (DEC-493): this package is control-ofc-gui renamed, and
+    # `pacman -Syu` swaps it in. Settings, profiles and saved reports are imported
+    # from the old directories at first start.
+    replaces=('control-ofc-gui')
+    conflicts=('control-ofc-gui')
+    install=ventulus.install
+    cd "$pkgbase-$pkgver"
+
+    # The program, which ventulus-diag leaves out: the wheel's entry point,
+    # written as packaging/linux/stage.sh writes it for the other formats.
+    printf '%s\n' '#!/usr/bin/python' 'import sys' 'from ventulus.main import main' \
+        'sys.exit(main())' > "$srcdir/ventulus.launcher"
+    install -Dm755 "$srcdir/ventulus.launcher" "$pkgdir/usr/bin/ventulus"
 
     # Desktop entry
     install -Dm644 packaging/ventulus.desktop "$pkgdir/usr/share/applications/ventulus.desktop"
@@ -100,18 +148,11 @@ package() {
             "$pkgdir/usr/share/doc/$pkgname/docs/$(basename "$refdoc")"
     done
 
-    # License
+    # Licence
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     # DEC-260: ship NOTICE.md beside LICENSE. It records the dependencies whose
     # licences are not permissive and what obligations they carry — a document
     # written for recipients, which until now never reached one: it existed only
     # in the git tree, not in the installed package.
     install -Dm644 NOTICE.md "$pkgdir/usr/share/licenses/$pkgname/NOTICE.md"
-
-    # Bundled font licences — DM Sans + Space Grotesk ship inside the wheel;
-    # OFL-1.1 §2 wants the licence carried alongside the fonts (DEC-208).
-    install -Dm644 src/ventulus/ui/fonts/OFL-DMSans.txt \
-        "$pkgdir/usr/share/licenses/$pkgname/OFL-DMSans.txt"
-    install -Dm644 src/ventulus/ui/fonts/OFL-SpaceGrotesk.txt \
-        "$pkgdir/usr/share/licenses/$pkgname/OFL-SpaceGrotesk.txt"
 }

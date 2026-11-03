@@ -98,7 +98,9 @@ sudo systemctl enable --now ventulusd
 `SigLevel = Required` means pacman refuses any package or database not signed by
 that key. The [pacman-repo README](https://github.com/Plan-B-Development/pacman-repo)
 covers upgrading and removing it. A machine with no desktop needs only the daemon:
-install `ventulusd` instead of `ventulus` in step 3.
+install `ventulusd` instead of `ventulus` in step 3, and add `ventulus-diag` for the
+diagnostic tests (`man ventulus-diag`), which needs no desktop and brings no Qt.
+The `ventulus` package depends on `ventulus-diag`, so a desktop install has it already.
 
 #### Or with the bootstrap script
 
@@ -153,7 +155,8 @@ Keep the `.asc` name: the key file is armored, and apt expects an armored key fi
 to end in `.asc`. `Signed-By` limits the key to this repository, and apt refuses
 the repository's indexes unless that key signed them. The daemon is enabled and
 started as it installs (`systemctl status ventulusd`). A machine with no desktop
-needs only `sudo apt install ventulusd`.
+needs only `sudo apt install ventulusd`, or `sudo apt install ventulusd ventulus-diag`
+for the diagnostic tests too.
 
 For two or three minutes after a new release is published, `apt update` can report
 a checksum mismatch ("Hash Sum mismatch" or "File has unexpected size") for this
@@ -181,7 +184,8 @@ means the key is not imported yet. dnf then checks the signature of the
 repository's metadata and of every package. Fedora leaves a newly installed
 service disabled, so the `systemctl enable --now` line is needed; without it
 Ventulus opens to a "Disconnected" screen. A machine with no desktop needs only
-`sudo dnf install ventulusd`.
+`sudo dnf install ventulusd`, or `sudo dnf install ventulusd ventulus-diag` for the
+diagnostic tests too.
 
 The repository is built per Fedora release, so after a Fedora upgrade it serves
 packages only once a build for the new release is published. Until then dnf
@@ -232,6 +236,10 @@ sudo ./ventulus-*-noarch/install.sh
 cd ..
 ```
 
+On a machine with no desktop, step 3 can install `ventulus-diag` alone, the
+diagnostic tests without the GUI or Qt: `install.sh --deps --cli-only` prints the
+shorter list, and `sudo ./ventulus-*-noarch/install.sh --cli-only` installs it.
+
 A fresh daemon install is left disabled, which is why step 2 enables it. To
 upgrade, let Settings ▸ [Updates](updates.md) download and check the new tarball
 and give you the line that installs it, or repeat these steps with the new
@@ -251,21 +259,26 @@ keeps an edited configuration file and the daemon's state in `/var/lib/ventulus`
 
 To install without setting up a repository, download the packages attached to
 each release. They are the same builds the repositories serve, each with a Sigstore
-build attestation you can check first. On Arch:
+build attestation you can check first. The GUI's release carries two packages,
+`ventulus` and `ventulus-diag`, which it depends on; checking the release's
+attested `SHA256SUMS` covers both. On Arch:
 
 ```bash
-gh release download --repo Plan-B-Development/ventulusd --pattern '*.pkg.tar.zst'
-gh release download --repo Plan-B-Development/ventulus    --pattern '*.pkg.tar.zst'
-gh attestation verify ./ventulusd-*.pkg.tar.zst --repo Plan-B-Development/ventulusd
-gh attestation verify ./ventulus-*.pkg.tar.zst  --repo Plan-B-Development/ventulus
-sudo pacman -U ./ventulusd-*.pkg.tar.zst ./ventulus-*.pkg.tar.zst
+gh release download --repo Plan-B-Development/ventulusd --dir ventulusd --pattern '*.pkg.tar.zst' --pattern SHA256SUMS
+gh release download --repo Plan-B-Development/ventulus  --dir ventulus  --pattern '*.pkg.tar.zst' --pattern SHA256SUMS
+gh attestation verify ventulusd/SHA256SUMS --repo Plan-B-Development/ventulusd
+gh attestation verify ventulus/SHA256SUMS  --repo Plan-B-Development/ventulus
+cd ventulusd && sha256sum -c --ignore-missing SHA256SUMS && cd ..
+cd ventulus && sha256sum -c --ignore-missing SHA256SUMS && cd ..
+sudo pacman -U ventulusd/*.pkg.tar.zst ventulus/*.pkg.tar.zst
 sudo systemctl enable --now ventulusd
 ```
 
 On Debian 13 and Ubuntu 26.04, download `--pattern '*.deb'` and install with
-`sudo apt install ./ventulusd_*_amd64.deb ./ventulus_*_all.deb`. On Fedora,
+`sudo apt install ./ventulusd_*_amd64.deb ./ventulus_*_all.deb ./ventulus-diag_*_all.deb`. On Fedora,
 download `--pattern '*.rpm'` and install with
-`sudo dnf install ./ventulusd-*.x86_64.rpm ./ventulus-*.fcN.noarch.rpm`, where N
+`sudo dnf install ./ventulusd-*.x86_64.rpm ./ventulus-*.fcN.noarch.rpm` (the
+pattern takes `ventulus-diag`, which the GUI needs, too), where N
 is your Fedora release (`rpm -E %fedora` prints it), then
 `sudo systemctl enable --now ventulusd`. Upgrading then means repeating the
 downloads, which is the chore the repositories exist to remove. Settings ▸

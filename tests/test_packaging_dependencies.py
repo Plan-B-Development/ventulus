@@ -35,24 +35,31 @@ _DEC103_HINT = (
 )
 
 
-def _parse_pkgbuild_depends(pkgbuild_text: str) -> list[str]:
-    """Extract entries from the `depends=(...)` array in a PKGBUILD.
+def _parse_pkgbuild_depends(pkgbuild_text: str, package: str = "ventulus") -> list[str]:
+    """Extract entries from the ``depends=(...)`` array of ``package_<package>()``
+    in the split PKGBUILD (DEC-503).
 
     Handles the common multi-line form:
 
         depends=('foo' 'bar'
                  'baz')
     """
-    match = re.search(
-        r"^depends=\((?P<body>.*?)\)\s*$",
+    func = re.search(
+        rf"^package_{re.escape(package)}\(\) \{{\n(?P<body>.*?)^\}}",
         pkgbuild_text,
         re.MULTILINE | re.DOTALL,
     )
-    assert match is not None, "PKGBUILD has no top-level depends=(...) array"
+    assert func is not None, f"PKGBUILD has no package_{package}()"
+    match = re.search(
+        r"^\s*depends=\((?P<body>.*?)\)\s*$",
+        func.group("body"),
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"package_{package}() has no depends=(...) array"
     body = match.group("body")
     # Strip shell-style comment lines that PKGBUILDs sometimes carry.
     body = re.sub(r"#[^\n]*", "", body)
-    return re.findall(r"'([^']+)'", body)
+    return re.findall(r"""['"]([^'"]+)['"]""", body)
 
 
 def test_pyproject_declares_colorama():
@@ -514,12 +521,46 @@ def test_pkgbuild_daemon_floor_is_the_daemon_minimum():
     """
     from ventulus.constants import DAEMON_MINIMUM_VERSION
 
-    deps = _parse_pkgbuild_depends(PKGBUILD.read_text(encoding="utf-8"))
-    daemon_deps = [d for d in deps if d.startswith("ventulusd")]
-    assert daemon_deps == [f"ventulusd>={DAEMON_MINIMUM_VERSION}"], (
-        f"packaging/PKGBUILD must depend on ventulusd>={DAEMON_MINIMUM_VERSION} "
-        f"(constants.DAEMON_MINIMUM_VERSION). Got: {daemon_deps!r}"
+    text = PKGBUILD.read_text(encoding="utf-8")
+    for package in ("ventulus-diag", "ventulus"):
+        deps = _parse_pkgbuild_depends(text, package)
+        daemon_deps = [d for d in deps if d.startswith("ventulusd")]
+        assert daemon_deps == [f"ventulusd>={DAEMON_MINIMUM_VERSION}"], (
+            f"packaging/PKGBUILD package_{package}() must depend on "
+            f"ventulusd>={DAEMON_MINIMUM_VERSION} (constants.DAEMON_MINIMUM_VERSION). "
+            f"Got: {daemon_deps!r}"
+        )
+
+
+def test_the_release_floor_check_reads_a_real_depends_array(tmp_path):
+    """release.yml's dependency-first check pulls the floor out of the PKGBUILD
+    with awk. Run that exact command: since the split its arrays are indented
+    inside package functions, and a pattern anchored at column 0 finds none."""
+    import subprocess
+
+    import yaml
+
+    from ventulus.constants import DAEMON_MINIMUM_VERSION
+
+    wf = yaml.safe_load((REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    run = next(
+        step["run"]
+        for job in wf["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("name") == "Require the daemon's latest Release to satisfy the PKGBUILD floor"
     )
+    extract = run[run.index('dep="$(') : run.index("|| dep=''")] + "|| dep=''\necho \"$dep\""
+    proc = subprocess.run(
+        ["bash", "-c", extract], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+    )
+    assert proc.stdout.strip() == f"ventulusd>={DAEMON_MINIMUM_VERSION}"
+
+
+def test_the_gui_package_needs_its_own_build_of_ventulus_diag():
+    deps = _parse_pkgbuild_depends(PKGBUILD.read_text(encoding="utf-8"), "ventulus")
+    assert "ventulus-diag=$pkgver-$pkgrel" in deps
+    cli = _parse_pkgbuild_depends(PKGBUILD.read_text(encoding="utf-8"), "ventulus-diag")
+    assert not {"pyside6", "python-pyqtgraph", "python-numpy"} & set(cli), cli
 
 
 def test_readme_pairing_states_the_daemon_minimum():

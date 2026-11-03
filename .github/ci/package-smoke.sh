@@ -1,21 +1,25 @@
 #!/bin/bash
-# package-smoke.sh <deb|rpm|tarball> <dir> <ventulusd>: install the GUI package
-# on a clean system of the distribution, as root, and check it works (DEC-499,
-# XD-4). ci.yml's `package-smoke` job runs it in each distribution's container;
-# it runs unchanged in a VM.
+# package-smoke.sh <deb|rpm|tarball> <dir> <ventulusd>: install the Ventulus
+# packages on a clean system of the distribution, as root, and check they work
+# (DEC-499, XD-4). ci.yml's `package-smoke` job runs it in each distribution's
+# container; it runs unchanged in a VM.
 #
-#   deb      <dir> holds ventulus_<version>-1_all.deb and -2_all.deb
-#   rpm      <dir> holds ventulus-<version>-1.fcN.noarch.rpm and -2 for this
-#            Fedora release N (builds for other releases may sit beside them)
+#   deb      <dir> holds ventulus_<version>-1_all.deb, ventulus-diag_<version>-1_all.deb
+#            and their -2 builds
+#   rpm      <dir> holds ventulus-<version>-1.fcN.noarch.rpm, ventulus-diag-<version>-1.fcN.noarch.rpm
+#            and their -2 builds for this Fedora release N (builds for other
+#            releases may sit beside them)
 #   tarball  <dir> holds ventulus-<version>-noarch.tar.gz
 #   ventulusd  the daemon binary from ventulusd's latest Release
 #
-# What it checks: the distribution provides every dependency the package
+# What it checks: first ventulus-diag alone, as on a machine with no desktop
+# (DEC-503): its dependencies install and bring no Qt, and the CLI runs. Then
+# the GUI beside it: the distribution provides every dependency each package
 # declares (installed without recommends, so nothing else can stand in for a
-# missing one); the program, desktop entry, icon, man page and version metadata
-# are where they belong; the GUI starts offscreen with no daemon, and again
-# with the released daemon, which it connects to; an upgrade works; removal
-# leaves nothing behind.
+# missing one); the program, desktop entry, icon, man pages and version
+# metadata are where they belong; the GUI starts offscreen with no daemon, and
+# again with the released daemon, which it and the CLI connect to; an upgrade
+# of both works; removal leaves nothing behind.
 #
 # The package depends on ventulusd, which no distribution carries. Here the
 # daemon is the released binary, run as an unprivileged user with its socket
@@ -94,28 +98,33 @@ rpm_names() {
     sed -E 's/^\(//; s/ .*//' | grep -v -e '^rpmlib(' -e '^ventulusd$' | sort -u
 }
 
+# package_file <rev> [ventulus|ventulus-diag]
 package_file() {
+    local name=${2:-ventulus}
     case "$format" in
-        deb) echo "$dir/ventulus_${version}-${1}_all.deb" ;;
+        deb) echo "$dir/${name}_${version}-${1}_all.deb" ;;
         # The build for this Fedora release: <dir> holds one per release served.
-        rpm) echo "$dir/ventulus-${version}-${1}.fc$(rpm -E %fedora).noarch.rpm" ;;
+        rpm) echo "$dir/${name}-${version}-${1}.fc$(rpm -E %fedora).noarch.rpm" ;;
     esac
 }
 
-# Once, before the package: apt refuses to install anything while dpkg holds a
-# package whose dependency was skipped.
+# install_dependencies <package>: what <package> declares, before it is
+# installed: apt refuses to install anything while dpkg holds a package whose
+# dependency was skipped. ventulus-diag stands for itself: it is installed first.
 install_dependencies() {
     local pkg
-    pkg=$(package_file 1)
+    pkg=$(package_file 1 "$1")
     case "$format" in
         deb)
             # shellcheck disable=SC2046
-            apt-get install -y -q --no-install-recommends $(dpkg-deb -f "$pkg" Depends | deb_names)
+            apt-get install -y -q --no-install-recommends \
+                $(dpkg-deb -f "$pkg" Depends | deb_names | grep -vx ventulus-diag)
             ;;
         rpm)
             # shellcheck disable=SC2046
-            dnf -y -q install --setopt=install_weak_deps=False $(rpm -qp --requires "$pkg" | rpm_names) &&
-                rpm_unmet_is_only_ventulusd "$pkg"
+            dnf -y -q install --setopt=install_weak_deps=False \
+                $(rpm -qp --requires "$pkg" | rpm_names | grep -vx ventulus-diag) &&
+                rpm_unmet_is_only_ventulusd "$1"
             ;;
     esac
 }
@@ -123,37 +132,65 @@ install_dependencies() {
 # --nosignature: the package is this run's own unsigned build. rpm 6.1
 # (Fedora 45) refuses an unsigned package by default (%_pkgverify_level all);
 # dnf, which users install with, warns and installs it.
+# install_rev <rev> [cli]: ventulus-diag alone with `cli`, else both packages.
 install_rev() {
+    local -a files=("$(package_file "$1" ventulus-diag)")
+    [ "${2:-}" = cli ] || files+=("$(package_file "$1")")
     case "$format" in
-        deb) dpkg --ignore-depends=ventulusd -i "$(package_file "$1")" ;;
-        rpm) rpm -U --nodeps --nosignature "$(package_file "$1")" ;;
-        tarball) "$tardir/install.sh" ;;
+        # --auto-deconfigure: what apt does when the new ventulus-diag's Breaks
+        # names the installed, older GUI, which is upgraded in the same run.
+        deb) dpkg --ignore-depends=ventulusd --auto-deconfigure -i "${files[@]}" ;;
+        rpm) rpm -U --nodeps --nosignature "${files[@]}" ;;
+        tarball) "$tardir/install.sh" ${2:+--cli-only} ;;
     esac
 }
 
-# rpm itself, with the dependencies above installed, must miss nothing but the daemon.
+# rpm itself, with the dependencies above installed, must miss nothing but the
+# daemon. The GUI is tested with ventulus-diag, which it needs, beside it.
 rpm_unmet_is_only_ventulusd() {
     local unmet
-    unmet=$(rpm -U --test --nosignature "$1" 2>&1 | grep 'is needed by' | sed 's/ is needed by.*//; s/^[[:space:]]*//')
+    local -a files=("$(package_file 1 ventulus-diag)")
+    [ "$1" = ventulus-diag ] || files+=("$(package_file 1)")
+    unmet=$(rpm -U --test --nosignature "${files[@]}" 2>&1 | grep 'is needed by' |
+        sed 's/ is needed by.*//; s/^[[:space:]]*//' | sort -u)
     [ "$unmet" = "ventulusd >= $floor" ] || { echo "unmet: $unmet"; return 1; }
 }
 
 installed_version() {
     case "$format" in
-        deb) dpkg-query -W -f '${Version}' ventulus 2> /dev/null ;;
-        rpm) rpm -q --qf '%{VERSION}-%{RELEASE}' ventulus 2> /dev/null ;;
+        deb) dpkg-query -W -f '${Version}' "$1" 2> /dev/null ;;
+        rpm) rpm -q --qf '%{VERSION}-%{RELEASE}' "$1" 2> /dev/null ;;
         tarball) test -e /usr/local/lib/ventulus/tarball-manifest && echo tarball ;;
     esac
 }
 
-revision_is() { [[ "$(installed_version)" == "$version-$1"* ]]; }
+revision_is() { # revision_is <rev> <package>...
+    local rev=$1 name
+    shift
+    for name in "$@"; do
+        [[ "$(installed_version "$name")" == "$version-$rev"* ]] || return 1
+    done
+}
 
 declares_daemon_floor() {
+    local name
+    for name in ventulus-diag ventulus; do
+        case "$format" in
+            deb) dpkg-deb -f "$(package_file 1 "$name")" Depends | tr ',' '\n' |
+                grep -qx " *ventulusd (>= $floor)" ;;
+            rpm) rpm -qp --requires "$(package_file 1 "$name")" |
+                grep -qx "ventulusd >= $floor" ;;
+        esac || { echo "$name does not declare ventulusd >= $floor"; return 1; }
+    done
+}
+
+# The GUI needs the ventulus-diag of its own build.
+gui_needs_its_library() {
     case "$format" in
-        deb) dpkg-deb -f "$dir/ventulus_${version}-1_all.deb" Depends | tr ',' '\n' |
-            grep -qx " *ventulusd (>= $floor)" ;;
+        deb) dpkg-deb -f "$(package_file 1)" Depends | tr ',' '\n' |
+            grep -qx " *ventulus-diag (= $version-1)" ;;
         rpm) rpm -qp --requires "$(package_file 1)" |
-            grep -qx "ventulusd >= $floor" ;;
+            grep -qx "ventulus-diag = $version-1.fc$(rpm -E %fedora)" ;;
     esac
 }
 
@@ -172,10 +209,38 @@ gui_python() {
 }
 
 # As the user's shell finds it; /bin is /usr/bin on Fedora.
-on_path() {
-    local found
-    found=$(as_user 'command -v ventulus')
-    [ "$(realpath "$found")" = "$prefix/bin/ventulus" ] || { echo "ventulus is $found"; return 1; }
+on_path() { # on_path [program]
+    local program=${1:-ventulus} found
+    found=$(as_user "command -v $program")
+    [ "$(realpath "$found")" = "$prefix/bin/$program" ] || { echo "$program is $found"; return 1; }
+}
+
+# ventulus-diag as the user runs it; its status is the second line of output.
+cli_reports_version() {
+    local got
+    got=$(as_user "cd $work && ventulus-diag --version")
+    [ "$got" = "ventulus-diag $version" ] || { echo "ventulus-diag --version: $got"; return 1; }
+}
+
+# With no daemon: exit 3 (unreachable), and its message names no privilege fix.
+cli_without_a_daemon() {
+    local out status
+    out=$(as_user "cd $work && ventulus-diag --socket $work/absent.sock status" 2>&1)
+    status=$?
+    echo "$out"
+    [ "$status" = 3 ] && ! grep -qiE 'sudo|chmod' <<< "$out"
+}
+
+cli_reads_the_daemon() {
+    local out
+    out=$(as_user "cd $work && ventulus-diag --socket $work/ventulus.sock status") || { echo "$out"; return 1; }
+    echo "$out"
+    grep -q '^ventulusd ' <<< "$out"
+}
+
+# DEC-503: a machine with ventulus-diag alone has no Qt.
+no_qt_installed() {
+    ! as_user "cd $work && python3 -I -c 'import PySide6'" 2> /dev/null
 }
 
 reports_version() {
@@ -268,8 +333,8 @@ EOF
 
 all_files() {
     case "$format" in
-        deb) dpkg -L ventulus | while read -r f; do [ -f "$f" ] && echo "$f"; done ;;
-        rpm) rpm -ql ventulus | while read -r f; do [ -f "$f" ] && echo "$f"; done ;;
+        deb) dpkg -L ventulus ventulus-diag | while read -r f; do [ -f "$f" ] && echo "$f"; done ;;
+        rpm) rpm -ql ventulus ventulus-diag | while read -r f; do [ -f "$f" ] && echo "$f"; done ;;
         tarball) sed 's/^[^ ]* [^ ]* //' /usr/local/lib/ventulus/tarball-manifest ;;
     esac
 }
@@ -278,31 +343,62 @@ removed_cleanly() {
     local left
     left=$(while read -r f; do [ -e "$f" ] && echo "$f"; done < "$work/files")
     for d in /usr/share/ventulus /usr/local/lib/ventulus /usr/share/doc/ventulus \
-        /usr/local/share/doc/ventulus /usr/lib/python3*/site-packages/ventulus; do
+        /usr/share/doc/ventulus-diag /usr/local/share/doc/ventulus \
+        /usr/lib/python3*/site-packages/ventulus; do
         [ -e "$d" ] && left="$left $d"
     done
     [ -z "$left" ] || { echo "left behind: $left"; return 1; }
 }
 
-if [ "$format" = tarball ]; then
-    tar -C "$work" -xzf "$dir/ventulus-$version-noarch.tar.gz"
-    tardir=$work/ventulus-$version-noarch
-    check "the tarball refuses to install before its prerequisites" \
-        bash -c "! '$tardir/install.sh' && [ ! -e /usr/local/bin/ventulus ]"
-    deps=$("$tardir/install.sh" --deps)
+# install_prerequisites [--cli-only]: what `install.sh --deps` names, as a user would.
+install_prerequisites() {
+    local deps
+    deps=$("$tardir/install.sh" --deps "$@")
     echo "prerequisites: $deps"
     # One package name per word.
     # shellcheck disable=SC2086
     case "$deps" in
-        "sudo apt install "*) check "the prerequisites it names install" \
-            apt-get install -y -q --no-install-recommends ${deps#sudo apt install } ;;
-        "sudo dnf install "*) check "the prerequisites it names install" \
-            dnf -y -q install --setopt=install_weak_deps=False ${deps#sudo dnf install } ;;
-        *) fail "install.sh --deps names no command for $ID" ;;
+        "sudo apt install "*) apt-get install -y -q --no-install-recommends ${deps#sudo apt install } ;;
+        "sudo dnf install "*) dnf -y -q install --setopt=install_weak_deps=False ${deps#sudo dnf install } ;;
+        *) echo "install.sh --deps names no command for $ID"; return 1 ;;
     esac
+}
+
+# ── ventulus-diag alone, as on a machine with no desktop ──
+if [ "$format" = tarball ]; then
+    tar -C "$work" -xzf "$dir/ventulus-$version-noarch.tar.gz"
+    tardir=$work/ventulus-$version-noarch
+    check "the tarball refuses to install before its prerequisites" \
+        bash -c "! '$tardir/install.sh' --cli-only && [ ! -e /usr/local/bin/ventulus-diag ]"
+    check "the prerequisites it names for ventulus-diag install" install_prerequisites --cli-only
 else
-    check "declares ventulusd >= $floor" declares_daemon_floor
-    check "the distribution provides every other dependency" install_dependencies
+    check "both packages declare ventulusd >= $floor" declares_daemon_floor
+    check "the GUI needs the ventulus-diag of its own build" gui_needs_its_library
+    check "the distribution provides ventulus-diag's other dependencies" \
+        install_dependencies ventulus-diag
+fi
+check "install ventulus-diag alone" install_rev 1 cli
+check "ventulus-diag is on the PATH" on_path ventulus-diag
+check "ventulus-diag reports version $version" cli_reports_version
+check "ventulus-diag answers 3 with no daemon, and suggests no privilege change" cli_without_a_daemon
+check "the ventulus-diag man page is installed" \
+    test -s "$prefix/share/man/man1/ventulus-diag.1.gz" -o -s "$prefix/share/man/man1/ventulus-diag.1"
+check "ventulus-diag alone brings no Qt" no_qt_installed
+
+# ── the GUI beside it ──
+# apt (and dnf) install nothing while a package whose dependency was skipped is
+# installed, so ventulus-diag goes before the GUI's dependencies, and both
+# packages are installed together after them. The tarball is installed over.
+case "$format" in
+    deb) check "remove ventulus-diag again" dpkg -r ventulus-diag ;;
+    rpm) check "remove ventulus-diag again" rpm -e ventulus-diag ;;
+esac
+if [ "$format" = tarball ]; then
+    check "the full install refuses before the GUI's prerequisites" \
+        bash -c "! '$tardir/install.sh' && [ ! -e /usr/local/bin/ventulus ]"
+    check "the prerequisites it names install" install_prerequisites
+else
+    check "the distribution provides every other dependency of the GUI" install_dependencies ventulus
 fi
 
 check "install revision 1" install_rev 1
@@ -316,14 +412,15 @@ check "starts offscreen with no daemon" gui_runs_until "Polling started" "$work/
 
 if check "the released ventulusd ($("$daemon" --version 2>&1)) serves a socket" start_daemon; then
     check "connects to the released daemon" gui_runs_until "Daemon connection established" "$work/ventulus.sock" daemon
+    check "ventulus-diag reads the released daemon" cli_reads_the_daemon
     kill "$daemon_pid" 2> /dev/null
     wait "$daemon_pid" 2> /dev/null
 fi
 
 case "$format" in
     deb | rpm)
-        check "upgrade to revision 2" install_rev 2
-        check "revision 2 is installed" revision_is 2
+        check "upgrade both to revision 2" install_rev 2
+        check "revision 2 of both is installed" revision_is 2 ventulus ventulus-diag
         ;;
     tarball) check "install over the existing install (the upgrade path)" install_rev 1 ;;
 esac
@@ -331,8 +428,8 @@ all_files > "$work/files"
 check "the GUI still starts after the upgrade" gui_runs_until "Polling started" "$work/absent.sock" upgraded
 
 case "$format" in
-    deb) check "removal" dpkg -r ventulus ;;
-    rpm) check "removal" rpm -e ventulus ;;
+    deb) check "removal" dpkg -r ventulus ventulus-diag ;;
+    rpm) check "removal" rpm -e ventulus ventulus-diag ;;
     tarball) check "removal" /usr/local/lib/ventulus/uninstall ;;
 esac
 check "removal leaves no file behind" removed_cleanly

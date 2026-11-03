@@ -8,14 +8,18 @@
 override_dh_auto_configure override_dh_auto_build override_dh_auto_test override_dh_auto_clean:
 
 override_dh_auto_install:
-	cd "$(VENTULUS_REPO)" && packaging/linux/stage.sh deb \
+	cd "$(VENTULUS_REPO)" && packaging/linux/stage.sh deb cli \
+		"$(VENTULUS_WHEEL)" "$(VENTULUS_MAN)" "$(CURDIR)/debian/ventulus-diag"
+	cd "$(VENTULUS_REPO)" && packaging/linux/stage.sh deb gui \
 		"$(VENTULUS_WHEEL)" "$(VENTULUS_MAN)" "$(CURDIR)/debian/ventulus"
 
-# The modules live in a private directory: dh_python3 byte-compiles them on
-# install and removes the bytecode on removal. Dependencies are the ones
-# debian/control names, not guesses from the wheel's metadata.
+# The modules live in ventulus-diag's private directory: dh_python3 byte-compiles
+# them on install and removes the bytecode on removal. Dependencies are the ones
+# debian/control names, not guesses from the wheel's metadata. ventulus holds
+# only its launcher, whose interpreter dh_python3 reads for python3:Depends.
 override_dh_python3:
-	dh_python3 --no-guessing-deps /usr/share/ventulus
+	dh_python3 -p ventulus-diag --no-guessing-deps /usr/share/ventulus
+	dh_python3 -p ventulus --no-guessing-deps
 
 # The documentation stays at the paths the manual and the man page name.
 override_dh_compress:

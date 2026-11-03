@@ -99,6 +99,12 @@ class Probe:
     etc: Path = Path("/etc")
 
 
+#: Who may own :func:`gui_module_file`. Since DEC-503 the library is the
+#: ventulus-diag package's and the GUI package depends on it at the same
+#: version; before, it was the ventulus package's.
+GUI_LIBRARY_PACKAGES = frozenset({"ventulus", "ventulus-diag"})
+
+
 def gui_module_file() -> Path:
     """A file of the running GUI that every package format installs."""
     import ventulus
@@ -115,7 +121,7 @@ def gui_ownership(module_file: Path, *, app_version: str, probe: Probe | None = 
     if app_version == "dev":
         return Ownership(InstallMethod.SOURCE)
     probe = probe or Probe()
-    found = _owner(module_file, "ventulus", probe.gui_tarball_manifest, probe)
+    found = _owner(module_file, GUI_LIBRARY_PACKAGES, probe.gui_tarball_manifest, probe)
     # Installed, but by none of the four formats: pip, a virtual environment.
     return found if found.method is not InstallMethod.UNKNOWN else Ownership(InstallMethod.SOURCE)
 
@@ -128,12 +134,12 @@ def daemon_ownership(binary: Path = DAEMON_BINARY, *, probe: Probe | None = None
             return Ownership(InstallMethod.UNKNOWN)
     except OSError:
         return Ownership(InstallMethod.UNKNOWN)
-    found = _owner(binary, "ventulusd", probe.daemon_tarball_manifest, probe)
+    found = _owner(binary, frozenset({"ventulusd"}), probe.daemon_tarball_manifest, probe)
     # A file at the packages' path that nothing owns is a hand-copied build.
     return found if found.method is not InstallMethod.UNKNOWN else Ownership(InstallMethod.SOURCE)
 
 
-def _owner(path: Path, package: str, tarball_manifest: Path, probe: Probe) -> Ownership:
+def _owner(path: Path, packages: frozenset[str], tarball_manifest: Path, probe: Probe) -> Ownership:
     """A package manager's claim first: a tarball install list left behind when a
     package replaced the tarball install must not outrank the real owner."""
     queries: tuple[tuple[InstallMethod, str, list[str]], ...] = (
@@ -150,22 +156,23 @@ def _owner(path: Path, package: str, tarball_manifest: Path, probe: Probe) -> Ow
             continue
         if code != 0:
             continue
-        if _owned_by(method, out, package):
+        if _owned_by(method, out, packages):
             return Ownership(method, _repository_configured(method, probe))
     if _tarball_lists(tarball_manifest, path):
         return Ownership(InstallMethod.TARBALL)
     return Ownership(InstallMethod.UNKNOWN)
 
 
-def _owned_by(method: InstallMethod, out: str, package: str) -> bool:
+def _owned_by(method: InstallMethod, out: str, packages: frozenset[str]) -> bool:
+    """One owner, and one of *packages*."""
     lines = [line.strip() for line in out.splitlines() if line.strip()]
     if method is InstallMethod.DEB:
-        # "ventulus: /usr/share/ventulus/ventulus/__init__.py"; a diversion
+        # "ventulus-diag: /usr/share/ventulus/ventulus/__init__.py"; a diversion
         # line names two packages and is not ownership.
         owners = {line.split(":", 1)[0].strip() for line in lines if ": " in line}
-        return owners == {package}
+        return len(owners) == 1 and owners <= packages
     # pacman -Qqo and rpm -qf print the package name alone.
-    return lines == [package]
+    return len(lines) == 1 and lines[0] in packages
 
 
 def _tarball_lists(manifest: Path, path: Path) -> bool:
