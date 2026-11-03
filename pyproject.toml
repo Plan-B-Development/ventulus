@@ -55,6 +55,8 @@ dev = [
 
 [project.scripts]
 ventulus = "ventulus.main:main"
+# DEC-503: the diagnostic CLI. Qt-free: it imports nothing from ventulus.ui.
+ventulus-diag = "ventulus.diag.cli:main"
 
 [tool.ruff]
 target-version = "py312"

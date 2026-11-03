@@ -1,0 +1,43 @@
+#compdef ventulus-diag
+
+_ventulus_diag() {
+    local -a commands
+    commands=(
+        'status:daemon, thermal state and any running test'
+        'headers:motherboard headers and the tests each offers'
+        'cancel:cancel a running characterisation, discovery or stall probe'
+        'preflight:the daemon'"'"'s safety verdict for one test'
+        'report:run, list, show, export or compare PWM Test Reports'
+        'characterise:sweep one header'"'"'s PWM response (changes fan speeds)'
+        'discover:find which tach follows one header (changes fan speeds)'
+        'validation:AIO validation, lifecycle and thermal sessions'
+    )
+    _arguments -C \
+        '--socket=[Daemon socket path]:socket path:_files' \
+        '--version[Print the version]' \
+        '(-h --help)'{-h,--help}'[Show help]' \
+        '1:command:->command' \
+        '*::arg:->args'
+    case $state in
+        command) _describe 'command' commands ;;
+        args)
+            case $words[1] in
+                report) _arguments '1:action:(run list show export compare)' \
+                    '*--header=[header id]:id:' '*--test=[test]:test:(verify pairing sweep)' \
+                    '*--stall-probe=[header id]:id:' '*--allow-fan-stop=[header id]:id:' \
+                    '--snapshot-only' '--notes=[setup facts]:file:_files' '--dry-run' \
+                    '--yes-change-fan-speeds' '--format=[format]:format:(markdown html json csv)' \
+                    '(-o --output)'{-o,--output}'=[output]:path:_files' ;;
+                preflight) _arguments '1:header id:' '2:test:(verify pairing sweep probe)' ;;
+                characterise|discover) _arguments '1:header id:' '--yes-change-fan-speeds' ;;
+                validation) _arguments '1:action:(devices start status stop cancel marker measure list show export)' \
+                    '--device=[cooling device id]:id:' '--kind=[kind]:kind:(validation lifecycle thermal)' \
+                    '*--diagnostic=[diagnostic]:diagnostic:(verify characterization behaviour control-path)' \
+                    '*--sweep-member=[member id]:id:' '*--meta=[KEY=VALUE]:meta:' '--auto-stop' '--detach' \
+                    '--yes-change-fan-speeds' '--format=[format]:format:(json csv)' \
+                    '(-o --output)'{-o,--output}'=[output]:path:_files' ;;
+            esac ;;
+    esac
+}
+
+_ventulus_diag "$@"

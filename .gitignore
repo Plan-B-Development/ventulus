@@ -34,7 +34,8 @@ DECISIONS.md
 DECISIONS_OPEN_ITEMS.md
 DECISIONS_OPEN_ITEMS_ARCHIVE.md
 .claude/
-diag/
+# Anchored: the source package src/ventulus/diag/ (ventulus-diag, DEC-503) is tracked.
+/diag/
 scripts/
 docs/17_Claude_Kickoff_Prompt.md
 # Internal investigation / planning artifacts produced by /investigate-bug

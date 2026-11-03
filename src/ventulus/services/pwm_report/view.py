@@ -391,19 +391,26 @@ def _environment_rows(env: Mapping) -> list[tuple[str, str]]:
     gui = _m(env.get("gui"))
     daemon = _m(env.get("daemon"))
     board = _m(env.get("board"))
+    # DEC-503: a report run by `ventulus-diag` names it; one the GUI ran has no
+    # `client` fact and reads as before.
+    client = str(gui.get("client") or "")
     rows = [
-        ("Ventulus GUI", _text(gui.get("gui_version"))),
+        (
+            f"Ventulus ({client})" if client else "Ventulus GUI",
+            _text(gui.get("gui_version")),
+        ),
         ("Ventulus daemon", _text(daemon.get("daemon_version"))),
         ("Daemon API", _text(daemon.get("api_version"))),
         ("Kernel (as the daemon read it)", _text(daemon.get("kernel_release"))),
-        ("Kernel (as the GUI read it)", _text(gui.get("kernel"))),
+        (f"Kernel (as {client or 'the GUI'} read it)", _text(gui.get("kernel"))),
         ("Board", " ".join(str(v) for v in (board.get("vendor"), board.get("name")) if v) or "—"),
         ("BIOS version", _text(board.get("bios_version"))),
         ("BIOS date", _text(board.get("bios_date"))),
         ("CPU vendor", _text(env.get("cpu_vendor"))),
         ("Python", _text(gui.get("python"))),
-        ("Qt", _text(gui.get("qt"))),
     ]
+    if not client:
+        rows.append(("Qt", _text(gui.get("qt"))))
     chips = [str(c.get("chip_name")) for c in env.get("chips") or [] if isinstance(c, Mapping)]
     rows.append(("Sensor chips", ", ".join(chips) or UNKNOWN_TEXT))
     for m in env.get("kernel_modules") or []:

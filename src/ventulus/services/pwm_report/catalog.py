@@ -418,9 +418,10 @@ def consent_safety_text(capabilities: object | None) -> str:
         hot = "if a temperature passes the daemon's diagnostic limit"
     return (
         "The daemon performs every test and puts every header back when a test "
-        "ends — even if Ventulus is closed. A pump-protected header is never "
-        "driven below 30 %. If the daemon's thermal protection becomes active, the "
-        "run stops and the tests after it are listed as not tested. A test also "
+        "ends — even if the program that started it is closed. A pump-protected "
+        "header is never driven below 30 %. If the daemon's thermal protection "
+        "becomes active, the run stops and the tests after it are listed as not "
+        "tested. A test also "
         f"stops {hot} or if temperature readings go stale, and the daemon refuses "
         "later tests while that lasts. You can cancel at any time."
     )

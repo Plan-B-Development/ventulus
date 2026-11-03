@@ -28,10 +28,7 @@ from ventulus.api.models import (
     SensorReading,
     at_least,
 )
-from ventulus.knowledge.hwmon_label_resolver import (
-    hwmon_header_label_source,
-    resolve_hwmon_header_label,
-)
+from ventulus.knowledge.hwmon_label_resolver import hwmon_header_label_source
 from ventulus.knowledge.sensor_knowledge import (
     SensorClassification,
     classify_reading,
@@ -40,6 +37,7 @@ from ventulus.knowledge.sensor_knowledge import (
 from ventulus.services.alerts import AlertCondition, AlertLedger
 from ventulus.services.cooling_watch import advisory_alert, pump_stall_alert, thermal_alert
 from ventulus.services.daemon_features import daemon_supports
+from ventulus.services.fan_names import fallback_fan_name
 from ventulus.services.openfan_firmware_view import (
     firmware_update_alert,
     silent_board_alert,
@@ -65,11 +63,6 @@ AIO_SUFFIX = " (AIO)"
 # persisted to app_settings.json and portable via Settings export, so an unbounded
 # string would bloat the settings file and break row layout on every surface.
 MAX_FAN_ALIAS_LEN = 64
-
-# DEC-227: id prefix of an OpenFan channel fan ("openfan:ch00"). Matched strictly —
-# anything after it that is not a plain number falls through to the raw id rather
-# than inventing a channel number.
-_OPENFAN_CH_PREFIX = "openfan:ch"
 
 
 def _stall_detail(fan: FanReading) -> str:
@@ -587,49 +580,13 @@ class AppState(QObject):
         compares the user's typed text against this to tell "they renamed it"
         from "they pressed Enter on the name already shown".
         """
-        if fan_id.startswith("amd_gpu:"):
-            if self.capabilities and self.capabilities.amd_gpu.present:
-                return f"{self.capabilities.amd_gpu.display_label} Fan"
-            return "D-GPU Fan"
-        if fan_id.startswith("intel_gpu:"):
-            if self.capabilities and self.capabilities.intel_gpu.present:
-                return f"{self.capabilities.intel_gpu.display_label} Fan"
-            return "Intel D-GPU Fan"
-        if fan_id.startswith("nvidia_gpu:"):
-            if self.capabilities and self.capabilities.nvidia_gpu.present:
-                return f"{self.capabilities.nvidia_gpu.display_label} Fan"
-            return "NVIDIA D-GPU Fan"
-        # DEC-227: an OpenFan channel has no label source at all — the daemon
-        # reports only a channel count, and no hwmon header carries an
-        # "openfan:" id — so without this every unnamed channel rendered as its
-        # raw daemon id. Presentation only: this is never written into
-        # fan_aliases, so it cannot make filter_displayable_fans treat an
-        # unnamed 0-RPM channel as one the user asked to keep visible.
-        if fan_id.startswith(_OPENFAN_CH_PREFIX):
-            channel = fan_id[len(_OPENFAN_CH_PREFIX) :]
-            # isdecimal, not isdigit: isdigit accepts superscripts and other
-            # Unicode digit forms that int() then rejects with a ValueError, on a
-            # path called once per fan per poll. The daemon only ever mints ASCII
-            # channel ids, so this is belt-and-braces rather than a live crash.
-            if channel.isdecimal():
-                return f"OpenFan CH{int(channel)}"
-        for h in self.hwmon_headers:
-            if h.id == fan_id:
-                # DEC-229: the resolver owns tiers 2-5, including whether the
-                # daemon's label is real or a synthesised "pwmN" placeholder.
-                # A short-circuit on `h.label` here would defeat that — the
-                # placeholder is non-empty, so it used to win over the board
-                # table that knew the header was CPU_FAN.
-                return resolve_hwmon_header_label(
-                    sysfs_label=h.label,
-                    chip_name=h.chip_name,
-                    sysfs_chip_name=h.sysfs_chip_name,
-                    pwm_index=h.pwm_index,
-                    board_label=h.board_label,
-                    board_vendor=self.board_info.vendor,
-                    board_name=self.board_info.name,
-                )
-        return fan_id
+        return fallback_fan_name(
+            fan_id,
+            capabilities=self.capabilities,
+            headers=self.hwmon_headers,
+            board_vendor=self.board_info.vendor,
+            board_name=self.board_info.name,
+        )
 
     def header_name_source(self, header: HwmonHeader) -> str:
         """Where :meth:`fan_fallback_name` got this header's name — a

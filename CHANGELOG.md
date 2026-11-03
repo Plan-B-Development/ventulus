@@ -5,6 +5,28 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Added
+
+- **`ventulus-diag`, a command-line tool for the tests that drive fans on purpose.** It runs
+  the PWM Test Report (with its stall/restart probe), PWM characterisation, control-path
+  discovery and validation sessions, and lists, prints, exports and compares saved reports
+  without a daemon. It needs no desktop. Before anything changes a fan speed it prints what
+  it will touch and asks you to type `yes`, or to pass `--yes-change-fan-speeds` when it is
+  not run on a terminal. Without either it starts nothing. The stall/restart probe also
+  needs `stop` typed, or `--allow-fan-stop`, for each header whose fan it may stop. Ctrl-C
+  asks the daemon to cancel the running test and waits until the header is put back; a
+  second Ctrl-C makes sure a cancel was sent and leaves at once; `ventulus-diag cancel` stops a
+  test that was left running. The daemon still performs and undoes every test, and puts
+  the header back even if the tool is killed. It reads and saves reports in the same
+  folder as the GUI, so earlier reports open in it. See `man ventulus-diag`. The GUI still
+  runs these tests in this version.
+
+### Changed
+
+- **A report's safety text no longer says "even if Ventulus is closed".** It now says "even
+  if the program that started it is closed", since the CLI can start a run too. A report run
+  by `ventulus-diag` names it in its environment section instead of "Ventulus GUI".
+
 ## [5.5.0] — 2026-10-26
 
 Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.4.0 is the current daemon
