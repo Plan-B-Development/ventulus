@@ -196,9 +196,15 @@ def headers_cmd(console: Console, daemon: Daemon) -> int:
         name_of=daemon.name_of,
         profile_member_ids=daemon.profile_member_ids(),
     )
-    for ch in channels:
-        if not ch.is_hwmon:
-            continue
+    hwmon = [ch for ch in channels if ch.is_hwmon]
+    if not hwmon:
+        console.out(
+            "The daemon reports no motherboard fan headers. If your board has some, the "
+            "driver for its fan chip may not be loaded: see Drivers and Other Fan Software "
+            "in the manual's Administration section."
+        )
+        return EXIT_OK
+    for ch in hwmon:
         rpm = "—" if ch.rpm is None else str(ch.rpm)
         # `effective_min_pwm_pct` is the header-level floor (device policy, pump
         # backstop). The CPU fan floor is a profile-level rule the field does not
@@ -383,7 +389,7 @@ def main(
         console.err(e.message)
         return e.code
     except (DaemonUnavailable, DaemonTimeout) as e:
-        console.err(unreachable_message(args.socket, e.message))
+        console.err(unreachable_message(args.socket, e))
         return EXIT_UNAVAILABLE
     except DaemonError as e:
         console.err(f"The daemon answered with an error: {e.message}")

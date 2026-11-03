@@ -696,6 +696,57 @@ def test_an_unreachable_daemon_is_exit_3_with_no_permission_advice():
         assert unsafe not in message
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root opens a socket whatever its mode")
+def test_a_socket_this_user_may_not_open_is_named_as_such_not_as_a_stopped_daemon(tmp_path):
+    """The daemon is running but its socket refuses this user (P6: a socket set
+    to 0600). "Check that it is running" sent the user the wrong way. A real
+    socket and the real client, so the PermissionError arrives through httpx's
+    own exception chain, as it does in the field."""
+    import socket as socketlib
+
+    path = tmp_path / "ventulus.sock"
+    server = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
+    server.bind(str(path))
+    server.listen(1)
+    path.chmod(0)
+    try:
+        with pytest.raises(DiagError) as exc:
+            connect(str(path), settings=GuiSettings())
+    finally:
+        server.close()
+    message = exc.value.message
+    assert exc.value.code == EXIT_UNAVAILABLE
+    assert "may not open" in message and str(path) in message
+    assert "Check that it is running" not in message
+    assert "systemctl restart ventulusd" in message, "the daemon sets the mode again at start"
+    for unsafe in ("chmod", "usermod", "group"):
+        assert unsafe not in message
+
+
+def test_headers_on_a_machine_with_none_says_so_and_where_to_look():
+    client = ReadOnlyClient()
+    client._headers = parse_hwmon_headers({"headers": []})
+    client._fans = parse_fans({"fans": []})
+    daemon = make_daemon(client)
+    daemon.headers = []
+    c, out, _ = console()
+    assert cli.headers_cmd(c, daemon) == EXIT_OK
+    text = out.getvalue()
+    assert "no motherboard fan headers" in text.lower()
+    assert "Drivers and Other Fan Software" in text
+
+
+def test_no_cooling_device_names_a_way_that_works_without_the_app():
+    client = SimpleNamespace(
+        get_cooling_devices=lambda: parse_cooling_devices({"cooling_devices": []}),
+        close=lambda: None,
+    )
+    c, out, _ = console()
+    assert validation.devices_cmd(c, make_daemon(client)) == EXIT_OK
+    text = out.getvalue()
+    assert "Configure AIO" in text and "POST /config/cooling-device" in text
+
+
 def test_a_daemon_without_daemon_side_control_is_refused():
     client = SimpleNamespace(
         capabilities=lambda: parse_capabilities({"daemon_version": "1.9.0", "control": {}}),

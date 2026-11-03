@@ -122,7 +122,11 @@ def devices_cmd(console: Console, daemon: Daemon) -> int:
     daemon.require("validation_sessions")
     inventory = daemon.client.get_cooling_devices()
     if not inventory.cooling_devices:
-        console.out("No cooling devices are configured. Configure one in the Ventulus GUI first.")
+        console.out(
+            "No cooling devices are configured. Configure one with Configure AIO… on the "
+            "Ventulus app's Controls page or, on a machine without the app, with "
+            "POST /config/cooling-device (see the daemon's User Guide)."
+        )
         return EXIT_OK
     for dev in inventory.cooling_devices:
         pump = daemon.name_of(dev.pump_member) if dev.pump_member else "none"

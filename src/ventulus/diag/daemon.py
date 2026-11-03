@@ -23,10 +23,33 @@ from ventulus.services.fan_names import fallback_fan_name
 from ventulus.services.pwm_report.setup_facts import coerce_cooler_notes, coerce_hardware_notes
 
 
-def unreachable_message(socket_path: str, detail: str = "") -> str:
+def _permission_denied(error: BaseException | None) -> bool:
+    """Whether the connection failed because this user may not open the socket.
+    The client wraps the OSError (``DaemonUnavailable`` from httpx's own errors),
+    so the cause is found by walking the exception chain."""
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, PermissionError):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def unreachable_message(socket_path: str, error: BaseException | str = "") -> str:
     """Why the daemon could not be reached, and what to check — never a
-    permission change: the socket is open to every local user by design."""
+    permission change: the socket is open to every local user by design, so a
+    socket this user may not open has had its mode changed, and the daemon sets
+    it again when it starts."""
+    detail = error.message if isinstance(error, DaemonError) else str(error)
     tail = f" ({detail})" if detail else ""
+    if isinstance(error, BaseException) and _permission_denied(error):
+        return (
+            f"This user may not open the daemon's socket {socket_path}{tail}. ventulusd "
+            "makes it open to every local user when it starts, so its mode has been "
+            "changed since: restart the daemon (sudo systemctl restart ventulusd). "
+            "ventulus-diag never needs to run as root."
+        )
     return (
         f"The daemon is not reachable at {socket_path}{tail}. Check that it is running "
         "(systemctl status ventulusd) and that --socket matches its socket path."
@@ -176,7 +199,7 @@ def connect(
         caps = client.capabilities()
     except (DaemonUnavailable, DaemonTimeout) as e:
         client.close()
-        raise DiagError(EXIT_UNAVAILABLE, unreachable_message(socket_path, e.message)) from e
+        raise DiagError(EXIT_UNAVAILABLE, unreachable_message(socket_path, e)) from e
     except DaemonError as e:
         client.close()
         raise DiagError(EXIT_INCOMPATIBLE, f"The daemon refused /capabilities: {e.message}") from e
@@ -199,7 +222,7 @@ def connect(
         daemon.board = client.hardware_diagnostics().board
     except (DaemonUnavailable, DaemonTimeout) as e:
         client.close()
-        raise DiagError(EXIT_UNAVAILABLE, unreachable_message(socket_path, e.message)) from e
+        raise DiagError(EXIT_UNAVAILABLE, unreachable_message(socket_path, e)) from e
     except DaemonError:
         pass  # an older daemon without a route: names fall back further, nothing more
     return daemon
