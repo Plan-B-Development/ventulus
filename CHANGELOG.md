@@ -5,6 +5,15 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+## [6.0.0] — 2026-11-03
+
+Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.5.0 is the current daemon
+release, and names each test `ventulus-diag` starts in its journal.
+
+This is a major release: the GUI no longer runs the tests that drive fans for minutes. They
+moved to `ventulus-diag`, a new package that `ventulus` depends on, so an upgrade from the
+pacman, APT or DNF repository installs it (see **Changed** and **Removed** below).
+
 ### Added
 
 - **`ventulus-diag`, a command-line tool for the tests that drive fans on purpose.** It runs
