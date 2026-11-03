@@ -624,8 +624,9 @@ confidence.
 package ships `/etc/modules-load.d/ventulus.conf` to load the common ones, and
 the Hardware page's readiness checklist and Super-I/O section identify the chip
 without probing hardware. Treat `sensors-detect` as a last resort, and never run it
-after boot on a Gigabyte board, because it writes the Super-I/O unlock key and can latch the
-bridge in front of a second chip.
+on a Gigabyte board, because it writes the Super-I/O unlock key and can latch the
+bridge in front of a second chip
+([Drivers § About `sensors-detect`](../manual/admin/drivers.md#about-sensors-detect)).
 
 `sensors-detect` maintains its own chip ID database, updated independently
 of the kernel. New chips may be supported by the kernel driver before

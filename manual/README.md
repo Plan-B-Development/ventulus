@@ -6,11 +6,11 @@ It controls fans on an OpenFAN controller, on motherboard hwmon headers, and on 
 
 This manual covers every page, setting, and feature of the application.
 
-> **Before you change anything.** Ventulus changes how your fans and pump run, and that affects how your machine is cooled. Hardware support and firmware behaviour vary from one machine to the next. Review what Ventulus detected, and any warning it shows, before you let it control a fan; check temperatures and fan speeds after every change; and keep a way back: [Safety and Recovery](safety-and-recovery.md) says what happens when something goes wrong and how to undo each change. Neither Ventulus nor this manual can guarantee that your hardware is supported, or prevent damage caused by unsupported hardware, wrong configuration, third-party drivers, firmware behaviour or changes you make to your system. The software and this manual are provided **"as is", without warranty of any kind**, under the MIT License (see the LICENSE file shipped with the package), and you use the hardware-control features **at your own risk**.
+> **Before you change anything.** Ventulus changes how your fans and pump run, and that affects how your machine is cooled. Hardware support and firmware behaviour vary from one machine to the next. Review what Ventulus detected, and any warning it shows, before you let it control a fan; check temperatures and fan speeds after every change; and keep a way back: [Safety and Recovery](admin/safety-and-recovery.md) says what happens when something goes wrong and how to undo each change. Neither Ventulus nor this manual can guarantee that your hardware is supported, or prevent damage caused by unsupported hardware, wrong configuration, third-party drivers, firmware behaviour or changes you make to your system. The software and this manual are provided **"as is", without warranty of any kind**, under the MIT License (see the LICENSE file shipped with the package), and you use the hardware-control features **at your own risk**.
 
 ## Table of contents
 
-1. [Getting Started](getting-started.md): Installation, first launch, and connecting to the daemon
+1. [Getting Started](getting-started.md): What you need, a short install, first launch, and connecting to the daemon
 2. [Setup Checklist](setup-checklist.md): Ordered path from fresh install to verified fan control: sensors → readiness → drivers/BIOS → verify → first profile
    - [Migrating from Another Fan Program](migrating.md): Switching from fancontrol, CoolerControl, fan2go or another tool: what to keep, what to stop, and how to check that Ventulus has taken over
 3. [Dashboard](dashboard.md): Real-time overview of fans, sensors, and system health
@@ -22,10 +22,23 @@ This manual covers every page, setting, and feature of the application.
 8. [Fan Wizard](fan-wizard.md): Guided fan identification and labelling
 9. [Profiles and Curves Reference](profiles-and-curves.md): How profiles, fan roles, and curves work together
 10. [Hardware Troubleshooting](hardware-troubleshooting.md): From a symptom to its fix: the daemon unreachable, missing sensors, fans or headers, read-only headers, speeds that will not hold, fans at full speed, GPU fans
-11. [Safety and Recovery](safety-and-recovery.md): What happens when the app closes, the daemon stops or crashes, a sensor or device disappears; changes that need care; how to undo each change; and how to ask for help
-12. [Driver Setup](driver-setup.md): Beginner walkthrough for the out-of-tree motherboard fan drivers (DKMS), Secure Boot, the AMD GPU kernel parameter, verification, and rollback
-13. [Understanding Motherboard Fan Control (hwmon)](understanding-fan-control.md): Plain-English primer: what hwmon, sysfs, Super I/O, and PWM are, why drivers and BIOS settings matter, and what keeps your machine safe
-14. [OpenFAN Controller](openfan-controller.md): The OpenFAN USB fan controller: detection, serial access, channels, firmware updates, recovery, and troubleshooting
+11. [Driver Setup](driver-setup.md): Beginner walkthrough for the out-of-tree motherboard fan drivers (DKMS), Secure Boot, the AMD GPU kernel parameter, verification, and rollback
+12. [Understanding Motherboard Fan Control (hwmon)](understanding-fan-control.md): Plain-English primer: what hwmon, sysfs, Super I/O, and PWM are, why drivers and BIOS settings matter, and what keeps your machine safe
+13. [OpenFAN Controller](openfan-controller.md): The OpenFAN USB fan controller: detection, serial access, channels, firmware updates, recovery, and troubleshooting
+
+## Administration
+
+[Administration](admin/README.md) is the one place for installing, upgrading,
+running, securing and removing Ventulus, and for what to do when something goes
+wrong. Its index says which page owns each topic:
+
+- [Installing](admin/install.md) and [Upgrading](admin/upgrade.md), including a machine with no desktop and upgrading from Control-OFC
+- [The Service](admin/service.md): `ventulusd`, what starting and stopping do to your fans, where its settings live
+- [Permissions and Security](admin/security.md): who can do what, the open socket, device access, the opt-in features
+- [Drivers and Other Fan Software](admin/drivers.md): what the packages load, the Gigabyte guard, `sensors-detect`, programs that must not run beside Ventulus
+- [Diagnostic Command](admin/diagnostics-cli.md): running `ventulus-diag`'s tests safely
+- [Safety and Recovery](admin/safety-and-recovery.md): what happens when something goes wrong, changes that need care, and how to undo each change
+- [Logs and Bug Reports](admin/logs-and-bug-reports.md), [Known Limits](admin/known-limits.md) and [Uninstalling](admin/uninstall.md)
 
 ## Reference docs
 

@@ -370,8 +370,8 @@ the **Advanced (System State)** button in that section.
 **Cooling devices.** A pump and its radiator fans grouped by **Configure AIO…** on the
 Controls page appear here as one assembly: pump, radiator fans, control sensor, pump
 strategy, coolant readings and an overall status, with live RPM and PWM beside each
-member. Its buttons jump to the headers, characterise the pump, start a validation
-session, edit the configuration, or **Forget Device**, which removes only the
+member. Its buttons jump to the headers (**View Headers**), edit the configuration
+(**Edit Configuration**), or **Forget Device**, which removes only the
 *grouping*: your headers, their roles and the pump floor are unaffected, and no fan
 changes speed.
 

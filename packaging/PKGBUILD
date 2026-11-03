@@ -132,9 +132,9 @@ package_ventulus() {
     # so the directory needs to actually contain something useful.
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 CHANGELOG.md "$pkgdir/usr/share/doc/$pkgname/CHANGELOG.md"
-    for guide in manual/*.md; do
-        install -Dm644 "$guide" \
-            "$pkgdir/usr/share/doc/$pkgname/manual/$(basename "$guide")"
+    # manual/admin/ keeps its folder: its pages link up with ../ (DEC-503).
+    for guide in manual/*.md manual/admin/*.md; do
+        install -Dm644 "$guide" "$pkgdir/usr/share/doc/$pkgname/$guide"
     done
 
     # Hardware/sensor reference docs (docs/19–24) — the manual pages link to

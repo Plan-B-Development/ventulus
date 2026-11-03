@@ -27,13 +27,13 @@ You are done when all of these are true:
 
 Add the signed repository for your distribution (pacman, APT or DNF), install
 `ventulus` (it pulls in `ventulusd`), and make sure the daemon is enabled and
-running. [Getting Started](getting-started.md#installation) has the commands for
-each distribution, and the other ways to install. From then on both packages
+running. [Installing](admin/install.md) has the commands for each distribution,
+and the other ways to install. From then on both packages
 upgrade with the rest of your system (`sudo pacman -Syu`, `sudo apt upgrade` or
 `sudo dnf upgrade`).
 
 Then reboot, or load the sensor drivers and restart the daemon as
-[After installing](getting-started.md#after-installing) shows. Until you do, your
+[Installing § After installing](admin/install.md#after-installing) shows. Until you do, your
 motherboard's fans and temperatures can be missing from Step 2 on.
 
 ## Step 2 — Verify sensors first
@@ -94,22 +94,12 @@ Some hardware has its own path, whatever the rows above say:
 
 Only one program should drive a fan header. `pwm` / `pwm_enable` are single sysfs values, so the **last writer wins**: two controllers overwrite each other and the fans oscillate. The readiness report's *BIOS interference* counter cannot tell an embedded controller apart from another program: competing software shows up as the same "reverted / reclaimed" pattern. Other projects document the same conflict: CoolerControl [warns against running LACT and CoolerControl on the same AMD GPU](https://docs.coolercontrol.org/devices/gpus#conflicts-with-lact) ("erratic fan behavior, with each application's settings being overwritten by the other"), and fan2go [logs third-party PWM changes](https://github.com/markusressel/fan2go) as another program "competing with fan2go".
 
-Check for the usual suspects, including ones that start at boot but are not running right now, and disable each one that is enabled or running. The **Interference Monitor** on **System State** names the known ones it finds; the commands also catch the rest:
-
-```bash
-# Installed fan-control services, and whether each starts at boot
-systemctl list-unit-files --type=service --no-pager | grep -iE 'fancontrol|coolercontrol|fan2go|thinkfan'
-# Which of them is running now
-systemctl list-units --type=service --no-pager | grep -iE 'fancontrol|coolercontrol|fan2go|thinkfan'
-# fancontrol started by hand rather than as a service: this file exists while it runs
-ls /run/fancontrol.pid
-
-# For each hit, e.g.:
-sudo systemctl disable --now fancontrol.service      # lm_sensors' fancontrol
-sudo systemctl disable --now coolercontrold.service  # CoolerControl
-sudo systemctl disable --now fan2go.service          # fan2go
-sudo systemctl disable --now thinkfan.service        # thinkfan
-```
+Find and disable each one that is enabled or running, including those that start at
+boot but are not running right now. The **Interference Monitor** on **System State**
+names the known ones it finds; [Drivers § Other fan software](admin/drivers.md#other-fan-software)
+lists them, and [Migrating § Step 1](migrating.md#step-1--take-stock) and
+[§ Step 3](migrating.md#step-3--stop-the-old-control-software) have the commands
+that find and stop each one, the rest included.
 
 Do this before you run your first fan test or apply your first profile. The daemon gives each header back exactly as it found it when it first took it, so a header another program still holds at that moment is later given back to that program's setting rather than to the BIOS. If you have already run a test or a profile, reboot once the other program is disabled.
 

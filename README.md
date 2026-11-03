@@ -25,9 +25,9 @@ repository is the desktop app, `ventulus`.
   pages name your board's fan chips, the driver each one needs, and whether fan
   control actually works.
 - **Tests your fans.** Fan identification and per-header control tests in the app,
-  and `ventulus-diag`, a command for the longer tests: a **PWM Test Report** that
-  measures how every fan responds, characterisation, control-path discovery and
-  cooler recordings.
+  and `ventulus-diag`, an advanced command for the longer tests that drive fans on
+  purpose: a **PWM Test Report** that measures how every fan responds,
+  characterisation, control-path discovery and cooler recordings.
 - **Demo mode** (`ventulus --demo`) shows the whole app with simulated hardware.
 
 ## Supported hardware
@@ -48,71 +48,19 @@ guide covers chips and boards.
 ## Install
 
 Ventulus is packaged for x86_64 Linux in signed repositories. Add the one for
-your distribution once, and both packages then upgrade with the rest of your
-system. The commands work as written in bash, zsh and fish.
+your distribution once, and it then upgrades with the rest of your system:
 
-| Distribution | Upgrades with |
-| --- | --- |
-| Arch Linux, CachyOS, EndeavourOS, Garuda | `sudo pacman -Syu` |
-| Debian 13, Ubuntu 26.04 LTS | `sudo apt update && sudo apt upgrade` |
-| Fedora 44, Fedora 45 | `sudo dnf upgrade` |
+| Distribution | Install | Upgrades with |
+| --- | --- | --- |
+| Arch Linux, CachyOS, EndeavourOS, Garuda | `sudo pacman -Syu ventulus` | `sudo pacman -Syu` |
+| Debian 13, Ubuntu 26.04 LTS | `sudo apt install ventulus` | `sudo apt update && sudo apt upgrade` |
+| Fedora 44, Fedora 45 | `sudo dnf install ventulus` | `sudo dnf upgrade` |
 
-Every repository is signed by the key with fingerprint
-`4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA`; check that it is the one your
-package manager or `gpg` shows you.
-
-**Arch Linux and CachyOS:**
-
-```bash
-# 1. trust the signing key
-curl -fsSL https://raw.githubusercontent.com/Plan-B-Development/pacman-repo/main/keys/ventulus.gpg \
-  | sudo pacman-key --add -
-sudo pacman-key --lsign-key 4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA
-
-# 2. add the repository — adds nothing if a [ventulus] block is already there
-grep -q '^\[ventulus\]' /etc/pacman.conf || printf '%s\n' '' '[ventulus]' \
-  'SigLevel = Required' \
-  'Server = https://github.com/Plan-B-Development/pacman-repo/releases/download/repo' \
-  | sudo tee -a /etc/pacman.conf
-
-# 3. install — the daemon comes along as a dependency
-sudo pacman -Syu ventulus
-sudo systemctl enable --now ventulusd
-```
-
-**Debian 13 and Ubuntu 26.04:**
-
-```bash
-sudo apt install ca-certificates curl gpg
-sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://raw.githubusercontent.com/Plan-B-Development/pacman-repo/main/keys/ventulus.gpg \
-  | sudo tee /etc/apt/keyrings/ventulus.asc > /dev/null
-gpg --show-keys /etc/apt/keyrings/ventulus.asc
-printf '%s\n' 'Types: deb' \
-  'URIs: https://github.com/Plan-B-Development/pacman-repo/releases/download/repo/' \
-  'Suites: ./' \
-  'Signed-By: /etc/apt/keyrings/ventulus.asc' \
-  | sudo tee /etc/apt/sources.list.d/ventulus.sources
-sudo apt update
-sudo apt install ventulus   # the daemon starts as it installs
-```
-
-**Fedora 44 and 45:**
-
-```bash
-curl -fsSL https://plan-b-development.github.io/pacman-repo/ventulus.repo \
-  | sudo tee /etc/yum.repos.d/ventulus.repo
-sudo dnf install ventulus
-sudo systemctl enable --now ventulusd
-```
-
-[Getting Started](manual/getting-started.md#installation) also has a signed
-bootstrap script for Arch, a tarball for Debian, Ubuntu and Fedora without a
-repository, one-off installs from a release, building the packages yourself,
-and the distributions that are not supported (among them Manjaro, Debian 12 and
-Ubuntu 24.04). Ventulus can also tell you when a new release is out: the
-[update check](manual/updates.md) is off until you turn it on or press
-**Check for updates**.
+[Installing](manual/admin/install.md) has the repository setup for each (the key,
+its fingerprint `4AAD6D2DE40D0D10773BF770BC27C5EB2831FCDA`, the repository entry),
+the signed bootstrap script for Arch, a tarball, one-off installs from a release,
+building the packages yourself, a machine with no desktop, and the distributions
+that are not supported (among them Manjaro, Debian 12 and Ubuntu 24.04).
 
 ## Quick start
 
@@ -142,8 +90,7 @@ from the project's GitHub Pages site; the daemon never connects to the network.
 [Driver Setup](manual/driver-setup.md) ·
 [Updates](manual/updates.md) ·
 [OpenFAN Controller](manual/openfan-controller.md) ·
-[Hardware Troubleshooting](manual/hardware-troubleshooting.md) ·
-[Safety and Recovery](manual/safety-and-recovery.md)
+[Hardware Troubleshooting](manual/hardware-troubleshooting.md)
 
 **Hardware reference:**
 
@@ -154,9 +101,21 @@ from the project's GitHub Pages site; the daemon never connects to the network.
 - [AMD Sensor Interpretation Deep Dive](docs/22_AMD_Sensor_Interpretation_Deep_Dive.md): Tctl, Tdie, edge and junction
 - [Cooling Hardware Readiness Guide](docs/24_Cooling_Hardware_Readiness_Guide.md): what each item on the Hardware page's readiness checklist means, and how to fix it
 
+**Administration** ([index](manual/admin/README.md)), the one place for running
+Ventulus: [Installing](manual/admin/install.md) ·
+[Upgrading](manual/admin/upgrade.md) ·
+[The Service](manual/admin/service.md) ·
+[Permissions and Security](manual/admin/security.md) ·
+[Drivers and Other Fan Software](manual/admin/drivers.md) ·
+[Diagnostic Command](manual/admin/diagnostics-cli.md) ·
+[Safety and Recovery](manual/admin/safety-and-recovery.md) ·
+[Logs and Bug Reports](manual/admin/logs-and-bug-reports.md) ·
+[Known Limits](manual/admin/known-limits.md) ·
+[Uninstalling](manual/admin/uninstall.md)
+
 **Daemon:** the [ventulusd README](https://github.com/Plan-B-Development/ventulusd) and
 its [User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md)
-(configuration, the service, safety, troubleshooting).
+(every configuration key, the service unit, the safety rules in full, scripting the API).
 
 **For contributors:** [CONTRIBUTING](https://github.com/Plan-B-Development/ventulus/blob/main/CONTRIBUTING.md) ·
 [API contract](https://github.com/Plan-B-Development/ventulus/blob/main/docs/08_API_Integration_Contract.md) ·

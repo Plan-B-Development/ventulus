@@ -147,7 +147,7 @@ Use this at startup and on explicit refresh to determine:
   which any sensor makes a diagnostic refuse or stop: verify, characterisation, control-path
   discovery, the stall probe and OpenFAN calibration all gate on it. **Interpolate it; never
   restate it.** A daemon that omits it said nothing, and a client must word the rule without a
-  figure rather than substitute one (the PWM Test Report's consent page does exactly that).
+  figure rather than substitute one (`ventulus-diag`'s confirmation for the PWM Test Report does exactly that).
 
 This endpoint should drive:
 - feature enablement
@@ -3868,7 +3868,7 @@ Error codes and HTTP statuses:
   4.0.0, DEC-481): a route that would drive the OpenFAN controller or claim the diagnostic pause,
   called while a firmware update holds the controller; retry once it has finished. Busy, not
   protection: it shares the code and `retryable` of the thermal refusals, so a client telling the
-  two apart reads `details.reason` (the GUI's `is_openfan_maintenance_refusal`; its PWM Test Report
+  two apart reads `details.reason` (the client's `is_openfan_maintenance_refusal`; the PWM Test Report
   words it as an update holding the fans, never as a safety refusal). The update's own
   start refusals use the same shape with their own `details.reason`, and its cancel past the
   cancellable stages answers `details.reason: "not_cancellable"`, retryable: false
@@ -4034,10 +4034,11 @@ general per-call override:
   one, **2 s** (`_OVERRIDE_HTTP_TIMEOUT_S`) on the three override calls. They run on a
   dedicated worker thread, and the bound is a backstop so a wedged call cannot pin that
   worker.
-- **A 2 s client for the PWM Test Report's exit-time cancel** (`EXIT_CANCEL_TIMEOUT_S`):
-  when the application quits mid-run, the report sends the running diagnostic's `DELETE`
-  synchronously, and this bounds how long it may hold the exit. The report's normal calls
-  use the 5 s default.
+- **A 2 s client for `ventulus-diag`'s cancel on the way out** (`STOP_CANCEL_TIMEOUT_S`):
+  when the user interrupts a test (Ctrl-C), the command sends the running diagnostic's
+  cancel on a separate client of its own, so a call stuck on the main client cannot hold
+  it up, and this bounds how long it may hold the exit. Its normal calls use the 5 s
+  default.
 
 Endpoints with known long upper bounds:
 

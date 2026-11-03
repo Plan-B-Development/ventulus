@@ -2,7 +2,7 @@
 
 Ventulus can tell you when a newer Ventulus or `ventulusd` has been released, and how to install it the way you installed it the first time. The check is **off unless you ask for it**: Ventulus makes no internet connection until you press **Check for updates** or turn the daily check on. It never installs anything itself and never runs a command as root.
 
-If you installed from one of the package repositories (pacman, APT or DNF), your normal system upgrade already brings new versions, and you do not need this page at all. The check is most useful for a [tarball install](getting-started.md#the-tarball), which nothing else keeps up to date.
+If you installed from one of the package repositories (pacman, APT or DNF), your normal system upgrade already brings new versions, and you do not need this page at all. The check is most useful for a [tarball install](admin/install.md#the-tarball), which nothing else keeps up to date.
 
 ## Where it is
 

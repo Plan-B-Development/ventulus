@@ -155,8 +155,9 @@ put 644 completions/ventulus.fish "$share/fish/vendor_completions.d/ventulus.fis
 # The manual links into docs/19–24 by relative path, so they ship beside it.
 put 644 README.md "$doc/README.md"
 put 644 CHANGELOG.md "$doc/CHANGELOG.md"
-for guide in manual/*.md; do
-    put 644 "$guide" "$doc/manual/${guide##*/}"
+# manual/admin/ keeps its folder: its pages link up with ../ (DEC-503).
+for guide in manual/*.md manual/admin/*.md; do
+    put 644 "$guide" "$doc/$guide"
 done
 for refdoc in docs/19_*.md docs/20_*.md docs/21_*.md docs/22_*.md docs/23_*.md docs/24_*.md; do
     put 644 "$refdoc" "$doc/docs/${refdoc##*/}"

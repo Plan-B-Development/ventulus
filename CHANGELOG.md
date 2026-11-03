@@ -32,7 +32,7 @@ rename. Version numbers carry on from Control-OFC.
   `apt upgrade` and `dnf upgrade` bring it in. Each release attaches both, in every format
   but the tarball, which carries both: `install.sh --cli-only` installs `ventulus-diag`
   alone. If you install from release files rather than a repository, install both (see
-  Getting Started).
+  Installing, in the manual's Administration section).
 - **A report's safety text no longer says "even if Ventulus is closed".** It now says "even
   if the program that started it is closed", since the CLI can start a run too. A report run
   by `ventulus-diag` names it in its environment section instead of "Ventulus GUI".
@@ -44,6 +44,16 @@ rename. Version numbers carry on from Control-OFC.
   where each header's Test Control is, instead of to Hardware Diagnostics.
 - **The footer's Recording chip names the command that stops the session**
   (`ventulus-diag validation stop`). It still shows a session started from anywhere.
+- **The manual has an Administration section, the one place for running Ventulus.**
+  `manual/admin/` covers installing (including a machine with no desktop), upgrading and
+  the Control-OFC carry-over, the service, permissions and the open socket, drivers and other
+  fan software, `ventulus-diag`, safety and recovery, logs and bug reports, known limits and
+  uninstalling, with an index naming the one page that owns each topic. The README, Getting
+  Started, the Setup Checklist and the daemon's User Guide now link there instead of
+  repeating it, which also settles where they disagreed: the missing-CPU-sensor floor starts
+  after 5 seconds with no current reading, and `sensors-detect` must never be run on a
+  Gigabyte board. The packages install the new pages under
+  `/usr/share/doc/ventulus/manual/admin/`.
 
 ### Removed
 

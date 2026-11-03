@@ -22,7 +22,11 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-DOCS = [ROOT / "README.md", *sorted((ROOT / "manual").glob("*.md"))]
+DOCS = [
+    ROOT / "README.md",
+    *sorted((ROOT / "manual").glob("*.md")),
+    *sorted((ROOT / "manual" / "admin").glob("*.md")),
+]
 _FENCE = re.compile(r"^```(?:bash|sh|shell)\n(.*?)^```", re.MULTILINE | re.DOTALL)
 
 PARSE_ONLY = {
@@ -61,8 +65,9 @@ def test_the_install_blocks_are_collected() -> None:
     # The parse test below passes vacuously if the fence pattern stops matching.
     install = [code for name, code in BLOCKS if "pacman.conf" in code]
     assert install, "no block adding the repository to /etc/pacman.conf was found"
-    assert any(name.startswith("README.md#") for name, _ in BLOCKS)
-    assert any(name.startswith("manual/getting-started.md#") for name, _ in BLOCKS)
+    # DEC-503: the install commands live once, in the administration section.
+    assert any(name.startswith("manual/admin/install.md#") for name, _ in BLOCKS)
+    assert any(name.startswith("manual/admin/") and "pacman.conf" in code for name, code in BLOCKS)
 
 
 @pytest.mark.parametrize("shell", sorted(PARSE_ONLY))

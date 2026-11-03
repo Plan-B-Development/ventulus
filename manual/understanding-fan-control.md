@@ -79,7 +79,7 @@ On some boards a correctly installed driver still loses to the BIOS. [Test PWM C
 
 `pwmN` and `pwmN_enable` are single values, and the **last writer wins**. If two programs both drive the same header (say Ventulus and a leftover `fancontrol` service), they overwrite each other every second and the fan oscillates.
 
-So pick one fan controller per header. Before letting Ventulus manage your fans, stop other fan software (fancontrol, CoolerControl, fan2go, and GPU tools like LACT / CoreCtrl for GPU fans). The [Setup Checklist](setup-checklist.md#step-5--stop-competing-fan-control-software) lists the usual suspects and how to disable them, and [Migrating from Another Fan Program](migrating.md) covers a full switch, including which of the old program's drivers to keep.
+So pick one fan controller per header. Before letting Ventulus manage your fans, stop other fan software: [Drivers § Other fan software](admin/drivers.md#other-fan-software) lists the usual ones, the [Setup Checklist](setup-checklist.md#step-5--stop-competing-fan-control-software) puts the step in order, and [Migrating from Another Fan Program](migrating.md) covers a full switch, including which of the old program's drivers to keep.
 
 ## Why DKMS, Secure Boot, kernel headers, and boot parameters can matter
 
@@ -164,7 +164,7 @@ Whenever one of these is acting, the footer's thermal chip, a banner on the Dash
 and an alert say so. The daemon's
 [User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md#safety)
 has the full operator-level detail. What each rule means for you when the app closes,
-the daemon stops or a device disappears is in [Safety and Recovery](safety-and-recovery.md).
+the daemon stops or a device disappears is in [Safety and Recovery](admin/safety-and-recovery.md).
 
 ## Where to go next
 

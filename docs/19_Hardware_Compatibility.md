@@ -1046,8 +1046,8 @@ On a Gigabyte board the package's **Super-I/O guard** keeps `nct6775` and
 `w83627ehf` from loading, although that file lists them: Gigabyte boards use ITE chips,
 which those drivers cannot bind, and their probe can latch the bridge in front of a
 second chip. `sudo journalctl -b -t ventulus-superio-guard` logs each module it
-declines. How it decides, and how to turn it off, is in the daemon's
-[User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md#hardware-sensor-modules).
+declines. How it decides, and how to turn it off, is in
+[Drivers § The Super-I/O guard](../manual/admin/drivers.md#the-super-io-guard).
 
 ## Thermal safety
 

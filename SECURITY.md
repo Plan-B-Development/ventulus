@@ -17,7 +17,7 @@ We will acknowledge receipt within 48 hours and aim to provide a fix within 7 da
 
 ## Scope
 
-The GUI communicates with a local daemon over a Unix domain socket. The primary security boundaries are:
+The GUI, and the `ventulus-diag` command that ships with it, run as the user and never touch hardware. They talk to the local daemon, `ventulusd`, over its Unix socket `/run/ventulus/ventulus.sock`. That socket is open to every local user (`0666`) with no authentication, by design: any local user can do everything the GUI can, including starting the hardware tests, and neither program needs or asks for root. [Permissions and Security](manual/admin/security.md) explains the trust model for operators. The primary security boundaries on the GUI side are:
 
 | Boundary | Concern |
 |----------|---------|
@@ -25,6 +25,8 @@ The GUI communicates with a local daemon over a Unix domain socket. The primary 
 | Settings persistence | File permissions, XDG path handling |
 | Daemon API communication | Input validation, error handling |
 | Support bundle export | Accidental inclusion of sensitive system information |
+| Update check (opt-in, off by default) | Signed-manifest verification before any release download is trusted |
+| Saved reports and settings read by `ventulus-diag` | Malformed or hostile report files opened with `report show`/`export`/`compare` |
 
 The daemon is a separate project with its own security considerations (sysfs access, serial I/O, socket permissions). Report daemon vulnerabilities to the [daemon repository](https://github.com/Plan-B-Development/ventulusd).
 

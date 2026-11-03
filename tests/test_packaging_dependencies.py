@@ -217,7 +217,7 @@ def test_release_attaches_package_files():
     assert files == "dist/*", (
         "the Release step must attach everything in dist/, the built *.pkg.tar.zst "
         f"included (DEC-239); got files={files!r}. Without it the one-off install "
-        "path in manual/getting-started.md is a dead link."
+        "path in manual/admin/install.md is a dead link."
     )
     sums = next(s for s in _steps(jobs["github-release"]) if s.get("name") == "Write SHA256SUMS")
     assert "ventulus-$v-1-any.pkg.tar.zst" in sums["run"].split('expected="')[1].split('"')[0], (
@@ -275,7 +275,7 @@ def test_release_attests_build_provenance_with_required_permissions():
 
     `actions/attest-build-provenance` fails at runtime without `id-token: write`
     (keyless Sigstore) and `attestations: write`. Dropping either turns the
-    documented `gh attestation verify` command in manual/getting-started.md
+    documented `gh attestation verify` command in manual/admin/install.md
     into a lie.
     """
     job = _release_workflow()["jobs"]["github-release"]

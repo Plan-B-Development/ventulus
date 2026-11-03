@@ -51,8 +51,8 @@ need to restart it. Work down this list:
      The usual causes are a bad edit to `/etc/ventulus/daemon.toml`, which the journal
      names, and a second copy of the daemon already running, for example one started
      by hand in a terminal: the newcomer exits with status 75 and *another ventulusd
-     is already running*. The daemon's
-     [User Guide](https://github.com/Plan-B-Development/ventulusd/blob/main/docs/USER_GUIDE.md#the-daemon-does-not-start)
+     is already running*.
+     [The Service § When the service misbehaves](admin/service.md#when-the-service-misbehaves)
      has the rest.
 2. **Is the socket there?** `ls -la /run/ventulus/ventulus.sock` should show
    `srw-rw-rw-`. Every local user can open it, so there is no group to join and no
@@ -143,23 +143,10 @@ or less than you expect, work down this list:
 
 ### About `sensors-detect`
 
-Use the **Hardware** page first: its readiness checklist and Super-I/O section
-identify your board's chips **without probing the hardware**. Treat
-`sudo sensors-detect` as a **last resort**, at your own risk: its probing "can access
-chips in a way these chips do not like, causing problems ranging from SMBus lockup to
-permanent hardware damage (a rare case, thankfully)"
-([sensors-detect(8)](https://man.archlinux.org/man/extra/lm_sensors/sensors-detect.8.en)).
-Its default answers are not a safe mode: the Super-I/O scan, which writes to I/O ports
-0x2E and 0x4E to find the chip, defaults to *yes*, and the
-[script](https://github.com/lm-sensors/lm-sensors/blob/master/prog/detect/sensors-detect)
-itself calls it only "usually safe"; the man page warns that `--auto`, which takes
-every default, "isn't necessarily safe". If you do run it, answer each question yourself, and do not force a probe it
-would skip by default. **Never run it after boot on a Gigabyte board.** Its Super-I/O
-scan can wedge the Super-I/O bridge so that a second chip vanishes, the package's
-guard cannot stop it (it probes the ports itself rather than loading a module), and
-**a reboot may not bring the chip back: power down at the wall**, because the bridge
-keeps standby power (see
-["Some of my fan headers are missing"](#some-of-my-fan-headers-are-missing--only-5-of-8-show-up)).
+You do not need it, and you must never run it on a Gigabyte board: its Super-I/O scan
+can hide a second fan chip until the machine is powered down at the wall.
+[Drivers § About `sensors-detect`](admin/drivers.md#about-sensors-detect) has the
+full rule and why.
 
 ## No motherboard fans at all
 
@@ -905,4 +892,4 @@ advisories* in **Settings → Prompts & Dismissals**.
 
 ---
 
-Previous: [Profiles and Curves Reference](profiles-and-curves.md) | Next: [Safety and Recovery](safety-and-recovery.md) | Back to [Table of Contents](README.md)
+Previous: [Profiles and Curves Reference](profiles-and-curves.md) | Next: [Driver Setup](driver-setup.md) | Back to [Table of Contents](README.md)

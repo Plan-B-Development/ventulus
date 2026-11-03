@@ -29,23 +29,10 @@ physical fan is which, use the [Fan Wizard](fan-wizard.md) instead.
 
 ### Using ventulus-diag
 
-`ventulus-diag status` shows the daemon, its thermal state and whether a test could
-start now; `ventulus-diag headers` lists every motherboard header with the id the
-other commands take, its role, whether it is pump-protected and its floor. Neither
-changes anything. `man ventulus-diag` describes every command.
-
-A command that changes fan speeds first prints what it will do: the header or cooler
-by name and id, how long it takes, and what keeps it safe (for a pump, its floor; for
-the PWM Test Report, the daemon's temperature limit). Then it asks you to type `yes`.
-Run from a script rather than a terminal, it needs `--yes-change-fan-speeds` instead,
-and refuses without it. A test that may **stop** a fan (the report's stall/restart probe) also
-needs a per-header acknowledgement. It never asks for `sudo`: any user who can run the
-app can run it.
-
-**Ctrl-C** asks the daemon to cancel the test and waits for the daemon to put the
-header back; a second Ctrl-C leaves at once, and the daemon still puts it back.
-`ventulus-diag cancel` cancels a running characterisation, discovery or stall probe
-from another terminal, whoever started it.
+`ventulus-diag` is an advanced tool for deliberate tests. How it asks before it
+changes a fan speed, how to stop a test, and what to do if one is cut short are in
+[Diagnostic Command](admin/diagnostics-cli.md); `man ventulus-diag` lists every
+command. Start with `ventulus-diag status`, which changes nothing.
 
 ## What the daemon guarantees during a test
 

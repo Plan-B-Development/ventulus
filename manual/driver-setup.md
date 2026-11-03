@@ -366,7 +366,7 @@ Most users on current driver builds need **none** of these. The exceptions, all 
 >
 > **Never load `nct6687` with `force=1` on a board whose chip is an NCT679x** (MSI AM4 300/400-series and the original X570 boards). Since [nct6687d PR #174](https://github.com/Fred78290/nct6687d/pull/174), `force=1` attaches to any Nuvoton chip ID from 0xD000 to 0xDFFF. That reopens the chip-ID collision that has bricked a CPU fan header.
 
-Two warnings: never use the it87 `force_id` parameter outside testing (upstream: *"should only be used for testing"*), and never run `sensors-detect` after boot on a Gigabyte board. It can wedge the Super-I/O bridge so a second chip vanishes (the package's guard cannot stop it), and a reboot may not bring it back. Power down at the wall, because the bridge keeps standby power. The recovery is in [Hardware Troubleshooting](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up).
+Two warnings: never use the it87 `force_id` parameter outside testing (upstream: *"should only be used for testing"*), and never run `sensors-detect` on a Gigabyte board ([why](admin/drivers.md#about-sensors-detect)). It can wedge the Super-I/O bridge so a second chip vanishes (the package's guard cannot stop it), and a reboot may not bring it back. Power down at the wall, because the bridge keeps standby power. The recovery is in [Hardware Troubleshooting](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up).
 
 There is also nothing to gain by running it on these boards. As of 2026-08-26 `sensors-detect` has **no entry for device IDs 0x8688, 0x8689, 0x8696 or 0x8698**, so it cannot identify an IT8688E, IT8689E, IT8696E or IT8698E (the primary chip on essentially every modern Gigabyte board), and it has no NCT6686D entry either. On exactly the boards where running it can do harm, it has nothing useful to tell you.
 
@@ -403,7 +403,7 @@ sudo rm -f /etc/modprobe.d/it87.conf /etc/modprobe.d/nct6687.conf \
 sudo systemctl reboot
 ```
 
-If you created `/etc/modprobe.d/ventulus-superio-local.conf` while [recovering a missing chip](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up), leave it unless you are sure the package's guard covers your board (`sudo journalctl -b -t ventulus-superio-guard` shows a line per module it declined): removing it lets `nct6775` and `w83627ehf` probe again. BIOS changes are rolled back in BIOS setup (restore Smart Fan / Q-Fan to its default profile). If you use snapshots (e.g. `snapper` / Timeshift on CachyOS), taking one before Step 3 gives you a one-command rollback as well. Every other change the manual describes, with how to undo it, is in the [undo index](safety-and-recovery.md#undo-index).
+If you created `/etc/modprobe.d/ventulus-superio-local.conf` while [recovering a missing chip](hardware-troubleshooting.md#some-of-my-fan-headers-are-missing--only-5-of-8-show-up), leave it unless you are sure the package's guard covers your board (`sudo journalctl -b -t ventulus-superio-guard` shows a line per module it declined): removing it lets `nct6775` and `w83627ehf` probe again. BIOS changes are rolled back in BIOS setup (restore Smart Fan / Q-Fan to its default profile). If you use snapshots (e.g. `snapper` / Timeshift on CachyOS), taking one before Step 3 gives you a one-command rollback as well. Every other change the manual describes, with how to undo it, is in the [undo index](admin/safety-and-recovery.md#undo-index).
 
 ## Staying current
 
@@ -474,4 +474,4 @@ At a glance:
 
 ---
 
-Previous: [Safety and Recovery](safety-and-recovery.md) | Next: [Understanding Motherboard Fan Control](understanding-fan-control.md) | Back to [Table of Contents](README.md)
+Previous: [Hardware Troubleshooting](hardware-troubleshooting.md) | Next: [Understanding Motherboard Fan Control](understanding-fan-control.md) | Back to [Table of Contents](README.md)
