@@ -154,6 +154,14 @@ misreported as controlled, or driven when it should not be.
   including SIGKILL via `ExecStopPost`; a card it never wrote, or handed back itself with
   `POST /gpu/{id}/fan/reset`, is not touched, so LACT or CoreCtrl can own it.
   *(Safety-critical.)*
+- **Once the stop has begun, the daemon writes no GPU fan curve, only resets (DEC-502).**
+  The stop sets a flag first. A fan verify then in its settle wakes and gives the card back
+  at once, inside the stop's request drain: an RDNA3+ card to firmware auto, a pre-RDNA3
+  card to its recorded original. After that no engine curve, test speed or restore to a
+  fixed speed is written, only a reset or a legacy restore to the original. Each write
+  checks the flag under the GPU write lock, so nothing lands after the stop's own GPU reset.
+  A write already wedged in the driver is the one exception, as it is for the hwmon
+  headers (DEC-420). *(Safety-critical.)*
 - **A GPU the active profile stops naming is handed back at once, not at the next stop
   (DEC-448).** On the tick after a deactivate, or a switch to a profile
   that drops the card, the engine resets it to firmware auto (the same reset
