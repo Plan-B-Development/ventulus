@@ -40,6 +40,7 @@ from ventulus.services.characterization_view import (
 )
 from ventulus.services.control_path_view import build_control_path_view
 from ventulus.services.daemon_features import daemon_supports
+from ventulus.services.preflight_view import build_preflight_view
 from ventulus.services.pump_protection import header_is_pump_protected
 
 #: Consecutive failed status reads before the run is treated as lost.
@@ -169,13 +170,17 @@ def _preflight(console: Console, daemon: Daemon, header: HwmonHeader, kind: Swee
                 "the daemon's own guards still run."
             )
         return
-    console.out(f"Daemon preflight: {report.verdict}")
-    for check in report.checks:
-        if check.state not in ("pass", "not_applicable"):
-            console.out(f"  {check.state}: {check.check_id} — {check.detail}")
-    if report.is_blocked:
+    # The GUI's rendering, so a blocker the daemon names in `blocking` refuses
+    # even under a verdict token this version does not know (fails safe).
+    view = build_preflight_view(report)
+    console.out(f"Daemon preflight: {view.verdict_word}")
+    for row in view.rows:
+        if row.state not in ("pass", "not_applicable"):
+            console.out(f"  {row.state_word}: {row.label} — {row.detail}")
+    if not view.can_start:
+        reasons = "".join(f"\n  {r}" for r in view.blocking_reasons)
         raise DiagError(
-            EXIT_REFUSED, "Not started: the daemon's safety preflight blocked this test."
+            EXIT_REFUSED, f"Not started: the daemon's safety preflight blocked this test.{reasons}"
         )
 
 

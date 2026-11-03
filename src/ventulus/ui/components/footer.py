@@ -28,6 +28,7 @@ from ventulus.api.models import (
     ReadinessRollup,
 )
 from ventulus.constants import APP_VERSION
+from ventulus.services.diag_cli_view import SESSION_STOP_COMMAND
 from ventulus.ui.components.buttons import make_button
 from ventulus.ui.components.glow import PulsingLed
 from ventulus.ui.qt_util import set_chip_class
@@ -134,9 +135,11 @@ class StatusFooter(QWidget):
         # `DaemonStatus.validation_session` was parsed, unit-tested and read by no
         # UI code at all (DEC-301's "parsed but never read" trap). The footer is
         # the right home precisely because it is on every page.
+        # DEC-503: sessions start and stop from `ventulus-diag`; the chip says
+        # how, and opens the Hardware page, whose panel names the command.
         self._session_btn = _chip_button(
             "StatusFooter_Chip_session",
-            "A recording session is running — click to open the page where you can stop it",
+            f"A recording session is running. Stop it with: {SESSION_STOP_COMMAND}",
         )
         self._session_btn.clicked.connect(lambda _=False: self.session_clicked.emit())
         self._session_btn.hide()

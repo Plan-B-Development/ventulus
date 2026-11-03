@@ -37,7 +37,6 @@ from ventulus.services.openfan_calibration_view import (
 )
 from ventulus.ui.pages.diagnostics_workers import _OpenFanCalibrationWorker
 from ventulus.ui.pages.hardware_page import HardwarePage
-from ventulus.ui.pages.pwm_report_controller import RUN_ACTIVE_REASON
 from ventulus.ui.widgets import openfan_calibration_dialog as dlg_mod
 from ventulus.ui.widgets.openfan_calibration_dialog import OpenFanCalibrationDialog
 
@@ -566,14 +565,6 @@ class TestHardwarePageEntry:
         button = page.findChild(QPushButton, "Hardware_Btn_openfanCalibration")
         assert button.isEnabled() is False
         assert "No OpenFan channel" in button.toolTip()
-
-    def test_a_running_report_stands_it_down(self, qtbot):
-        page = _page(qtbot, caps=_caps(openfan_calibration=True))
-        button = page.findChild(QPushButton, "Hardware_Btn_openfanCalibration")
-        assert button.isEnabled() is True  # presence before absence
-        page._on_report_active(True)
-        assert button.isEnabled() is False
-        assert button.toolTip() == RUN_ACTIVE_REASON
 
     def test_demo_mode_opens_the_dialog_with_start_refused(self, qtbot, monkeypatch):
         page = _page(qtbot, mode=OperationMode.DEMO)

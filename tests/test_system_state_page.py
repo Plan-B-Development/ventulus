@@ -846,9 +846,9 @@ def test_the_driver_status_tooltip_does_not_grow_on_re_render(qtbot, restore_app
 
 
 def _verify_buttons_page(qtbot):
-    """Two writable headers and a daemon that serves characterisation, so all
-    three buttons start visible and enabled — every assertion below is made
-    against a button that could otherwise have been pressed."""
+    """Two writable headers, so both buttons start visible and enabled — every
+    assertion below is made against a button that could otherwise have been
+    pressed. (Characterise left with DEC-503.)"""
     from ventulus.api.models import parse_capabilities
 
     state = _state()
@@ -869,7 +869,7 @@ def _verify_buttons_page(qtbot):
     page._populate_verify_combo()
     buttons = {
         name: page.findChild(QPushButton, f"SystemState_Btn_{name}")
-        for name in ("verifyPwm", "verifyAll", "characterize")
+        for name in ("verifyPwm", "verifyAll")
     }
     for name, button in buttons.items():
         # `isHidden`, not `isVisibleTo`: the buttons sit in a collapsed section,
@@ -879,14 +879,12 @@ def _verify_buttons_page(qtbot):
 
 
 @pytest.mark.parametrize("answer", ["ok", "error"])
-def test_a_single_verify_greys_verify_all_and_characterize_until_it_answers(qtbot, answer):
+def test_a_single_verify_greys_verify_all_until_it_answers(qtbot, answer):
     page, buttons = _verify_buttons_page(qtbot)
     buttons["verifyPwm"].click()
     header_id = page._verify_active_header
     assert header_id == "pwm1", "precondition: the verify really started"
     assert not buttons["verifyAll"].isEnabled(), "a sweep could start over the verify"
-    assert not buttons["characterize"].isEnabled(), "characterise offered while the slot is held"
-    assert not buttons["characterize"].isHidden(), "greyed, never hidden, mid-verify"
     # `ACK-z`'s trap, the opposite branch: each handler clears its state before
     # the gate reads it, or every button stays dead after an ordinary verify.
     if answer == "ok":
@@ -897,13 +895,13 @@ def test_a_single_verify_greys_verify_all_and_characterize_until_it_answers(qtbo
         assert button.isEnabled(), f"{name} stayed disabled after the verify answered"
 
 
-def test_a_sweep_greys_characterize_until_the_sweep_ends(qtbot):
+def test_a_sweep_greys_both_buttons_until_the_sweep_ends(qtbot):
     page, buttons = _verify_buttons_page(qtbot)
     buttons["verifyAll"].click()
     assert page._verify_all_total == 2, "precondition: the sweep really started"
-    assert not buttons["characterize"].isEnabled()
+    assert not buttons["verifyPwm"].isEnabled()
     page._on_verify_ok(HwmonVerifyResult(header_id="pwm1", result="effective"), "pwm1")
-    assert not buttons["characterize"].isEnabled(), "re-enabled between two of the sweep's verifies"
+    assert not buttons["verifyPwm"].isEnabled(), "re-enabled between two of the sweep's verifies"
     assert not buttons["verifyAll"].isEnabled()
     page._on_verify_ok(HwmonVerifyResult(header_id="pwm2", result="effective"), "pwm2")
     assert page._verify_all_total == 0, "precondition: the sweep has ended"

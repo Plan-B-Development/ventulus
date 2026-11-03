@@ -1,10 +1,9 @@
-"""GUI audit 2026-10-14, batch E: the Fan Wizard and the PWM Test Report.
+"""GUI audit 2026-10-14, batch E: the Fan Wizard.
 
-Wizard: Finish keeps the Review page's edits and saves only the fans it
-reviewed; Skip comes back on re-entry; the intro page re-checks live and a hot
-CPU warns without blocking; status chips restyle; "restored" only when the
-daemon said so. Report: a failed save is not painted over, and "Saved to"
-never names an earlier run's file or a stale checkpoint.
+Finish keeps the Review page's edits and saves only the fans it reviewed; Skip
+comes back on re-entry; the intro page re-checks live and a hot CPU warns
+without blocking; status chips restyle; "restored" only when the daemon said
+so. (The batch's PWM Test Report cases left with the report, DEC-503.)
 
 Every wizard/page a helper returns is bound and used in an assertion
 (DASH-h): ``qtbot.addWidget`` does not keep it alive.
@@ -16,14 +15,11 @@ from unittest.mock import MagicMock
 
 import pytest
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QWizard
+from PySide6.QtWidgets import QApplication, QLabel, QWizard
 
-from tests.pwm_report_fixtures import CPU
-from tests.test_pwm_report_window import _box, _btn, _clear, _run_to_end, rig  # noqa: F401
 from ventulus.api.errors import DaemonError
 from ventulus.api.models import ConnectionState, FanReading, OperationMode, SensorReading
 from ventulus.services.app_state import AppState
-from ventulus.services.pwm_report import store
 from ventulus.ui.widgets.fan_wizard import (
     PAGE_DISCOVERY,
     PAGE_INTRO,
@@ -32,7 +28,6 @@ from ventulus.ui.widgets.fan_wizard import (
     FanConfigWizard,
     thermal_limit_c,
 )
-from ventulus.ui.widgets.pwm_report_window import PAGE_REPORT
 
 FANS = ("openfan:ch00", "openfan:ch01", "openfan:ch02")
 
@@ -325,89 +320,4 @@ def test_a_closed_wizard_stops_following_app_state(qtbot):
 # ── PWM Test Report ──────────────────────────────────────────────────────────
 
 
-def _start_verify_run(window) -> None:
-    _clear(window)
-    _box(window, "verify", CPU).click()
-    _btn(window, "PwmReport_Btn_next").click()
-    _btn(window, "PwmReport_Btn_next").click()
-
-    window.findChild(QCheckBox, "PwmReport_Check_consent").click()
-    _btn(window, "PwmReport_Btn_start").click()
-
-
 _FAILED_SAVES: list[object] = []
-
-
-def _failing_save(doc, *_args, **_kwargs):
-    _FAILED_SAVES.append(doc.get("report_id"))
-    raise OSError("disk full")
-
-
-def _saved_line(window) -> str:
-    label = window.findChild(QLabel, "PwmReport_Label_savedPath")
-    assert label is not None
-    return label.text()
-
-
-def test_a_failed_save_stays_on_the_run_status(qtbot, rig, monkeypatch):  # noqa: F811
-    window, controller, _st, _daemon, _clock, _settings = rig
-    monkeypatch.setattr(store, "save_report", _failing_save)
-    _FAILED_SAVES.clear()
-    _start_verify_run(window)
-    assert controller.is_running(), "precondition: the run started"
-    assert _FAILED_SAVES, "precondition: a save was attempted and failed"
-
-    status = window.findChild(QLabel, "PwmReport_Label_runStatus").text()
-    assert "could not be saved: disk full" in status
-    controller.cancel()
-    _run_to_end(qtbot, controller, _clock)
-
-
-def test_a_report_whose_saves_failed_does_not_claim_the_last_runs_file(
-    qtbot,
-    rig,  # noqa: F811
-    monkeypatch,
-):
-    window, controller, _st, _daemon, clock, _settings = rig
-    _start_verify_run(window)
-    _run_to_end(qtbot, controller, clock)
-    assert window.current_page() == PAGE_REPORT
-    first = controller.last_path
-    assert first is not None and _saved_line(window) == f"Saved to {first}", "precondition"
-
-    monkeypatch.setattr(store, "save_report", _failing_save)
-    _btn(window, "PwmReport_Btn_new").click()
-    _start_verify_run(window)
-    assert controller.last_path is None, "a new run has saved nothing yet"
-    _run_to_end(qtbot, controller, clock)
-    assert window.current_page() == PAGE_REPORT
-
-    line = _saved_line(window)
-    assert str(first) not in line
-    assert "could not be saved: disk full" in line
-
-
-def test_a_failed_final_save_does_not_say_saved_to_the_stale_checkpoint(
-    qtbot,
-    rig,  # noqa: F811
-    monkeypatch,
-):
-    window, controller, _st, _daemon, clock, _settings = rig
-    real_save = store.save_report
-    _start_verify_run(window)
-    checkpoint = controller.last_path
-    assert checkpoint is not None, "precondition: an early checkpoint was written"
-
-    monkeypatch.setattr(store, "save_report", _failing_save)
-    _run_to_end(qtbot, controller, clock)
-    assert window.current_page() == PAGE_REPORT
-
-    line = _saved_line(window)
-    assert not line.startswith("Saved to")
-    assert "could not be saved: disk full" in line
-    assert f"an earlier copy is at {checkpoint}" in line
-
-    # A later successful save clears the error (the store is writable again).
-    monkeypatch.setattr(store, "save_report", real_save)
-    controller._checkpoint(force=True)
-    assert controller.last_save_error is None

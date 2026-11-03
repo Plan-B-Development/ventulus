@@ -53,8 +53,6 @@ class PwmHeaderCard(ContentSizedCard):
     """One header, its live values, its capabilities and its diagnostics."""
 
     test_requested = Signal(str)  # header_id
-    characterize_requested = Signal(str)  # header_id
-    discover_requested = Signal(str)  # header_id — AIO Phase 8 Batch 1 §6.2
     role_change_requested = Signal(str)  # header_id — DEC-444
 
     def __init__(self, view: HeaderInspectorView, parent: QWidget | None = None) -> None:
@@ -66,9 +64,9 @@ class PwmHeaderCard(ContentSizedCard):
         # value widgets to update in place while it is unchanged.
         self._live_state: _GridState | None = None
         self._detail_key: tuple | None = None
-        #: DEC-404 S4-9 (4): a PWM Test Report run holds the daemon's one
-        #: diagnostic slot, so this card's three tests stand down while it runs.
-        #: Non-empty = blocked, and the text is the reason shown on each button.
+        #: `PTA-n`: the page's own verify holds the daemon's one diagnostic
+        #: slot, so this card's test stands down while it runs. Non-empty =
+        #: blocked, and the text is the reason shown on the button.
         self._blocked_reason = ""
         self._view: HeaderInspectorView | None = None
         # A "No fan" header is dimmed through the theme's `.Card[muted="true"]`
@@ -94,9 +92,9 @@ class PwmHeaderCard(ContentSizedCard):
         )
         self._role_pill.setAccessibleName(f"Role: {view.role_label}")
         title_row.addWidget(self._role_pill)
-        # DEC-444: set the role where it is shown. NOT one of the three tests —
-        # a PWM Test Report run does not stand it down (the user's Q4), because
-        # the daemon re-checks a header's role at every step of a run.
+        # DEC-444: set the role where it is shown. Not a test, so a verify does
+        # not stand it down: the daemon re-checks a header's role at every step
+        # of a diagnostic.
         self._role_btn = make_button(
             "Set role…",
             "ghost",
@@ -184,26 +182,6 @@ class PwmHeaderCard(ContentSizedCard):
         )
         self._test_btn.clicked.connect(lambda: self.test_requested.emit(self._header_id))
         actions.addWidget(self._test_btn)
-
-        self._char_btn = make_button(
-            "Characterise",
-            "secondary",
-            object_name=f"HeaderCard_Btn_characterize_{slug}",
-            accessible_name=f"Characterise PWM response of {view.title}",
-            parent=self,
-        )
-        self._char_btn.clicked.connect(lambda: self.characterize_requested.emit(self._header_id))
-        actions.addWidget(self._char_btn)
-
-        self._discover_btn = make_button(
-            "Discover Control Path",
-            "secondary",
-            object_name=f"HeaderCard_Btn_discover_{slug}",
-            accessible_name=f"Discover which fan {view.title} controls",
-            parent=self,
-        )
-        self._discover_btn.clicked.connect(lambda: self.discover_requested.emit(self._header_id))
-        actions.addWidget(self._discover_btn)
         actions.addStretch(1)
         root.addLayout(actions)
 
@@ -238,11 +216,11 @@ class PwmHeaderCard(ContentSizedCard):
             repolish(child)
 
     def set_diagnostics_blocked(self, reason: str) -> None:
-        """Stand the three tests down while a PWM Test Report runs (S4-9 (4)).
+        """Stand the test down while the page's own verify runs (`PTA-n`).
 
-        ``""`` releases them. The ONE gating shape for these buttons is
+        ``""`` releases it. The ONE gating shape for the button is
         :meth:`_apply_enablement` — the view's capability AND this — so a poll
-        re-rendering the card cannot re-enable a button mid-run.
+        re-rendering the card cannot re-enable it mid-run.
         """
         if reason == self._blocked_reason:
             return
@@ -254,13 +232,9 @@ class PwmHeaderCard(ContentSizedCard):
         if view is None:
             return
         blocked = self._blocked_reason
-        for button, allowed, why in (
-            (self._test_btn, view.can_test, view.test_disabled_reason),
-            (self._char_btn, view.can_characterize, view.characterize_disabled_reason),
-            (self._discover_btn, view.can_discover, view.discover_disabled_reason),
-        ):
-            button.setEnabled(allowed and not blocked)
-            button.setToolTip(blocked if (allowed and blocked) else why)
+        allowed = view.can_test
+        self._test_btn.setEnabled(allowed and not blocked)
+        self._test_btn.setToolTip(blocked if (allowed and blocked) else view.test_disabled_reason)
         # The role picker ignores `blocked` by design — see `__init__`.
         self._role_btn.setEnabled(view.can_set_role)
         self._role_btn.setToolTip(

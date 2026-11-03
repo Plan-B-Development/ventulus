@@ -88,7 +88,7 @@ Some hardware has its own path, whatever the rows above say:
 - **Whether another fan program is running.** Ventulus sees only the effect, a fan that keeps being set to another speed, and cannot tell that apart from the BIOS. Step 5 is the check.
 - **A permission problem.** The daemon runs as root and can write every fan header the kernel makes writable, so you never need to change file permissions or run Ventulus as root. A header the kernel publishes read-only is a driver limit (the read-only row above), not a permission problem. What can stop the daemon is its own sandbox: a systemd drop-in that narrows it, or an OpenFAN controller on a port other than `/dev/ttyACM*` or `/dev/ttyUSB*` (see [OpenFAN Controller](openfan-controller.md)). A write the kernel refuses is reported only in the daemon's journal: the **Journal** tab in the **Logs** page's inspector, or `journalctl -u ventulusd`.
 - **Whether a writable header really drives its fan.** A board can accept a write and override it a moment later. Step 6 tests that.
-- **Which fan is on which header.** The [Fan Wizard](fan-wizard.md) and [Discover Control Path](fan-tests.md#discover-control-path) find out.
+- **Which fan is on which header.** The [Fan Wizard](fan-wizard.md) and [Discover Control Path](fan-tests.md#discover-control-path) (`ventulus-diag discover`) find out.
 
 ## Step 5 — Stop competing fan-control software
 
@@ -122,7 +122,7 @@ Also worth knowing:
 
 ## Step 6 — Verify control end-to-end
 
-1. On the **Hardware** page, under **Cooling Hardware**, press **Test Control** on a **non-critical chassis fan** header (not CPU or pump). *"PWM control is working correctly"* is the finish line; every other verdict comes with a tailored next step (see [the result table](fan-tests.md#test-pwm-control)). To test several headers in one run, use **PWM Test Report…** under **Hardware Diagnostics** on the same page.
+1. On the **Hardware** page, under **Cooling Hardware**, press **Test Control** on a **non-critical chassis fan** header (not CPU or pump). *"PWM control is working correctly"* is the finish line; every other verdict comes with a tailored next step (see [the result table](fan-tests.md#test-pwm-control)). To test several headers in one run, use **Verify All Writable** on the **System State** page, or `ventulus-diag report run` for a written [PWM Test Report](fan-tests.md#pwm-test-report).
 2. If you have an AMD GPU with a write path, run **Test GPU Fan Control** from **Advanced actions** on the **System State** page (see [its result table](fan-tests.md#test-gpu-fan-control)).
 
 When a header passes:

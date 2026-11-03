@@ -1,10 +1,11 @@
 """View-model for setting a header's role, and for nct6687d's MSI labels (DEC-444).
 
 Qt-free, in the ``services/*_view.py`` pattern. The Hardware page's header card
-and the PWM Test Report's scope page both offer the same role picker; this
-module is the one place that decides what each choice means, whether a change
-is a no-op, whether it removes pump protection, and what to tell the user
-afterwards. The dialog and both callers decide nothing but layout.
+offers the role picker (the PWM Test Report's scope page did too, before DEC-503
+moved the report to ``ventulus-diag``); this module is the one place that
+decides what each choice means, whether a change is a no-op, whether it removes
+pump protection, and what to tell the user afterwards. The dialog and its caller
+decide nothing but layout.
 
 Three rules from DEC-311/312 shape everything here:
 
@@ -31,7 +32,7 @@ from dataclasses import dataclass
 from ..api.models import Capabilities, HeaderRoleResult, HwmonHeader, OpenFanRole
 from ..knowledge.hwmon_label_resolver import is_placeholder_hwmon_label
 from .daemon_features import daemon_supports, unsupported_feature_message
-from .header_inspector_view import role_label, role_source_label
+from .header_inspector_view import role_label
 from .pump_protection import header_is_pump_protected
 
 ROLE_PUMP = "pump"
@@ -65,7 +66,7 @@ ROLE_CHOICES: tuple[RoleChoice, ...] = (
         ROLE_CHASSIS,
         "Chassis fan",
         "A case fan. Adds no floor. Makes the PWM Test Report's stall/restart "
-        "probe available on this header.",
+        "probe (ventulus-diag) available on this header.",
     ),
     RoleChoice(
         ROLE_RADIATOR,
@@ -343,8 +344,3 @@ def nct6687_label_prompt(
             "is no pump, choose “Labels are correct”."
         ),
     )
-
-
-def role_cell_text(header_role: str, role_source: str) -> str:
-    """The PWM Test Report's Role cell: readable role, and who set it."""
-    return f"{role_label(header_role)} · {role_source_label(role_source)}"

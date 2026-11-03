@@ -8,30 +8,55 @@ the symptom-first view (*my fans do not show up*, *my fans run at full speed*), 
 
 ## Where the tests are
 
+The short checks are buttons in the app. The tests that drive fans for minutes, or
+pause curve control for every fan while they run, are commands of
+**`ventulus-diag`**, which is installed with Ventulus (and on its own on a machine
+with no desktop). The **Hardware** page's **Hardware Diagnostics** section names it.
+
 | Test | Where | What it answers |
 |---|---|---|
 | [Test PWM Control](#test-pwm-control) | **Test Control** on each header card on the **Hardware** page; **Test PWM Control** and **Verify All Writable** under **System State ▸ Advanced actions** | Does a write reach the fan at all? |
-| [Characterise PWM Response](#characterise-pwm-response) | **Characterise** on each header card, **Characterise Pump** on a cooling-device card; also under **System State ▸ Advanced actions** | How does the fan respond across its range? |
-| [Discover Control Path](#discover-control-path) | **Discover Control Path** on each header card | Which fan does this header actually drive? |
 | [Calibrate OpenFan Channel](#calibrate-openfan-channel) | **Hardware ▸ Hardware Diagnostics** | Where does an OpenFAN fan stop, and where does it start again? |
 | [Test GPU Fan Control](#test-gpu-fan-control) | **System State ▸ Advanced actions**, when a writable AMD GPU is present | Does the GPU fan follow a curve? |
-| [PWM Test Report](#pwm-test-report) | **Hardware ▸ Hardware Diagnostics** | All of the above for the headers you choose, written down as a report |
-| [Recording sessions](#recording-sessions) | **Hardware ▸ Hardware Diagnostics** | What does the cooler do at startup, under load and across changes? |
+| [Characterise PWM Response](#characterise-pwm-response) | `ventulus-diag characterise HEADER` | How does the fan respond across its range? |
+| [Discover Control Path](#discover-control-path) | `ventulus-diag discover HEADER` | Which fan does this header actually drive? |
+| [PWM Test Report](#pwm-test-report) | `ventulus-diag report run` | All of the above for the headers you choose, written down as a report |
+| [Recording sessions](#recording-sessions) | `ventulus-diag validation start` | What does the cooler do at startup, under load and across changes? |
 
-A test that your hardware or daemon cannot run is disabled, with the reason in its
-tooltip. To find which physical fan is which, use the [Fan Wizard](fan-wizard.md)
-instead.
+A button for a test that your hardware or daemon cannot run is disabled, with the
+reason in its tooltip; `ventulus-diag` refuses such a test and says why. To find which
+physical fan is which, use the [Fan Wizard](fan-wizard.md) instead.
+
+### Using ventulus-diag
+
+`ventulus-diag status` shows the daemon, its thermal state and whether a test could
+start now; `ventulus-diag headers` lists every motherboard header with the id the
+other commands take, its role, whether it is pump-protected and its floor. Neither
+changes anything. `man ventulus-diag` describes every command.
+
+A command that changes fan speeds first prints what it will do: the header or cooler
+by name and id, how long it takes, and what keeps it safe (for a pump, its floor; for
+the PWM Test Report, the daemon's temperature limit). Then it asks you to type `yes`.
+Run from a script rather than a terminal, it needs `--yes-change-fan-speeds` instead,
+and refuses without it. A test that may **stop** a fan (the report's stall/restart probe) also
+needs a per-header acknowledgement. It never asks for `sudo`: any user who can run the
+app can run it.
+
+**Ctrl-C** asks the daemon to cancel the test and waits for the daemon to put the
+header back; a second Ctrl-C leaves at once, and the daemon still puts it back.
+`ventulus-diag cancel` cancels a running characterisation, discovery or stall probe
+from another terminal, whoever started it.
 
 ## What the daemon guarantees during a test
 
 Every test runs inside the daemon. Ventulus asks for it and shows the result, but
 never writes a fan speed itself, so these rules hold whatever the app does:
 
-- **One test at a time.** The daemon runs one hardware test at a time. While a test
-  started from a header card is running, every header card's tests are unavailable,
-  and while a PWM Test Report runs, every other test on the **Hardware** and
-  **System State** pages is unavailable too. A cooling-device card's **Characterise
-  Pump** and **Start Validation** follow the same rule.
+- **One test at a time.** The daemon runs one hardware test at a time, whoever asked
+  for it. While a test started from a header card is running, every header card's
+  test is unavailable. A test the daemon refuses because another one is running, for
+  example one started with `ventulus-diag`, says *another hardware test is running*;
+  try again when it ends.
 - **Heat stops a test.** No test starts while any temperature sensor reads above the
   daemon's diagnostic limit (85 °C), or while its thermal protection is forcing the
   fans. The motherboard-header tests also refuse when the temperature readings have
@@ -46,8 +71,9 @@ never writes a fan speed itself, so these rules hold whatever the app does:
   names it a pump, the test stops and the header is put back at no less than 30 %.
 - **The fan is put back.** When a test ends, the daemon restores the speed the fan
   had before: when it finishes, when you cancel, when a write fails, and when
-  something else takes the header. Closing the window, or Ventulus crashing, does
-  not leave a fan at a test speed.
+  something else takes the header. Closing a window, quitting `ventulus-diag`, or
+  either one crashing does not leave a fan at a test speed: the test runs on in the
+  daemon, which restores the fan when it ends.
 - **When it cannot put the fan back,** it leaves it faster rather than slower. While
   thermal protection is forcing the fans, the forced speed stays until it releases.
   If the daemon is stopping, it hands each motherboard header back to the board's
@@ -59,13 +85,12 @@ never writes a fan speed itself, so these rules hold whatever the app does:
 - **Curves pause.** While a test runs, curve control is paused and each fan holds its
   last speed.
 
-**Closing a test's window.** Characterise, Discover Control Path and Calibrate OpenFan
-Channel run in the daemon, so their window is only a view of the run. Closing one
-mid-run asks whether to **stop** the test or **keep it running**. Reopening the window
-shows a test that is still running, with **Cancel run**, or the result of the most
-recent one; the daemon keeps only that one, and only until it restarts. While another
-header's test of the same kind is running, **Start** waits and names that header. If a
-stop you chose on closing fails, the page that opened the window says so.
+**Closing the calibration window.** Calibrate OpenFan Channel runs in the daemon, so
+its window is only a view of the run. Closing it mid-run asks whether to **stop** the
+calibration or **keep it running**. Reopening the window shows a calibration that is
+still running, with **Cancel run**, or the result of the most recent one; the daemon
+keeps only that one, and only until it restarts. If a stop you chose on closing fails,
+the Hardware page says so.
 
 **Fan mode names.** Wherever Ventulus shows a header's `pwm_enable`, it uses the
 kernel's meanings: **0** is *Full speed (no control)*, **1** is *Manual* (what the
@@ -123,14 +148,14 @@ answers the fuller one: *how* does this header respond across its range? It is t
 deeper test to reach for when a fan or pump behaves oddly rather than plainly not
 working. It tells you nothing new about a header that is clearly reverted.
 
-The window opens on the same **safety preflight** as
+Run it with `ventulus-diag characterise HEADER`, using an id from
+`ventulus-diag headers`. It prints the same **safety preflight** as
 [Discover Control Path](#discover-control-path), so you see the daemon's verdict
-before anything moves. The sweep then runs the header **down from its top duty and
-back up again**, holding each step until it settles. Rows appear as they are
-measured, and you can stop at any point. For each step you see the duty asked for
-and read back, the RPM, the header's fan **Mode** at that moment, and **Response**
-and **Settling** times. A header the daemon did not report a mode for shows a dash,
-which is not the same as *Full speed (no control)*.
+before anything moves, and does not start if the daemon blocks it. The sweep then
+runs the header **down from its top duty and back up again**, holding each step until
+it settles; progress is printed as it goes, and Ctrl-C stops it at any point. The
+result lists each step: the duty asked for and read back, the RPM, and what the step
+showed.
 
 ### Three separate verdicts
 
@@ -156,9 +181,6 @@ If you have just powered the machine on, give the pump a minute and run it again
 - A **summary**: the safe tested range, the effective control range (where a change
   of duty changes the speed), the reported RPM range, hysteresis, RPM stability, and
   response and settling time.
-- A **response curve** with both directions plotted, flat regions shaded and the
-  saturation point marked, plus an expandable block of engineering detail (sample
-  interval, measurement resolution, standard deviation, tach dropouts and outliers).
 - **Hysteresis**: whether the fan settles at a different speed approaching a duty
   from above than from below. Some hysteresis is normal: a built-in controller, a
   firmware clamp, temperature-dependent behaviour and tach scaling all explain it.
@@ -205,10 +227,12 @@ channel with no PWM, and some vendors do not line the numbers up.
 or down a little, watches **every** fan tachometer on the board, and reports which
 ones responded and how confident it is.
 
+Run it with `ventulus-diag discover HEADER`.
+
 ### The safety check comes first
 
-The window opens on a **safety preflight**, the list of what the daemon checked
-before anything moves:
+It starts with a **safety preflight**, the list of what the daemon checked before
+anything moves:
 
 ```text
 Safety preflight
@@ -222,10 +246,11 @@ Supporting cooling    Available
 Ready to test
 ```
 
-If something is unsafe, **Start is disabled and the window says why**: the system is
-too hot, thermal protection is active, another test is running, the header is
-read-only, or the temperature readings have gone stale. The verdict is the daemon's;
-Ventulus shows it and cannot talk the daemon into running something it refused.
+If something is unsafe, **the test does not start, and says why**: the system is too
+hot, thermal protection is active, another test is running, the header is read-only,
+or the temperature readings have gone stale. The verdict is the daemon's;
+`ventulus-diag` shows it and cannot talk the daemon into running something it
+refused.
 
 ### What it reports
 
@@ -254,8 +279,8 @@ nobody looked at.
 | **Multiple responses** | Several channels responded together. Normal for a splitter, and it means the mapping is not one-to-one |
 | **No tach response** | Nothing moved. **This is not a fault.** The header may drive nothing with a tachometer, or drive something under its own control, which is what an AIO pump does during startup |
 
-A successful answer is kept: **Details** on the header card shows the relationship,
-its confidence and when it was last checked. The record is discarded if the header
+A successful answer is kept: **Details** on the header card on the app's **Hardware**
+page shows the relationship, its confidence and when it was last checked. The record is discarded if the header
 stops existing (a new board, a driver change, or the chip starting to publish
 labels), so a mapping is only ever shown for the same hardware.
 
@@ -370,145 +395,140 @@ or the daemon restarts.
 
 ## PWM Test Report
 
-**Hardware ▸ PWM Test Report…** checks your cooling setup and writes down what it
-actually saw. It runs the same daemon tests as the buttons above, one at a time, and
-the daemon performs and undoes every one of them.
+`ventulus-diag report run` checks your cooling setup and writes down what it actually
+saw. It runs the same daemon tests as the commands above, one at a time, and the
+daemon performs and undoes every one of them.
 
-1. **What to test.** Every channel the daemon reports is listed. For each motherboard
-   header you tick the tests to run. The **PWM control test** and **tach pairing**
-   start ticked on headers with a fan turning. The **full PWM sweep** (100 % down to
-   20 % and back, never below a pump's floor) and the **stall/restart probe** are your
-   choice. The probe looks for where a chassis or radiator fan stops below 20 % and
-   where it starts again. It is offered only on a header whose **role** is chassis fan
-   or radiator fan, never on a pump-protected header or a CPU fan, whatever the
-   header's label says. **Set…** in the **Role** column opens the same role picker as
-   the Hardware page's header cards, so you can name an unlabelled header here; the
-   table refreshes and keeps your ticks, and it also follows a role you set on a
-   Hardware card while it is open. A test that cannot run says why in its tooltip.
-   OpenFAN channels and GPU fans are reported but not tested.
+1. **What to test.** Without `--header`, every writable header with a fan turning is
+   tested; `--header ID` (repeatable) picks headers. Without `--test`, each header gets
+   the **PWM control test** and **tach pairing**. `--test sweep` adds the **full PWM
+   sweep** (100 % down to 20 % and back, never below a pump's floor). `--stall-probe ID`
+   adds the **stall/restart probe**, which looks for where a chassis or radiator fan
+   stops below 20 % and where it starts again. The probe is offered only on a header
+   whose **role** is chassis fan or radiator fan, never on a pump-protected header or a
+   CPU fan, whatever the header's label says; set a role with **Set role…** on the
+   header's card on the **Hardware** page. A test that cannot run is listed with the
+   reason. OpenFAN channels and GPU fans are reported but not tested. `--dry-run`
+   prints the plan and stops there; `--snapshot-only` records the machine's state and
+   tests nothing.
 2. **Your setup (optional).** What software cannot see: what is plugged into each
    header, how many fans share it (with a splitter, the RPM is one fan's), the BIOS
-   header mode, and your cooler's model and pump switch position. Anything you leave
-   blank is recorded as *not supplied*. Your answers are remembered for this machine
-   and never included in a settings export.
-3. **Review and consent.** The plan in plain words, what keeps it safe, and your
-   go-ahead. Each stall probe also needs its own **"I'll stay at the machine"** tick,
-   because the fan may stop for a short time.
-4. **Run.** Each test with its status, the fan under test live, the thermal state and
-   the time remaining. **Cancel run** stops the current test (the daemon puts the
-   header back) and lists the rest as not tested. The whole run stops if the daemon's
-   thermal protection becomes active. A single test stops if a temperature passes the
-   diagnostic limit or readings go stale; the run carries on, but each later test is
-   refused while that lasts and is listed as not tested. Closing the window asks
-   first; quitting Ventulus saves what was done so far.
+   header mode, and your cooler's model and pump switch position. Give them with
+   `--notes FILE` (`man ventulus-diag` shows the format); without it, the answers an
+   earlier version of the app saved are used. Anything not given is recorded as *not
+   supplied*. Your answers are never included in a settings export.
+3. **Confirm.** The plan, what keeps it safe, and your `yes`. Each stall probe also
+   needs its own acknowledgement, because the fan may stop for a short time.
+4. **Run.** Each test is printed as it starts and ends. Ctrl-C stops the current test
+   (the daemon puts the header back) and lists the rest as not tested. The whole run
+   stops if the daemon's thermal protection becomes active. A single test stops if a
+   temperature passes the diagnostic limit or readings go stale; the run carries on,
+   but each later test is refused while that lasts and is listed as not tested. The
+   report is saved after every step, so a run cut short still leaves one.
 5. **Report.** There is **no overall pass or fail**. You get what needs attention,
-   observations, whether every header went back to how it was found (with **Re-apply
-   profile** if one did not), a section per fan with charts and every reading, what
-   was *not* tested and why (including things no report can test, such as suspend and
-   resume), and the environment: GUI, daemon, kernel and driver versions, board and
-   BIOS. Every finding says what it is based on (measured, worked out, reported by the
-   device, or told by you) and the range it covers: a sweep from 20 % proves nothing
-   about 10 %, and the report says so, especially when your profile can drive a fan
-   lower than any test saw it turning.
+   observations, whether every header went back to how it was found (if one did not,
+   activate your profile again), a section per fan with every reading, what was *not*
+   tested and why (including things no report can test, such as suspend and resume),
+   and the environment: app, daemon, kernel and driver versions, board and BIOS. Every
+   finding says what it is based on (measured, worked out, reported by the device, or
+   told by you) and the range it covers: a sweep from 20 % proves nothing about 10 %,
+   and the report says so, especially when your profile can drive a fan lower than any
+   test saw it turning.
 
 On a board with two fan chips, two headers can share a name such as `pwm2`; the
 report adds the chip (`pwm2 (it8696)`), or the channel id where the chip cannot tell
 them apart.
 
-The report will not start in demo mode, while thermal protection is active, or while
-another test or a validation session is running; the message names the page the
-other test was started from. A validation session window that was already open stays
-open, but its **Start** is refused until the report finishes.
+The report will not start while thermal protection is active, or while another test
+or a validation session is running.
 
 ### Your reports
 
 Reports are saved as you go to `~/.local/share/ventulus/reports/` and are never
-deleted automatically. The window opens on a list of them, newest first, and also
-opens in demo mode for this. Select one to **Open** or **Export** it, two to
-**Compare** them, or **Delete…** ones you no longer want. **Open a report file…**
-shows a report from elsewhere (another machine, or one someone sent you) without
-copying it into your folder. A reopened report shows the machine as it was *then*,
-so it does not offer **Re-apply profile**.
+deleted automatically; delete a file there when you no longer want it.
+`ventulus-diag report list` lists them, newest first, and `report show` prints one,
+by id, a unique start of its id, or a path, so a report from another machine opens
+without copying it into your folder. None of these need the daemon.
 
-**Export** offers:
+`ventulus-diag report export REPORT --format FORMAT -o PATH` writes:
 
-- **JSON**: the complete record.
-- **Markdown**: for a GitHub issue. Attach the file rather than pasting it if it is long.
-- **HTML**: one file with charts (each sweep and stall probe, each tested fan's RPM and
-  duty over the run, the hottest CPU temperature). It follows your light or dark
-  setting, needs no internet connection and runs no scripts.
-- **CSV**: up to three spreadsheets in a folder you choose (sweep points, stall-probe
+- **json**: the complete record.
+- **markdown**: for a GitHub issue. Attach the file rather than pasting it if it is long.
+- **html**: one file with charts (each sweep and stall probe, each tested fan's RPM and
+  duty over the run, the hottest CPU temperature). It follows the light or dark setting
+  of the browser that opens it, needs no internet connection and runs no scripts.
+- **csv**: up to three spreadsheets in the folder `PATH` (sweep points, stall-probe
   steps, and the once-a-second trace of every fan and sensor). A reading the daemon
   did not report is left empty, never 0.
 
-**Compare** puts two reports side by side, earlier first. Fans are matched only by
-their exact header id; a header whose label changed between runs is listed as
-*possibly renamed* and not compared, so a reading is never pinned to the wrong fan.
-Differences are grouped into hardware and wiring, environment, configuration,
-measured response, and *not comparable* (a test that ran with different settings, ran
-in only one report, or started in a different thermal state). Measured differences
-are shown beside how much each run's own readings varied; nothing is labelled
-significant and there is no overall verdict. A comparison exports as Markdown or HTML.
+`ventulus-diag report compare FIRST SECOND` puts two reports side by side, earlier
+first. Fans are matched only by their exact header id; a header whose label changed
+between runs is listed as *possibly renamed* and not compared, so a reading is never
+pinned to the wrong fan. Differences are grouped into hardware and wiring,
+environment, configuration, measured response, and *not comparable* (a test that ran
+with different settings, ran in only one report, or started in a different thermal
+state). Measured differences are shown beside how much each run's own readings
+varied; nothing is labelled significant and there is no overall verdict. A comparison
+exports as Markdown or HTML with `--format` and `-o`.
 
 ## Recording sessions
 
 Three recorders watch your cooler over time instead of testing one header. They need
-a cooling device, which **Configure AIO…** on the Controls page sets up.
+a cooling device, which **Configure AIO…** on the Controls page sets up;
+`ventulus-diag validation devices` lists them with the id the other commands take.
+Start one with `ventulus-diag validation start --device ID --kind KIND`:
 
-- **Startup / Lifecycle Recording** records how the cooler behaves across startup,
-  resume and profile changes.
-- **AIO Validation** records what the cooler actually does and finalises into an
-  evidence summary you can export as CSV or JSON.
-- **Thermal Observation** records how the cooler responds to a workload **you** run.
-  Ventulus does not start, stop or control the workload, and nothing in this
-  recording drives a fan or pump: start your game, render or stress test, then
-  record. While it runs you see elapsed time, control temperature, CPU package power,
-  pump and radiator duty and RPM, the temperature trend, and whether the temperature
-  has reached a steady state. When you stop it you also get:
+- `--kind lifecycle` (**Startup / Lifecycle Recording**) records how the cooler
+  behaves across startup, resume and profile changes.
+- `--kind validation` (**AIO Validation**, the default) records what the cooler
+  actually does and finalises into an evidence summary you can export as CSV or JSON.
+- `--kind thermal` (**Thermal Observation**) records how the cooler responds to a
+  workload **you** run. Ventulus does not start, stop or control the workload, and
+  nothing in this recording drives a fan or pump: start your game, render or stress
+  test, then record. When it ends you also get:
   - **Steady state**: whether the temperature settled, with the mean, peak, trend,
-    variation, warm-up time and the rule behind the verdict. *Not established* means
-    this recording did not settle, not that your cooler cannot; a run stopped early
-    looks the same.
+    variation, warm-up time, when it settled and the rule behind the verdict. *Not
+    established* means this recording did not settle, not that your cooler cannot; a
+    run stopped early looks the same.
   - **Startup behaviour**: if the fans or pump spun up hard and then came down, the
     peak and settled RPM, how long it lasted, and the duty commanded and read back
     meanwhile. A high startup RPM is not a fault when the duty was obeyed; many coolers
     ramp at power-on by design.
-  - **Timeline**: temperature and RPM over the recording, with the steady period
-    shaded and CPU and GPU power beneath.
 
-  **Isolation templates** step you through the two comparisons cooler reviews use:
-  *pump influence* (hold the fans, vary the pump) and *radiator influence* (hold the
-  pump, vary the fans). Each stage tells you which duty to set; you set it on the
-  Controls page as usual, and Ventulus marks the timeline. The session window stays
-  open while you use the rest of the app, so you can do that and come back. It will
-  not advance while thermal protection is active or while it cannot read a
-  temperature. If CPU package power shows a dash, your machine does not expose it
-  (AMD systems on `k10temp` commonly do not); everything else still works.
+  If CPU package power shows a dash, your machine does not expose it (AMD systems on
+  `k10temp` commonly do not); everything else still works.
 
-**A session records until you stop it.** The diagnostics you tick take seconds to a
-couple of minutes each, but finishing them does not end the session, and neither does
-closing the window. Left alone it records until you press **Stop & Save**, or until
-the daemon's sample cap, about two hours in. While one is recording, the footer shows
-a **Recording** chip with the sample count; click it to get back to the session.
+A recording on its own changes no fan speed and needs no confirmation. Each
+`--diagnostic` (`verify`, `characterization`, `behaviour`, `control-path`) adds a test
+the daemon runs on the swept members, by default the device's pump, never below its
+floor; a session with one asks you to confirm first.
 
-**"Stop the session automatically when the diagnostics finish"**, on the start form,
-ends it as soon as the last diagnostic completes. It starts ticked for **AIO
-Validation**, which exists for its diagnostics, and unticked for the two passive
-recorders. It is unavailable until you tick at least one diagnostic.
+**A session records until you stop it.** The diagnostics take seconds to a couple of
+minutes each, but finishing them does not end the session. `start` follows the
+session and prints its progress; Ctrl-C ends it (a session with diagnostics is
+cancelled, with the test it is running). With `--detach` it returns at once and the
+session keeps recording until `ventulus-diag validation stop`, or until the daemon's
+sample cap, about two hours in. While one is recording, the app's footer shows a
+**Recording** chip with the sample count; its tooltip names the stop command.
+`--auto-stop` ends the session as soon as the last diagnostic completes, and needs at
+least one `--diagnostic`.
 
-**Stop & Save** and **Stop & Mark Cancelled** both keep everything: each finalises the
+`validation stop` and `validation cancel` both keep everything: each finalises the
 session, works out the findings and saves it. The second only records the session as
 *cancelled*, so you can tell an abandoned run from a finished one.
 
-All three recorders open the same window: elapsed time, telemetry per member, a row
-for each diagnostic as it finishes and, at the end, a findings table in explicit
-words: **PASS**, **FAIL**, **OBSERVED**, **NOT OBSERVED**, **NOT TESTED**,
+`validation status` shows the current or most recent session, `validation list` the
+saved ones, `validation show ID` one of them, and `validation export ID --format
+json|csv -o PATH` writes it to files. A session shows elapsed time, each diagnostic as
+it finishes, each member's duty and RPM range and, at the end, a findings list in
+explicit words: **PASS**, **FAIL**, **OBSERVED**, **NOT OBSERVED**, **NOT TESTED**,
 **UNKNOWN**, **UNAVAILABLE**. Nothing untested is ever reported as PASS, and a
 capability your hardware does not expose is *unavailable*, never a failure. A finding
 about one member names it, so one check can read **PASS** for the pump and **FAIL**
-for a radiator fan, and both are right. You can mark an event while recording and
-attach external measurements (a meter or logic-analyser reading); those are kept for
-your own analysis and never used for any control or safety decision.
+for a radiator fan, and both are right. `validation marker` marks an event while
+recording and `validation measure` attaches an external measurement (a meter or
+logic-analyser reading); those are kept for your own analysis and never used for any
+control or safety decision.
 
 ---
 

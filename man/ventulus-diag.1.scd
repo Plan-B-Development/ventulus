@@ -83,7 +83,7 @@ be made.
 	cut short. *--snapshot-only* records the machine's state and writes
 	nothing; *--dry-run* prints the plan. *--notes* reads your setup facts
 	from a JSON file (*{"cooler": {...}, "headers": {"<id>": {...}}}*);
-	without it, the answers saved in the GUI are used.
+	without it, the answers an earlier GUI version saved are used.
 
 *characterise* _header_ [*--yes-change-fan-speeds*]
 	Walk one header across the daemon's duty points and record its RPM
@@ -133,8 +133,8 @@ _$XDG_DATA_HOME/ventulus/reports/_ (default _~/.local/share/ventulus/reports/_)
 	automatically.
 
 _$XDG_CONFIG_HOME/ventulus/app_settings.json_
-	Read, never written: fan names and the report's setup answers saved by
-	the GUI.
+	Read, never written: fan names, and the report's setup answers an
+	earlier GUI version saved.
 
 # SEE ALSO
 

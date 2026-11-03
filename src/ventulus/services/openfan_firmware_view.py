@@ -582,7 +582,6 @@ def start_block_reason(
     demo: bool,
     device: OpenFanDevice | None,
     live_link: str | None,
-    external_block: str,
     inspection: Uf2Inspection | None,
     plan: WritePlan,
     prepared: bool,
@@ -598,8 +597,6 @@ def start_block_reason(
         return DEMO_REFUSAL
     if starting:
         return "Starting…"
-    if external_block:
-        return external_block
     if device is None:
         return "Reading the controller…"
     silent = device.silent_board

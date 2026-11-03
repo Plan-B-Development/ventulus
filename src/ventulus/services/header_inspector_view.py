@@ -43,7 +43,7 @@ from ..knowledge.hwmon_label_resolver import (
     LABEL_SOURCE_SENSORS_CONF,
     is_placeholder_hwmon_label,
 )
-from .daemon_features import daemon_supports, unsupported_feature_message
+from .daemon_features import daemon_supports
 from .fan_mode import PWM_ENABLE_MANUAL, pwm_enable_label
 from .pump_protection import header_effective_floor_pct, header_is_pump_protected
 
@@ -201,12 +201,6 @@ class HeaderInspectorView:
     #: Action enablement, with the reason a disabled action is disabled (§11).
     can_test: bool = False
     test_disabled_reason: str = ""
-    can_characterize: bool = False
-    characterize_disabled_reason: str = ""
-    #: AIO Phase 8 Batch 1 (§6.2): may this header be offered "Discover Control
-    #: Path"?
-    can_discover: bool = False
-    discover_disabled_reason: str = ""
     #: §6.3: "Control relationship — PWM5 → fan5_input · Confidence: HIGH".
     #: Empty when nothing has been discovered, in which case the card omits the
     #: row entirely rather than showing an empty one — a row reading "—" implies
@@ -494,32 +488,6 @@ def build_header_inspector_view(
     can_test = header.is_writable
     test_reason = "" if can_test else "This header is read-only, so it cannot be driven."
 
-    can_char = bool(header.is_writable and _supports_characterization(capabilities))
-    if not header.is_writable:
-        char_reason = "This header is read-only, so there is nothing to sweep."
-    elif not _supports_characterization(capabilities):
-        char_reason = unsupported_feature_message("pwm_characterization")
-    elif not header.rpm_available:
-        # Degraded, not blocked: the sweep still proves command acceptance and
-        # readback, which is two of its three verdicts (§11, §20).
-        char_reason = ""
-        can_char = True
-    else:
-        char_reason = ""
-
-    # AIO Phase 8 Batch 1 §6.2. Same shape as the characterisation gate above:
-    # read-only is a hard no, a daemon without the capability is a hard no, and a
-    # header with no tach of its own is DEGRADED rather than blocked — discovery
-    # watches every OTHER tach too, and "this header drives fan3" is exactly the
-    # answer a header with no tach of its own most needs.
-    can_discover = bool(header.is_writable and _supports_discovery(capabilities))
-    if not header.is_writable:
-        discover_reason = "This header is read-only, so it cannot be perturbed."
-    elif not _supports_discovery(capabilities):
-        discover_reason = unsupported_feature_message("control_path_discovery")
-    else:
-        discover_reason = ""
-
     can_set_role, set_role_reason = role_editable(header, capabilities)
 
     relationship = ""
@@ -550,10 +518,6 @@ def build_header_inspector_view(
         safety_rows=safety,
         can_test=can_test,
         test_disabled_reason=test_reason,
-        can_characterize=can_char,
-        characterize_disabled_reason=char_reason,
-        can_discover=can_discover,
-        discover_disabled_reason=discover_reason,
         control_relationship=relationship,
         control_relationship_confidence=confidence,
         control_relationship_validated_unix_ms=validated,
@@ -630,14 +594,6 @@ def _dc_pump_floor_note(
         "DC mode: a pump driven by voltage rather than PWM stalls higher in its range, "
         "so the daemon holds it at a higher floor than a PWM pump."
     )
-
-
-def _supports_characterization(capabilities: Capabilities | None) -> bool:
-    return daemon_supports("pwm_characterization", capabilities) is True
-
-
-def _supports_discovery(capabilities: Capabilities | None) -> bool:
-    return daemon_supports("control_path_discovery", capabilities) is True
 
 
 def build_header_inspector_views(

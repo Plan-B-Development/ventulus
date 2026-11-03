@@ -103,7 +103,8 @@ class OpenFanCalibrationDialog(ModalDialog):
         #: Whether a DELETE can still stop the run: only during the walk itself.
         self._can_cancel = False
         self._channel_label = ""
-        # P8-e: one poll in flight at a time (see PwmCharacterizationDialog).
+        # P8-e: one poll in flight at a time, so a slow reply cannot overlap the
+        # next timer tick and answer out of order.
         self._poll_in_flight = False
         #: The next reply answers :meth:`request_attach`, not a run we started.
         self._attaching = False

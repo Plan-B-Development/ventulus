@@ -145,13 +145,14 @@ def test_cpu_action_emits_preferred_sensors(qtbot):
     assert blocker.args == ["cpu"]
 
 
-def test_pwm_action_scrolls_to_in_page_diagnostics(qtbot):
+def test_pwm_action_scrolls_to_the_header_cards(qtbot):
     """AIO-MB Phase 6 §7: Hardware is the PRIMARY entry point for PWM testing.
 
-    This action used to deep-link to System State (which is why the test was
-    named for that signal). It now lands in this page's own Hardware
-    Diagnostics section; System State keeps its controls as an advanced
-    shortcut, reachable from the button asserted below.
+    This action used to deep-link to System State, then landed in Hardware
+    Diagnostics beside the PWM Test Report. DEC-503 moved the report to
+    `ventulus-diag`, so it lands on the header cards, each with Test Control.
+    System State keeps its controls as an advanced shortcut, reachable from the
+    button asserted below.
     """
     page, _ = _page(qtbot)
     page._on_readiness_ok(
@@ -162,7 +163,7 @@ def test_pwm_action_scrolls_to_in_page_diagnostics(qtbot):
     calls: list = []
     page._scroll.ensureWidgetVisible = lambda w, *a, **k: calls.append(w)  # type: ignore[method-assign]
     btn.click()
-    assert calls == [page._diagnostics_card], "the action must reveal the in-page section"
+    assert calls == [page._header_container], "the action must reveal the header cards"
 
 
 def test_system_state_remains_reachable_as_advanced_shortcut(qtbot):

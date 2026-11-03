@@ -1,7 +1,7 @@
 """The one path every GUI surface takes to write header roles (`ROLE-c`).
 
 Configure AIO (Controls page), the Fan Wizard's liquid-cooling step and the
-header-role picker (Hardware card and PWM Test Report) each used to carry their
+header-role picker (Hardware card) each used to carry their
 own loop over ``POST /config/header-role``: its own ordering, error handling and
 header re-read, sharing only the confirmation. The ordering is a safety
 property (DEC-312), so it lives here once. Qt-free: the confirmation is passed

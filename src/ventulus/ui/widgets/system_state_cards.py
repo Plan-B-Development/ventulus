@@ -420,8 +420,8 @@ class HealthCard(ContentSizedCard):
         """Gate "Test fan control" with the page's sweep gate.
 
         The button runs the same sweep as Advanced actions' "Verify All
-        Writable", so it takes that button's gate (report running, a verify in
-        flight) rather than staying live through both.
+        Writable", so it takes that button's gate (a verify in flight) rather
+        than staying live through it.
         """
         self._verify_btn.setEnabled(enabled)
         self._verify_btn.setText("Testing..." if testing else "Test fan control")

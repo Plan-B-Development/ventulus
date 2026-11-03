@@ -37,11 +37,7 @@ from ventulus.services.daemon_features import daemon_supports
 from ventulus.services.diagnostics_service import DiagnosticsService
 from ventulus.services.duty_drift import NO_DRIFT, DutyDriftState, duty_drift_state, is_drift_key
 from ventulus.services.health_ack import clear_key, prune, silence_key
-from ventulus.services.pump_protection import header_is_pump_protected
-from ventulus.services.pwm_report.runner import RUN_ACTIVE_REASON
 from ventulus.services.pwm_verification import pwm_verification_tristate
-from ventulus.services.run_contact_view import stop_on_close_failed_text
-from ventulus.services.run_reply_ledger import ReplyRoute, RunReplyLedger
 from ventulus.services.system_state_view import (
     THERMAL_STATE_NO_CONNECTION,
     SilenceState,
@@ -60,16 +56,13 @@ from ventulus.services.verify_view import (
 )
 from ventulus.ui.components.a11y import name_value_control
 from ventulus.ui.components.buttons import make_button
-from ventulus.ui.components.transient import exec_dialog
 from ventulus.ui.pages.diagnostics_workers import (
-    _CharacterizationWorker,
     _GpuVerifyWorker,
     _HwDiagWorker,
     _VerifyWorker,
 )
 from ventulus.ui.qt_util import set_chip_class, style_splitter
 from ventulus.ui.widgets.collapsible_section import CollapsibleSection
-from ventulus.ui.widgets.pwm_characterization_dialog import PwmCharacterizationDialog
 from ventulus.ui.widgets.readiness_report import (
     ReadinessReportDialog,
     build_readiness_report_html,
@@ -158,12 +151,6 @@ class SystemStatePage(QWidget):
     _hw_diag_request = Signal()
     _fan_tools_request = Signal()
     _rescan_request = Signal()  # DEC-216: footer Rescan Hardware (relocated from Diagnostics)
-    # AIO-MB Phase 3 — the deeper PWM/RPM sweep.
-    _char_start_request = Signal(str, object, object, object, object)
-    #: AIO Phase 8 Batch 1 §6.1, wired by DEC-334 (header_id, diagnostic).
-    _char_preflight_request = Signal(str, str)
-    _char_poll_request = Signal()
-    _char_cancel_request = Signal()
 
     def __init__(
         self,
@@ -196,12 +183,6 @@ class SystemStatePage(QWidget):
 
         # Action state.
         self._verify_active_header: str | None = None
-        #: DEC-404 S4-13: a PWM Test Report run holds the daemon's one diagnostic
-        #: slot. While it does, the three hwmon tests here stand down — a verify
-        #: pressed in the run's hand-back gap would write to a header between the
-        #: report's measurements. Set by `set_pwm_report_active` (MainWindow
-        #: routes it from the Hardware page, which owns the run).
-        self._pwm_report_active = False
         self._verify_all_queue: list[str] = []
         self._verify_all_results: list[tuple[str, str]] = []
         #: Headers in this sweep the daemon could not put back (`PTA-s`). Kept
@@ -220,12 +201,6 @@ class SystemStatePage(QWidget):
         #: 2026-10-14; the `ACK-z` shape on another button).
         self._gpu_restore_in_flight = False
         self._report_dialog: ReadinessReportDialog | None = None
-        self._char_worker: _CharacterizationWorker | None = None
-        self._char_thread: QThread | None = None
-        self._char_dialog: PwmCharacterizationDialog | None = None
-        #: Which window the characterisation worker's in-order replies belong
-        #: to, and which one answers a "Stop" chosen on closing (#17).
-        self._char_replies = RunReplyLedger()
         self._hw_diag_fetched = False
         self._hw_diag_in_flight = False  # guards the header Refresh (DEC-358)
         self._pruned_for = None  # payload identity the silences were last pruned against
@@ -487,20 +462,6 @@ class SystemStatePage(QWidget):
         )
         self._verify_all_btn.clicked.connect(self._run_pwm_verify_all)
         pwm_row.addWidget(self._verify_all_btn)
-        # AIO-MB Phase 3. A SIBLING of "Test PWM Control", never a replacement —
-        # the quick verify answers "does a write do anything?" in ~6 s; this walks
-        # the header across several duties and takes minutes. Hidden entirely
-        # against a daemon without the capability: that daemon 404s the route, and
-        # probing to find out would couple feature detection to which error.code
-        # came back.
-        self._characterize_btn = make_button(
-            "Characterise PWM Response",
-            "secondary",
-            object_name="SystemState_Btn_characterize",
-        )
-        self._characterize_btn.clicked.connect(self._open_characterization)
-        self._characterize_btn.setVisible(False)
-        pwm_row.addWidget(self._characterize_btn)
         section.add_layout(pwm_row)
 
         self._verify_result_label = QLabel("")
@@ -865,14 +826,6 @@ class SystemStatePage(QWidget):
         """Is a single verify or a full sweep currently running?"""
         return bool(self._verify_all_total) or self._verify_active_header is not None
 
-    def pwm_verify_running(self) -> bool:
-        """The PWM Test Report's view of :meth:`_verify_in_flight` (`PTA-d`).
-
-        MainWindow hands this to the Hardware page, so the report refuses to
-        start while a verify or sweep started here is still running.
-        """
-        return self._verify_in_flight()
-
     def _sync_verify_button_enabled(self) -> None:
         """The ONE gating shape for *Test PWM Control* (row `ACK-z`).
 
@@ -890,58 +843,38 @@ class SystemStatePage(QWidget):
         leave the button disabled forever after an ordinary single verify,
         because `_verify_in_flight` would still be true.
         """
-        self._verify_btn.setEnabled(
-            not self._verify_in_flight()
-            and self._verify_combo.count() > 0
-            and not self._pwm_report_active
-        )
-        self._verify_btn.setToolTip(RUN_ACTIVE_REASON if self._pwm_report_active else "")
+        self._verify_btn.setEnabled(not self._verify_in_flight() and self._verify_combo.count() > 0)
 
     def _sync_verify_all_enabled(self) -> None:
         """The one gating shape for *Verify All Writable* (DEC-404 S4-13).
 
         `_finish_verify_all` used to re-enable it with a bare ``setEnabled(True)``
         — the `ACK-z` shape this file already retired for the single-verify
-        button — which would have re-enabled it in the middle of a report run.
+        button — which would have re-enabled it in the middle of a sweep.
 
         `ACK-ab`: it reads `_verify_in_flight`, not just the sweep's own total,
         so a single verify greys it too. Otherwise a sweep started over it would
         queue one hardware probe more than the user asked for. `ACK-z`'s trap
         applies here too: every caller clears `_verify_active_header` first.
         """
-        enabled = not self._verify_in_flight() and not self._pwm_report_active
-        tooltip = RUN_ACTIVE_REASON if self._pwm_report_active else ""
+        enabled = not self._verify_in_flight()
         self._verify_all_btn.setEnabled(enabled)
-        self._verify_all_btn.setToolTip(tooltip)
         # The Health card's "Test fan control" is the same sweep, so the same
-        # gate (GUI audit 2026-10-14, #6): it used to stay live through a report
-        # run and a verify in flight alike.
+        # gate (GUI audit 2026-10-14, #6): it used to stay live through a verify
+        # in flight.
         self._health_card.set_verify_state(
-            enabled=enabled, testing=self._verify_all_total > 0, tooltip=tooltip
+            enabled=enabled, testing=self._verify_all_total > 0, tooltip=""
         )
 
     def _sync_verify_buttons(self) -> None:
-        """All three hwmon test buttons from the page's current state.
+        """Both hwmon test buttons from the page's current state.
 
-        Called wherever that state changes: a result, the end of a sweep, and a
-        report run starting or ending. So a verify greys every button, not just
-        the one it was started from (`ACK-ab`, `ACK-ac`).
+        Called wherever that state changes: a result and the end of a sweep. So
+        a verify greys every button, not just the one it was started from
+        (`ACK-ab`).
         """
         self._sync_verify_button_enabled()
         self._sync_verify_all_enabled()
-        self._update_characterize_availability()
-
-    @Slot(bool)
-    def set_pwm_report_active(self, active: bool) -> None:
-        """Stand the hwmon diagnostics down while a PWM Test Report runs (S4-13).
-
-        The GPU fan buttons are deliberately untouched: the report never tests a
-        GPU fan and GPU verify does not share the hwmon slot.
-        """
-        if active == self._pwm_report_active:
-            return
-        self._pwm_report_active = active
-        self._sync_verify_buttons()
 
     def _populate_verify_combo(self) -> None:
         """Rebuild the header dropdown, preserving the user's pick.
@@ -977,27 +910,6 @@ class SystemStatePage(QWidget):
             if restored >= 0:
                 self._verify_combo.setCurrentIndex(restored)
         self._sync_verify_button_enabled()
-        self._update_characterize_availability()
-
-    def _supports_characterization(self) -> bool:
-        caps = getattr(self._state, "capabilities", None) if self._state else None
-        return daemon_supports("pwm_characterization", caps) is True
-
-    def _update_characterize_availability(self) -> None:
-        """Visibility follows support; enablement also follows what is running.
-
-        `ACK-ac`: characterisation claims the daemon's one diagnostic slot, the
-        same as verify, and the daemon refuses it (`409`) while a verify holds
-        that slot. So it greys while a verify or sweep started here is in
-        flight. It stays visible, because a button that vanishes mid-sweep is
-        worse than one that greys.
-        """
-        show = self._supports_characterization() and self._verify_combo.count() > 0
-        self._characterize_btn.setVisible(show)
-        self._characterize_btn.setEnabled(
-            show and not self._verify_in_flight() and not self._pwm_report_active
-        )
-        self._characterize_btn.setToolTip(RUN_ACTIVE_REASON if self._pwm_report_active else "")
 
     # ── Worker lifecycle (ported) ────────────────────────────────────
 
@@ -1172,114 +1084,7 @@ class SystemStatePage(QWidget):
                 thread.terminate()
                 thread.wait(1000)
 
-    # ── PWM/RPM characterisation (AIO-MB Phase 3) ────────────────────
-
-    def _ensure_char_worker(self) -> bool:
-        def connect(w: _CharacterizationWorker) -> None:
-            self._char_start_request.connect(w.do_start, Qt.ConnectionType.QueuedConnection)
-            self._char_poll_request.connect(w.do_poll, Qt.ConnectionType.QueuedConnection)
-            self._char_cancel_request.connect(w.do_cancel, Qt.ConnectionType.QueuedConnection)
-            # Each answers once, in order: the ledger routes the answers.
-            self._char_replies = RunReplyLedger()  # a new worker owes nothing yet
-            for request in (
-                self._char_start_request,
-                self._char_poll_request,
-                self._char_cancel_request,
-            ):
-                request.connect(self._char_replies.sent)
-            self._char_preflight_request.connect(w.do_preflight, Qt.ConnectionType.QueuedConnection)
-            w.run_updated.connect(self._on_char_update, Qt.ConnectionType.QueuedConnection)
-            w.run_error.connect(self._on_char_error, Qt.ConnectionType.QueuedConnection)
-            w.preflight_ready.connect(
-                self._on_char_preflight_ready, Qt.ConnectionType.QueuedConnection
-            )
-            w.preflight_error.connect(
-                self._on_char_preflight_error, Qt.ConnectionType.QueuedConnection
-            )
-
-        self._char_worker, self._char_thread, ok = self._ensure_worker(
-            self._char_worker, self._char_thread, _CharacterizationWorker, connect
-        )
-        return ok
-
-    def _open_characterization(self) -> None:
-        header_id = self._verify_combo.currentData()
-        if not header_id or not self._supports_characterization():
-            return
-        if not self._ensure_char_worker():
-            return
-        headers = self._state.hwmon_headers if self._state else []
-        header = next((h for h in headers if h.id == header_id), None)
-        resolve = self._state.fan_display_name if self._state else None
-        label = resolve(header_id) if resolve else header_id
-        # The UNION predicate, never the wire `role` (DEC-312): a user who
-        # relabelled a PUMP header `chassis_fan` still gets the pump copy,
-        # because the daemon still protects it.
-        dialog = PwmCharacterizationDialog(
-            header_id,
-            label,
-            is_pump=header_is_pump_protected(header, getattr(self._state, "capabilities", None)),
-            header=header,
-            capabilities=getattr(self._state, "capabilities", None),
-            name_for=resolve,
-            parent=self,
-        )
-        dialog.start_requested.connect(self._char_start_request.emit)
-        dialog.poll_requested.connect(self._char_poll_request.emit)
-        dialog.cancel_requested.connect(self._char_cancel_request.emit)
-        dialog.preflight_requested.connect(self._char_preflight_request.emit)
-        self._char_dialog = dialog
-        self._char_replies.window_opened()
-        # BEFORE `exec()`, so the daemon's safety statement is the first thing
-        # rendered rather than something that arrives after the user has reached
-        # for Start (Batch 1 §6.1). Then one status read, so a sweep still
-        # running daemon-side is shown and can be cancelled (#17).
-        dialog.request_preflight()
-        dialog.request_attach()
-        try:
-            exec_dialog(dialog)
-        finally:
-            dialog.stop_polling()
-            self._char_dialog = None
-            self._char_replies.window_closed(stop_sent=dialog.cancel_sent_on_close)
-
-    @Slot(object)
-    def _on_char_preflight_ready(self, report: object) -> None:
-        if self._char_dialog is not None:
-            self._char_dialog.apply_preflight(report)
-
-    @Slot(str, str)
-    def _on_char_preflight_error(self, category: str, message: str) -> None:
-        # Advisory only, never `apply_error`: a missing safety advisory must not
-        # disable Start for a run the daemon would accept.
-        if self._char_dialog is not None:
-            self._char_dialog.apply_preflight_error(category, message)
-
-    @Slot(object)
-    def _on_char_update(self, run: object) -> None:
-        route = self._char_replies.received()
-        if route is ReplyRoute.WINDOW and self._char_dialog is not None:
-            self._char_dialog.apply_run(run)
-
-    @Slot(str, str)
-    def _on_char_error(self, category: str, message: str) -> None:
-        route = self._char_replies.received()
-        if route is ReplyRoute.WINDOW and self._char_dialog is not None:
-            self._char_dialog.apply_error(category, message)
-        elif route is ReplyRoute.STOP_ANSWER:
-            self._show_verify_message(
-                self._verify_result_label,
-                stop_on_close_failed_text("characterisation", message),
-                "WarningChip",
-            )
-
     def cleanup(self) -> None:
-        if self._char_dialog is not None:
-            self._char_dialog.stop_polling()
-            self._char_dialog.close()
-            self._char_dialog = None
-        self._teardown_worker(self._char_worker, self._char_thread, "Characterization")
-        self._char_worker = self._char_thread = None
         self._teardown_worker(self._verify_worker, self._verify_thread, "Verify")
         self._verify_worker = self._verify_thread = None
         self._teardown_worker(self._hw_diag_worker, self._hw_diag_thread, "HW diagnostics")
@@ -1317,7 +1122,6 @@ class SystemStatePage(QWidget):
             return
         self._verify_active_header = header_id
         self._sync_verify_all_enabled()  # `ACK-ab`: after the header is recorded
-        self._update_characterize_availability()  # `ACK-ac`
         self._verify_request.emit(header_id)
 
     @Slot(object, str)
@@ -1434,12 +1238,8 @@ class SystemStatePage(QWidget):
         if self._verify_all_total > 0:
             return  # already running
         # The gate `_sync_verify_all_enabled` greys both buttons with, enforced
-        # where the sweep starts too (#6): a sweep in a report run's hand-back
-        # gap writes between its measurements (S4-13), and one over a single
-        # verify queues an extra probe (`ACK-ab`).
-        if self._pwm_report_active:
-            self._show_sweep_message(RUN_ACTIVE_REASON)
-            return
+        # where the sweep starts too (#6): a sweep over a single verify queues
+        # an extra probe (`ACK-ab`).
         if self._verify_in_flight():
             self._show_sweep_message(
                 "A fan-control test is already running. Try again when it ends."
@@ -1786,8 +1586,3 @@ class SystemStatePage(QWidget):
         cached = self._diag.last_hw_diagnostics
         if cached is not None:
             self._render(cached)
-        # `P8-bx`: this page opens the characterization dialog too, so it carries
-        # the last hop for its chart exactly as `hardware_page` does. Latent while
-        # that dialog is `exec()`-modal — see the dialog's own `set_theme`.
-        if self._char_dialog is not None:
-            self._char_dialog.set_theme(tokens)

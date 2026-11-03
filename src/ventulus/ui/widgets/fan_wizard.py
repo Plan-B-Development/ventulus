@@ -132,7 +132,7 @@ def thermal_limit_c(capabilities: object | None) -> float:
     """The temperature above which the wizard will not stop a fan (`PTA-m`).
 
     The daemon's published ``limits.diagnostic_max_temp_c`` where it has one
-    (daemon >= 2.55.0), so this and the PWM Test Report's consent text name the
+    (daemon >= 2.55.0), so this and ``ventulus-diag``'s confirmation name the
     same figure; :data:`THERMAL_ABORT_C` only for a daemon that does not publish
     it. **This check is the wizard's own gate, not a copy of the daemon's**: the
     wizard stops fans through ``POST /fans/{id}/identify``, which has no

@@ -215,6 +215,5 @@ def start_refusal(status: DaemonStatus) -> list[str]:
         thermal_state=status.thermal_state,
         diagnostic_running=bool(status.verify_active),
         session_recording=bool(session is not None and session.is_recording),
-        local_verify_pages=(),
         demo_mode=False,
     )

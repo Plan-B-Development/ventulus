@@ -556,7 +556,6 @@ class TestEveryConvertedGateTracksItsWireFlag:
         """(name, wire flag, callable taking a capabilities object) for all five."""
         from ventulus.ui.pages.controls_page import ControlsPage
         from ventulus.ui.pages.settings_page import SettingsPage
-        from ventulus.ui.pages.system_state_page import SystemStatePage
         from ventulus.ui.widgets.fan_wizard import FanConfigWizard
 
         def bound(fn):
@@ -585,20 +584,17 @@ class TestEveryConvertedGateTracksItsWireFlag:
                 "profile_search_dir_remove",
                 bound(SettingsPage._daemon_supports_dir_removal),
             ),
-            (
-                "SystemStatePage._supports_characterization",
-                "pwm_characterization",
-                bound(SystemStatePage._supports_characterization),
-            ),
         ]
 
     def test_the_sweep_covers_every_gate_this_change_converted(self):
-        """Precondition: five gates were converted, so five must be exercised.
+        """Precondition: five gates were converted and four remain (DEC-503 took
+        System State's characterisation gate with the button), so four must be
+        exercised.
 
         Without this the parametrisation could silently shrink to one and every
         assertion below would still pass — "assert you did not skip every case".
         """
-        assert len(self._gates()) == 5
+        assert len(self._gates()) == 4
 
     @pytest.mark.parametrize("advertised", [True, False])
     def test_a_gate_opens_exactly_when_its_wire_flag_is_true(self, advertised):

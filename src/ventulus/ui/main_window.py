@@ -278,9 +278,9 @@ class MainWindow(QWidget):
             # The Cooling Hardware card derives the pump strategy from the active
             # profile's curve shape, and only ProfileService holds a Profile.
             profile_service=self._profile_service,
-            # DEC-404 decision 7: the PWM Test Report remembers "Your setup"
-            # facts. The shared service — a second instance would write the same
-            # file from a second in-memory copy (DEC-357).
+            # The "Labels are correct" answer (nct6687d note) is a per-machine
+            # setting. The shared service — a second instance would write the
+            # same file from a second in-memory copy (DEC-357).
             settings_service=self._settings_service,
         )
         # DEC-215: Theme is now its own page (split from the Settings tabs). Owns
@@ -489,15 +489,6 @@ class MainWindow(QWidget):
         # A cooling-device card's "Edit Configuration" — the AIO configuration
         # workflow lives on Controls and is reused, never duplicated (§21).
         self.hardware_page.open_controls.connect(self._open_controls_page)
-        # DEC-404 S4-13: a PWM Test Report run holds the daemon's one diagnostic
-        # slot, so System State's hwmon tests stand down while it runs.
-        self.hardware_page.pwm_report_active_changed.connect(
-            self.system_state_page.set_pwm_report_active
-        )
-        # `PTA-d`: and the other direction. A Verify All sweep already running
-        # there must refuse the report's Start, because the poll's
-        # `verify_active` reads false between two of its verifies.
-        self.hardware_page.set_local_verify_query(self.system_state_page.pwm_verify_running)
 
         # Populate dashboard profile selector
         self.dashboard_page.populate_profiles()
@@ -629,10 +620,9 @@ class MainWindow(QWidget):
     def _open_recording_session(self) -> None:
         """The footer's recording chip was clicked (`P8-bb`).
 
-        Goes to the Hardware page, which is where a session is started and
-        stopped. Deliberately does not re-open the session dialog: the dialog is
-        modeless now, so one may already be open, and a second would poll the
-        same slot twice and give the user two Stop buttons for one session.
+        Goes to the Hardware page, whose diagnostics panel names
+        ``ventulus-diag`` and the command that stops a session (DEC-503). The
+        GUI itself starts and stops none.
         """
         from ventulus.constants import NAV_HARDWARE
 

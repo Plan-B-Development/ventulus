@@ -27,16 +27,3 @@ from ventulus.services import diagnostic_estimates as est
 )
 def test_duration_text_rounds_to_quarter_minutes(seconds, text):
     assert est.duration_text(seconds) == text
-
-
-def test_the_session_dialog_labels_are_unchanged_by_the_move():
-    from ventulus.ui.widgets.validation_session_dialog import _DIAGNOSTIC_CHOICES
-
-    assert dict(_DIAGNOSTIC_CHOICES) == {
-        "pwm_verify": "PWM control test (~10 s per member)",
-        "pwm_characterization": "PWM response characterisation (~1½ min per member)",
-        "pwm_behaviour_characterization": (
-            "PWM behaviour characterisation — adds hysteresis and stability (~4 min per member)"
-        ),
-        "control_path_discovery": "Control-path discovery (~1 min per member)",
-    }

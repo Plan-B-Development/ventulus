@@ -57,11 +57,11 @@ IMPLICIT_FIELDS: dict[str, str] = {
     "logs_level_filters": "set by the Logs page level toggles",
     "logs_search_text": "set by the Logs page search box",
     "logs_source_filter": "set by the Logs page source dropdown (DEC-282)",
-    # DEC-404 decision 7: the PWM Test Report's "Your setup" step is where these
-    # are set — per stable header id, beside the headers they describe. A
-    # Settings row would be a second, context-free editor for the same facts.
-    "hardware_notes": "set in the PWM Test Report's optional 'Your setup' step",
-    "cooler_notes": "set in the PWM Test Report's optional 'Your setup' step",
+    # DEC-404 decision 7 set these in the PWM Test Report's "Your setup" step.
+    # DEC-503 moved the report to `ventulus-diag`, which reads them from this
+    # file as its defaults; the GUI keeps and round-trips them, with no editor.
+    "hardware_notes": "kept for ventulus-diag report run, which reads it (DEC-503)",
+    "cooler_notes": "kept for ventulus-diag report run, which reads it (DEC-503)",
 }
 
 

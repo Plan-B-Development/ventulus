@@ -121,10 +121,11 @@ header again; a pass replaces the failure.
 
 ## Fan-control verification
 
-The **Test PWM control** action scrolls to this page's own **Hardware Diagnostics**
-section, whose **PWM Test Report…** tests the headers you choose in one run. Each
-header's card under **Cooling Hardware** also has its own **Test Control** button, and
-the **System State** page keeps the same test as an advanced shortcut. It briefly nudges a fan and observes the RPM
+The **Test PWM control** action scrolls to the header cards under **Cooling
+Hardware**, each with its own **Test Control** button. The **System State** page keeps
+the same test as an advanced shortcut, with **Verify All Writable** for every header,
+and `ventulus-diag report run` tests the headers you choose in one run and writes the
+result down. It briefly nudges a fan and observes the RPM
 response to confirm the control path actually works. That is the honest way to turn
 "detected/writable" into "control verified". It is thermally guarded and reverts
 after the test.

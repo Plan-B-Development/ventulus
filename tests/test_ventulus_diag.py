@@ -465,10 +465,13 @@ def test_the_call_worker_answers_every_call_even_with_no_daemon(tmp_path):
 
 
 class SweepClient(ReadOnlyClient):
-    def __init__(self, states: list[str], *, blocked: bool = False) -> None:
+    def __init__(
+        self, states: list[str], *, blocked: bool = False, preflight: dict | None = None
+    ) -> None:
         super().__init__()
         self.states = states
         self.blocked = blocked
+        self.preflight = preflight
         self.started = 0
         self.cancels = 0
 
@@ -481,6 +484,7 @@ class SweepClient(ReadOnlyClient):
                 "verdict": verdict,
                 "checks": [],
                 "blocking": [],
+                **(self.preflight or {}),
             }
         )
 
@@ -532,6 +536,25 @@ def test_an_unconfirmed_or_preflight_blocked_characterisation_never_starts():
     with pytest.raises(DiagError) as exc:
         _sweep(client)
     assert "preflight blocked" in exc.value.message and client.started == 0
+
+
+def test_a_named_blocker_refuses_under_a_verdict_this_version_does_not_know():
+    """The CLI reads `blocking` as well as `verdict`, as the GUI's dialogs did
+    (`preflight_view`): a newer daemon's unknown verdict token fails safe."""
+    blocker = {
+        "verdict": "deferred",
+        "checks": [{"check_id": "thermal_headroom", "state": "fail", "detail": "CPU too hot"}],
+        "blocking": ["thermal_headroom"],
+    }
+    client = SweepClient(["complete"], preflight=blocker)
+    with pytest.raises(DiagError) as exc:
+        _sweep(client)
+    assert "preflight blocked" in exc.value.message and "CPU too hot" in exc.value.message
+    assert client.started == 0
+    # The opposite branch: the same unknown verdict with no blocker runs.
+    client = SweepClient(["complete"], preflight={**blocker, "blocking": []})
+    rc, _out = _sweep(client)
+    assert rc == EXIT_OK and client.started == 1
 
 
 def test_an_interrupted_characterisation_is_cancelled_then_followed_to_its_end():
@@ -932,3 +955,60 @@ def test_listing_reports_leaves_a_running_report_alone(tmp_path, monkeypatch):
     assert report.list_cmd(c) == EXIT_OK
     assert path.read_bytes() == before
     assert "in_progress" in out.getvalue() or "in progress" in out.getvalue()
+
+
+def test_a_thermal_sessions_steady_state_and_startup_are_printed():
+    """DEC-503: the session dialog that showed these left the GUI, so the CLI's
+    `validation show|status` prints them, in the daemon's words."""
+    session = parse_validation_session(
+        {
+            "session_id": "t1",
+            "state": "completed",
+            "kind": "thermal_observation",
+            "steady_state": {
+                "verdict": "detected",
+                "start_ms": 180_000,
+                "mean_c": 52.4,
+                "peak_c": 55.0,
+                "criterion": "slope under the daemon's threshold for N windows",
+            },
+            "startup_fingerprints": [
+                {
+                    "member_id": CPU,
+                    "peak_rpm": 3400,
+                    "post_override_rpm": 1040,
+                    "requested_pct_during": 35,
+                    "readback_pct_during": 35,
+                    "interpretation": "device_override",
+                }
+            ],
+        }
+    )
+    c, out, _ = console()
+    validation.render(c, session, make_daemon(SessionClient()))
+    text = out.getvalue()
+    assert "Steady state:" in text and "52.4 °C" in text
+    assert "Steady from: 3m 00s into the session" in text
+    assert "Rule: slope under the daemon's threshold for N windows" in text
+    assert "Startup:" in text and "3400 RPM" in text and "35%" in text
+    # The opposite branch: a session without them prints neither block.
+    c, out, _ = console()
+    validation.render(
+        c, parse_validation_session({"session_id": "v1"}), make_daemon(SessionClient())
+    )
+    assert "Steady state" not in out.getvalue() and "Startup" not in out.getvalue()
+
+
+def test_a_feature_the_daemon_does_not_offer_is_refused_before_any_request():
+    """`Daemon.require` is the CLI's capability gate (a `GATE_CALLS` entry in the
+    wire-field guard). A thermal observation needs `thermal_observation`."""
+    client = SessionClient()
+    c, _, _ = console()
+    request = validation.StartRequest(device_id="aio", kind="thermal", detach=True)
+    with pytest.raises(DiagError) as exc:
+        validation.start_cmd(c, make_daemon(client), request)
+    assert exc.value.code == EXIT_INCOMPATIBLE and client.start_kwargs is None
+    # The opposite branch: the same request starts once the daemon offers it.
+    caps = {**CAPS, "control": {**CAPS["control"], "thermal_observation": True}}
+    assert validation.start_cmd(c, make_daemon(client, caps=caps), request) == EXIT_OK
+    assert client.start_kwargs is not None

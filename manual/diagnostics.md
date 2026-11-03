@@ -217,7 +217,7 @@ start open. Each note also says what this machine says about it:
 | --- | --- |
 | *observed on this system* | Confirmed here. The note is raised as a condition, or explains one that is already there |
 | *not present on this system* | Measured and refuted: the collision or missing chip it describes is not here |
-| *not yet verified on this system* | Neither confirmed nor refuted. Most of these describe the BIOS quietly ignoring PWM writes, which only a write to a header can settle: use **Test fan control** in this section. It runs the same test as **Verify All Writable** under Advanced actions and shows its progress and result below the button. Like that button, it is unavailable while another test or a PWM Test Report is running. The evidence is the daemon's own per-header test results, so a test run from the **Hardware** page, the PWM Test Report or a validation session counts too, and a header whose latest result failed keeps the note *observed* until that header passes. A header with no tachometer reports *no tach*, and a test whose read-back failed reports *no readback*; neither settles anything or overwrites a result you already have |
+| *not yet verified on this system* | Neither confirmed nor refuted. Most of these describe the BIOS quietly ignoring PWM writes, which only a write to a header can settle: use **Test fan control** in this section. It runs the same test as **Verify All Writable** under Advanced actions and shows its progress and result below the button. Like that button, it is unavailable while another test from this page is running, and if the daemon is busy with a test started elsewhere (with `ventulus-diag`, for instance) it says another hardware test is running. The evidence is the daemon's own per-header test results, so a test run from the **Hardware** page, or a PWM Test Report or validation session run with `ventulus-diag`, counts too, and a header whose latest result failed keeps the note *observed* until that header passes. A header with no tachometer reports *no tach*, and a test whose read-back failed reports *no readback*; neither settles anything or overwrites a result you already have |
 | *reference for this hardware* | Nothing on this machine could confirm or refute it (for example, a note about a sensor driver that is never the fan-control path) |
 
 ### Acknowledge and Dismiss
@@ -288,11 +288,12 @@ not on the list.
 
 ### Advanced actions
 
-Collapsed by default: **Test PWM Control**, **Verify All Writable**, **Characterise
-PWM Response**, and, when a writable AMD GPU is present, **Test GPU Fan Control** and
-**Restore GPU Fan to Automatic**. Each is explained on
-[Fan Tests and Reports](fan-tests.md). They are unavailable while one of them, or a
-PWM Test Report, is running, because the daemon runs one test at a time.
+Collapsed by default: **Test PWM Control**, **Verify All Writable**, and, when a
+writable AMD GPU is present, **Test GPU Fan Control** and **Restore GPU Fan to
+Automatic**. Each is explained on [Fan Tests and Reports](fan-tests.md). They are
+unavailable while one of them is running, because the daemon runs one test at a time;
+a test the daemon refuses because one started elsewhere is running (with
+`ventulus-diag`, for instance) says another hardware test is running.
 
 **Restore GPU Fan to Automatic** hands the GPU fan back to the card's own curve, to
 undo a static GPU speed without restarting the daemon. It is disabled, with the reason
@@ -397,7 +398,8 @@ no, so the page says *Unknown* rather than *Unsupported*.
   whose own label names the CPU fan is. It is not a pump, so fan identification still
   stops it.
 - **Chassis fan** or **Radiator fan**: no floor. This is what makes the PWM Test
-  Report's stall/restart probe available on the header.
+  Report's stall/restart probe (`ventulus-diag report run --stall-probe`) available on
+  the header.
 - **No fan**: nothing is plugged in, so the card is dimmed and reads *No fan* instead
   of warning about a missing RPM. It adds no floor.
 - **Not set** removes your assignment.
@@ -409,8 +411,8 @@ stays protected whatever you choose. Removing a pump you assigned asks first and
 the protection being removed, unless the header's own label or cooler channel keeps it
 protected anyway, in which case nothing is lost and nothing is asked. The message afterwards appears on the card and reports
 the daemon's answer, not what was asked for. The button is disabled on a read-only
-header, and stays available while a PWM Test Report runs, because the daemon checks
-roles again at every step.
+header, and stays available while a test runs, including a PWM Test Report started
+with `ventulus-diag`, because the daemon checks roles again at every step.
 
 #### OpenFAN channels
 
@@ -439,16 +441,17 @@ the header your pump is on. The note goes once you assign a pump, or when you ch
 The tests, each disabled with the reason in its tooltip when your hardware cannot run
 it. Each is explained on [Fan Tests and Reports](fan-tests.md):
 
-- **PWM Test Report…**: the whole-machine assessment. While it runs, every other test
-  here and on System State is unavailable.
 - **Calibrate OpenFan Channel…**: where an OpenFAN fan stops, where it starts again,
   and the minimum that keeps it running.
 - **Update OpenFAN Firmware…**: installs a firmware file onto the controller; see
   [OpenFAN Controller](openfan-controller.md#updating-the-openfan-firmware).
-- **Test Control**, **Characterise** and **Discover Control Path** on each header
-  card, and **Characterise Pump** on a cooling-device card.
-- **Startup / Lifecycle Recording**, **AIO Validation** and **Thermal Observation**:
-  the recording sessions.
+- **Test Control** on each header card.
+
+A note here names the tests that drive fans for minutes: the PWM Test Report,
+Characterise, Discover Control Path and the recording sessions. They run from the
+`ventulus-diag` command (see
+[Using ventulus-diag](fan-tests.md#using-ventulus-diag)); **Copy command** copies
+`ventulus-diag status`, the read-only first step.
 
 ### Super-I/O Architecture
 

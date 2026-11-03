@@ -529,7 +529,10 @@ def _control_capability() -> dict:
 #: Callables that take a feature id and gate on it, with the positional index of
 #: that argument. ``feature_id=`` as a keyword counts wherever it appears (the PWM
 #: report catalogue's specs feed ``daemon_supports(spec.feature_id, …)``).
-GATE_CALLS = {"daemon_supports": 0, "_apply_live_key_support": 1}
+#: ``require`` is ``ventulus-diag``'s gate (``diag.daemon.Daemon.require``), which
+#: refuses a command unless ``daemon_supports`` says yes (DEC-503: the validation
+#: sessions' gates moved there with the sessions).
+GATE_CALLS = {"daemon_supports": 0, "_apply_live_key_support": 1, "require": 0}
 
 
 def _gated_feature_ids() -> set[str]:

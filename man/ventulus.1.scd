@@ -48,7 +48,8 @@ _~/.config/ventulus/backups/_
 	settings import.
 
 _~/.local/share/ventulus/reports/_
-	Saved PWM Test Reports (JSON).
+	Saved PWM Test Reports (JSON), written by *ventulus-diag*(1) and by
+	earlier versions of the GUI.
 
 _~/.cache/ventulus/_
 	Generated theme images. Safe to delete; it is recreated.
@@ -73,7 +74,7 @@ _/run/ventulus/ventulus.sock_
 	moved in Settings.
 
 *XDG_DATA_HOME*
-	Base directory for data the GUI keeps: saved PWM Test Reports go in
+	Base directory for Ventulus data: saved PWM Test Reports go in
 	$XDG_DATA_HOME/ventulus/reports (default: ~/.local/share/ventulus).
 
 *XDG_CACHE_HOME*
@@ -82,7 +83,7 @@ _/run/ventulus/ventulus.sock_
 
 # SEE ALSO
 
-*ventulusd*(1)
+*ventulusd*(1), *ventulus-diag*(1)
 
 Project: https://github.com/Plan-B-Development/ventulus
 

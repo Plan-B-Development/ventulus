@@ -13,7 +13,6 @@ so moving a daemon constant cannot leave a test asserting a stale number.
 from __future__ import annotations
 
 import pytest
-from PySide6.QtWidgets import QLabel, QPushButton
 
 from ventulus.api.models import (
     CharacterizationRun,
@@ -265,59 +264,3 @@ def test_the_consent_text_says_only_thermal_protection_ends_the_run():
     assert "thermal protection becomes active, the run stops" in text
     assert "A test also stops if a temperature passes 85 °C" in text
     assert "refuses later tests while that lasts" in text
-
-
-def _review_text(qtbot, tmp_path, settings_service, monkeypatch, limits: dict | None) -> tuple:
-    """Open the real window, click through to the review page, return the label
-    text and the capabilities it was rendered from."""
-    from tests.test_pwm_report_window import _state
-    from ventulus.ui.pages.pwm_report_controller import PwmReportController
-    from ventulus.ui.widgets.pwm_report_window import PAGE_REVIEW, PwmReportWindow
-
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    state = _state()
-    if limits is not None:
-        caps = parse_capabilities(
-            {
-                "daemon_version": "2.55.0",
-                "api_version": 1,
-                "control": {
-                    "autonomous_control": True,
-                    "pwm_characterization": True,
-                    "header_roles": True,
-                },
-                "limits": limits,
-            }
-        )
-        state.set_capabilities(caps)
-    controller = PwmReportController(state, "/tmp/fake.sock", directory=tmp_path / "r")
-    window = PwmReportWindow(controller, state, settings_service)
-    qtbot.addWidget(window)
-    try:
-        window.findChild(QPushButton, "PwmReport_Btn_new").click()
-        window.findChild(QPushButton, "PwmReport_Btn_next").click()
-        window.findChild(QPushButton, "PwmReport_Btn_next").click()
-        assert window.current_page() == PAGE_REVIEW
-        label = window.findChild(QLabel, "PwmReport_Label_safety")
-        return label.text(), state.capabilities
-    finally:
-        controller.shutdown()
-
-
-def test_the_review_page_renders_the_limit_the_daemon_published(
-    qtbot, tmp_path, settings_service, monkeypatch
-):
-    """The call site: the window must pass the LIVE capabilities, not ``None``."""
-    text, caps = _review_text(
-        qtbot, tmp_path, settings_service, monkeypatch, {"diagnostic_max_temp_c": 91.5}
-    )
-    assert text == cat.consent_safety_text(caps)
-    assert f"{caps.limits.diagnostic_max_temp_c:g} °C" in text
-
-
-def test_the_review_page_names_no_figure_for_an_older_daemon(
-    qtbot, tmp_path, settings_service, monkeypatch
-):
-    text, caps = _review_text(qtbot, tmp_path, settings_service, monkeypatch, None)
-    assert caps.limits.diagnostic_max_temp_c is None
-    assert "°C" not in text and "diagnostic limit" in text

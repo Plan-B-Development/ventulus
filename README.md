@@ -24,8 +24,10 @@ repository is the desktop app, `ventulus`.
 - **Finds out what your hardware needs.** The **System State** and **Hardware**
   pages name your board's fan chips, the driver each one needs, and whether fan
   control actually works.
-- **Tests your fans.** Fan identification, per-header control tests, and a
-  **PWM Test Report** that measures how every fan responds.
+- **Tests your fans.** Fan identification and per-header control tests in the app,
+  and `ventulus-diag`, a command for the longer tests: a **PWM Test Report** that
+  measures how every fan responds, characterisation, control-path discovery and
+  cooler recordings.
 - **Demo mode** (`ventulus --demo`) shows the whole app with simulated hardware.
 
 ## Supported hardware

@@ -458,7 +458,11 @@ class AppSettings:
     # their wiring, per stable header id — {"connected", "fans_behind",
     # "bios_mode", "notes"} — and about the cooler as a whole — {"model",
     # "pump_switch"}. USER_METADATA, never an observation. Machine-specific and
-    # demo-sealed (see the two key sets above).
+    # demo-sealed (see the two key sets above). DEC-503: no GUI screen edits
+    # them any more, but they are kept and round-tripped, because
+    # `ventulus-diag report run` reads them from this file as its defaults
+    # (`diag.daemon.read_gui_settings`). Dropping them would erase what earlier
+    # versions recorded.
     hardware_notes: dict[str, dict[str, object]] = field(default_factory=dict)
     cooler_notes: dict[str, str] = field(default_factory=dict)
 

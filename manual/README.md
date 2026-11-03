@@ -18,7 +18,7 @@ This manual covers every page, setting, and feature of the application.
 5. [Settings](settings.md): Application preferences, themes, and backup/restore
    - [Updates](updates.md): The opt-in update check: what it sends, what it trusts, and how it hands each install method its upgrade
 6. [System Health](diagnostics.md): The Overview, System State, Hardware and Logs pages, section by section
-7. [Fan Tests and Reports](fan-tests.md): Test PWM Control, Characterise, Discover Control Path, OpenFAN calibration, the GPU fan test, the PWM Test Report and the recording sessions
+7. [Fan Tests and Reports](fan-tests.md): Test PWM Control, Characterise, Discover Control Path, OpenFAN calibration, the GPU fan test, and, with `ventulus-diag`, the PWM Test Report and the recording sessions
 8. [Fan Wizard](fan-wizard.md): Guided fan identification and labelling
 9. [Profiles and Curves Reference](profiles-and-curves.md): How profiles, fan roles, and curves work together
 10. [Hardware Troubleshooting](hardware-troubleshooting.md): From a symptom to its fix: the daemon unreachable, missing sensors, fans or headers, read-only headers, speeds that will not hold, fans at full speed, GPU fans

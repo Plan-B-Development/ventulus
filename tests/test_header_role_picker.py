@@ -643,30 +643,6 @@ class TestHardwarePage:
         assert bar.value() == before
         assert on_screen(_role_btn(page, first)) and on_screen(_outcome(page, first))
 
-    def test_the_report_opened_here_can_set_a_role(
-        self, qtbot, monkeypatch, tmp_path, settings_service
-    ):
-        """The report gets its role route only from `_open_pwm_report`; without
-        it every "Set…" is disabled with a tooltip that is false there."""
-        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-        page, state, client = _page(qtbot, monkeypatch, [_hdr()], settings_service=settings_service)
-        client.socket_path = "/tmp/fake.sock"
-        page._open_pwm_report()
-        window = page._report_window
-        assert window is not None, "precondition: the report opened"
-        try:
-            window.findChild(QPushButton, "PwmReport_Btn_new").click()
-            slug = "".join(c if c.isalnum() else "_" for c in UNLABELLED)
-            button = window.findChild(QPushButton, f"PwmReport_Btn_role_{slug}")
-            assert button is not None and button.isEnabled(), button and button.toolTip()
-            _StubDialog.choice, _StubDialog.accept = "chassis_fan", True
-            button.click()
-            assert client.calls == [(UNLABELLED, "chassis_fan")]
-            assert state.hwmon_headers[0].role == "chassis_fan"
-        finally:
-            window.close()
-            page._report_controller.shutdown()
-
 
 class TestLabelPrompt:
     def test_prompt_is_shown_and_labels_are_correct_is_remembered(

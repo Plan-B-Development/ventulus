@@ -68,7 +68,6 @@ from ventulus.ui.pages.diagnostics_workers import (
     unexpected_error_message,
 )
 from ventulus.ui.pages.hardware_page import HardwarePage
-from ventulus.ui.pages.pwm_report_controller import RUN_ACTIVE_REASON
 from ventulus.ui.widgets import openfan_firmware_dialog as dlg_mod
 from ventulus.ui.widgets.openfan_firmware_dialog import OpenFanFirmwareDialog
 
@@ -252,7 +251,6 @@ def _gate(**kw) -> str:
         "demo": False,
         "device": _device(),
         "live_link": "connected",
-        "external_block": "",
         "inspection": inspect_uf2(data),
         "plan": view.WritePlan(view.WRITE_MANUAL),
         "prepared": True,
@@ -275,7 +273,6 @@ class TestStartGate:
         [
             ({"demo": True}, "Demo mode"),
             ({"starting": True}, "Starting"),
-            ({"external_block": "a report runs"}, "a report runs"),
             ({"device": None}, "Reading"),
             ({"device": _device(present=False)}, "No OpenFAN controller"),
             ({"live_link": "reconnecting"}, "not connected (reconnecting)"),
@@ -903,12 +900,6 @@ class TestWindowSetup:
         dialog.set_live_status("unresponsive", None)
         assert start.isEnabled() is False and "not connected" in start.toolTip()
 
-    def test_a_report_run_blocks_start(self, qtbot, tmp_path, monkeypatch):
-        dialog = _ready(qtbot, tmp_path, monkeypatch)
-        dialog._confirm.setChecked(True)
-        dialog.set_external_block(RUN_ACTIVE_REASON)
-        assert dialog.findChild(QPushButton, "OfwDialog_Btn_start").isEnabled() is False
-
 
 class TestWindowFollowsARun:
     def test_an_older_run_is_ignored_while_starting(self, qtbot, tmp_path, monkeypatch):
@@ -1229,18 +1220,6 @@ class TestHardwarePage:
         page._state.set_status(DaemonStatus(openfan_link="reconnecting"))
         assert not _button(page).isEnabled()
         assert "reconnecting" in _button(page).toolTip()
-
-    def test_a_report_run_stands_it_down_but_never_hides_an_update(self, qtbot):
-        page = _page(qtbot)
-        page._on_report_active(True)
-        assert not _button(page).isEnabled() and _button(page).toolTip() == RUN_ACTIVE_REASON
-        page._state.set_status(
-            DaemonStatus(
-                openfan_link="maintenance",
-                openfan_maintenance=OpenFanMaintenanceSummary("r", "parking", "running"),
-            )
-        )
-        assert _button(page).isEnabled(), "an update can always be followed"
 
     def test_a_board_needing_recovery_after_a_restart_keeps_the_way_in(self, qtbot):
         # A restart with the board in its bootloader adopts no controller: no
@@ -2378,10 +2357,3 @@ class TestSilentHardwarePage:
         page = self._silent_page(qtbot, flag=False)
         page._state.set_status(DaemonStatus(openfan_silent_board=ENTRY))
         assert not _button(page).isVisibleTo(page)
-
-    def test_a_report_run_stands_it_down(self, qtbot):
-        page = self._silent_page(qtbot)
-        page._state.set_status(DaemonStatus(openfan_silent_board=ENTRY))
-        assert _button(page).isEnabled(), "precondition"
-        page._on_report_active(True)
-        assert not _button(page).isEnabled() and _button(page).toolTip() == RUN_ACTIVE_REASON

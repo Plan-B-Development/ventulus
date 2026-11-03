@@ -4656,9 +4656,9 @@ def parse_gpu_verify_result(data: dict) -> GpuVerifyResult:
 #
 # A validation session records what an already-configured cooler actually did,
 # and may orchestrate the existing PWM verify and characterisation to produce
-# evidence about it. Phase 5 shipped the model and the serializers; **Phase 6
-# (DEC-318) added every pixel**, in `ui/widgets/validation_session_dialog.py`.
-# There is still deliberately no page, dialog or button in THIS module.
+# evidence about it. Phase 5 shipped the model and the serializers; Phase 6
+# (DEC-318) drew it in a GUI dialog, which DEC-503 replaced with
+# `ventulus-diag validation`. There is deliberately no UI in THIS module.
 #
 # Two rules run through all of it, and both are the daemon's semantics rather
 # than the GUI's to reinterpret:

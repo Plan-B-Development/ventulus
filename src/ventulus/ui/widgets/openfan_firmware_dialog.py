@@ -251,7 +251,6 @@ class OpenFanFirmwareDialog(ModalDialog):
         #: DEC-484: the silent board the poll reports, by its serial.
         self._live_silent: str | None = None
         self._channels: list[ChannelLine] = []
-        self._external_block = ""
         self._inspection: Uf2Inspection | None = None
         self._prepared: Path | None = None
         #: The checked file's bytes, kept for the daemon to write (DEC-483).
@@ -514,11 +513,6 @@ class OpenFanFirmwareDialog(ModalDialog):
             self._timer.start()
         self._refresh_start()
 
-    def set_external_block(self, reason: str) -> None:
-        """Something outside this window stops a start — a PWM Test Report run."""
-        self._external_block = reason
-        self._refresh_start()
-
     def request_initial(self) -> None:
         """Ask for the controller and for the current or last run."""
         if self._demo:
@@ -694,7 +688,6 @@ class OpenFanFirmwareDialog(ModalDialog):
             demo=self._demo,
             device=self._device,
             live_link=self._live_link,
-            external_block=self._external_block,
             inspection=self._inspection,
             plan=self._plan(),
             prepared=self._prepared is not None,

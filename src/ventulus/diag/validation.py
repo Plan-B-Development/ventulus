@@ -41,6 +41,7 @@ from ventulus.diag.console import (
 from ventulus.diag.daemon import Daemon, start_refusal
 from ventulus.services.characterization_view import ENGINE_PAUSE_WARNING, PUMP_STARTUP_WARNING
 from ventulus.services.pwm_report.executor import cancel_slot, poll_slot
+from ventulus.services.thermal_view import build_startup_views, build_steady_state_view
 from ventulus.services.validation_view import build_validation_session_view, format_elapsed
 
 KINDS = {
@@ -102,6 +103,19 @@ def render(console: Console, session: ValidationSession, daemon: Daemon) -> None
             f"  {m.label} [{m.role_label}]: requested {m.requested_range}, readback "
             f"{m.readback_range}, RPM {m.rpm_range}"
         )
+    # DEC-335 §3 and §1: a thermal observation's steady state, and each
+    # member's startup behaviour. The daemon decides both; this prints them.
+    steady = build_steady_state_view(session.steady_state)
+    if steady is not None:
+        console.out(f"  Steady state: {steady.verdict_label}")
+        for row in steady.rows:
+            console.out(f"    {row.label}: {row.value}")
+        if steady.criterion:
+            console.out(f"    Rule: {steady.criterion}")
+    for startup in build_startup_views(session.startup_fingerprints, display_name=daemon.name_of):
+        console.out(f"  Startup: {startup.interpretation_label}")
+        for row in startup.rows:
+            console.out(f"    {row.label}: {row.value}")
 
 
 def devices_cmd(console: Console, daemon: Daemon) -> int:

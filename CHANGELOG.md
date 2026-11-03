@@ -18,8 +18,10 @@ rename. Version numbers carry on from Control-OFC.
   second Ctrl-C makes sure a cancel was sent and leaves at once; `ventulus-diag cancel` stops a
   test that was left running. The daemon still performs and undoes every test, and puts
   the header back even if the tool is killed. It reads and saves reports in the same
-  folder as the GUI, so earlier reports open in it. See `man ventulus-diag`. The GUI still
-  runs these tests in this version.
+  folder as the GUI, so earlier reports open in it. See `man ventulus-diag`.
+- **`ventulus-diag validation show` and `status` print a thermal observation's results:** the
+  steady-state verdict with its readings, when the temperature settled and the rule behind
+  it, and each member's startup behaviour with the duty commanded and read back.
 
 ### Changed
 
@@ -34,6 +36,29 @@ rename. Version numbers carry on from Control-OFC.
 - **A report's safety text no longer says "even if Ventulus is closed".** It now says "even
   if the program that started it is closed", since the CLI can start a run too. A report run
   by `ventulus-diag` names it in its environment section instead of "Ventulus GUI".
+- **A test the daemon refuses because another one is running now says so.** Test Control,
+  Test PWM Control, Verify All Writable, Test GPU Fan Control and Calibrate OpenFan Channel
+  read "Another hardware test is running, for example one started with ventulus-diag"
+  instead of the daemon's bare message.
+- **The readiness checklist's Test PWM control action now scrolls to the header cards**,
+  where each header's Test Control is, instead of to Hardware Diagnostics.
+- **The footer's Recording chip names the command that stops the session**
+  (`ventulus-diag validation stop`). It still shows a session started from anywhere.
+
+### Removed
+
+- **The GUI no longer runs the tests that drive fans for minutes.** The PWM Test Report
+  window (with its saved-report list, export and compare), **Characterise** and **Discover
+  Control Path** on header cards, **Characterise PWM Response** on System State,
+  **Characterise Pump** and **Start Validation** on cooling-device cards, and the
+  Startup / Lifecycle Recording, AIO Validation and Thermal Observation windows are gone.
+  Run them with `ventulus-diag` (`report run`, `characterise`, `discover`,
+  `validation start`); `report list|show|export|compare` opens the reports the GUI saved.
+  A note in Hardware Diagnostics names the command and copies `ventulus-diag status`. A
+  discovered control path still shows under **Details** on its header card. Test Control,
+  Verify All Writable, Test GPU Fan Control, Calibrate OpenFan Channel, Update OpenFAN
+  Firmware and the Fan Wizard stay in the GUI. The setup answers the report window saved
+  are kept, and `ventulus-diag report run` uses them.
 
 ## [5.5.0] — 2026-10-26
 

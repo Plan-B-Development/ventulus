@@ -20,6 +20,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from ventulus.constants import VERIFY_TIMEOUT_S
 from ventulus.services.daemon_features import unsupported_feature_message
+from ventulus.services.diag_cli_view import slot_busy_text
 
 if TYPE_CHECKING:
     from ventulus.api.client import DaemonClient
@@ -48,7 +49,7 @@ def _is_soft_refusal(err: object) -> bool:
     OpenFAN firmware update holding the controller
     (:func:`~ventulus.api.errors.is_openfan_maintenance_refusal`): both are
     retryable, and the daemon accepts the same request later. The rules live in
-    ``api.errors`` so the PWM Test Report runner, which sees an outcome rather
+    ``api.errors`` so the PWM Test Report runner (``ventulus-diag``), which sees an outcome rather
     than an exception, applies the same ones (``DC-cl``) and words them apart.
     """
     from ventulus.api.errors import is_openfan_maintenance_refusal, is_soft_safety_refusal
@@ -103,10 +104,10 @@ class _SocketWorker(QObject):
         """Raise once :meth:`shutdown` has run, so nothing builds a new client.
 
         `shutdown` clears ``_client``, so without this the next call — a queued
-        slot, or the next read of a loop such as `_PwmReportWorker._snapshot`
-        that the backstop now lets continue — would open a fresh client and talk
-        to the daemon during teardown. The ``RuntimeError`` lands in the slot's
-        backstop, which is quiet after shutdown.
+        slot, or the next read of a loop that the backstop lets continue — would
+        open a fresh client and talk to the daemon during teardown. The
+        ``RuntimeError`` lands in the slot's backstop, which is quiet after
+        shutdown.
         """
         if self._shut_down:
             raise RuntimeError(f"{type(self).__name__} was shut down")
@@ -178,9 +179,12 @@ class _VerifyWorker(_SocketWorker):
             self.verify_error.emit("unavailable", "Daemon unavailable during verify", header_id)
         except DaemonError as e:
             # A refusal is not a failure — show the daemon's message verbatim
-            # (soft), not as an error. See `_is_soft_refusal`.
+            # (soft), not as an error. See `_is_soft_refusal`. Another test
+            # holding the slot (often `ventulus-diag`, DEC-503) is said plainly.
             if _is_soft_refusal(e):
                 self.verify_error.emit("unavailable", e.message, header_id)
+            elif busy := slot_busy_text(e):
+                self.verify_error.emit("unavailable", busy, header_id)
             else:
                 self.verify_error.emit("error", e.message, header_id)
         except (ConnectionError, OSError) as e:
@@ -243,6 +247,9 @@ class _GpuVerifyWorker(_SocketWorker):
                 # A refusal — show the daemon's message verbatim, not as an
                 # error. See `_is_soft_refusal`.
                 self.verify_error.emit("unavailable", e.message)
+            elif busy := slot_busy_text(e):
+                # The GPU test claims the same slot as every other (DEC-503).
+                self.verify_error.emit("unavailable", busy)
             else:
                 self.verify_error.emit("error", e.message)
         except (ConnectionError, OSError) as e:
@@ -556,246 +563,47 @@ class _HardwareReadinessWorker(_SocketWorker):
             )
 
 
-def _fetch_preflight(worker, header_id: str, diagnostic: str) -> None:
-    """Fetch a safety preflight on behalf of ``worker`` and emit its result.
-
-    Extracted (DEC-276) rather than copied: DEC-334 gave the characterisation
-    dialog a preflight too, and a rule that lives inside one consumer is a rule
-    the other consumer cannot follow. Both now share this one, including the part
-    that is easy to get wrong.
-
-    **Failure is reported on ``preflight_error``, never ``run_error``.** The
-    preflight is advisory: an older daemon has no such route, and the diagnostic
-    itself still runs every guard the preflight merely reports. A dialog that
-    treated a missing advisory as a run failure would refuse to offer a
-    diagnostic the daemon would happily have performed.
-    """
-    from ventulus.api.errors import DaemonError, DaemonTimeout, DaemonUnavailable
-
-    try:
-        worker.preflight_ready.emit(
-            worker._ensure_client().diagnostic_preflight(header_id, diagnostic)
-        )
-    except DaemonTimeout:
-        worker.preflight_error.emit(
-            "unavailable", "The daemon did not answer the safety preflight in time."
-        )
-    except DaemonUnavailable:
-        worker._drop_client()
-        worker.preflight_error.emit("unavailable", "Daemon unavailable — safety checks unknown.")
-    except DaemonError as e:
-        # 404 is an older daemon that has no preflight route. Not an error to the
-        # user: the diagnostic itself still runs its own guards. Probing rather
-        # than capability-gating is deliberate and is justified at
-        # `DaemonClient.diagnostic_preflight` — `preflight_handler` has no 404
-        # branch, so the route fallback is the only 404 this can see (`P8-as`).
-        if e.status == 404:
-            worker.preflight_error.emit(
-                "unavailable", unsupported_feature_message("diagnostic_preflight")
-            )
-        else:
-            worker.preflight_error.emit("error", e.message)
-    except (ConnectionError, OSError) as e:
-        log.warning("Safety preflight connection error: %s", e)
-        with contextlib.suppress(Exception):
-            if worker._client is not None:
-                worker._client.close()
-        worker._client = None
-        worker.preflight_error.emit("unavailable", "Connection lost fetching safety checks.")
-    except Exception as e:
-        # Both dialogs show this as their blocked line, unprefixed — so a sentence.
-        worker._backstop(
-            e,
-            "the safety preflight",
-            lambda cat, msg: worker.preflight_error.emit(cat, msg[:1].upper() + msg[1:]),
-        )
-
-
-class _CharacterizationWorker(_SocketWorker):
-    """Runs the PWM/RPM characterisation calls off the UI thread (AIO-MB Phase 3).
-
-    All three are short: the daemon returns ``202`` immediately and runs the
-    sweep itself, so nothing here blocks for the length of a run. The polling
-    cadence is the dialog's QTimer, matching the GUI's poll-only architecture —
-    there is no long-lived request to hold open, and a GUI that dies mid-sweep
-    does not strand the header because the restore is the daemon's job.
-    """
-
-    run_updated = Signal(object)  # CharacterizationRun | None
-    run_error = Signal(str, str)  # category ('unavailable'|'error'), message
-    # AIO Phase 8 Batch 1 §6.1, wired by DEC-334. Served by THIS worker rather
-    # than a separate thread: it is a short read-only GET on the same socket.
-    preflight_ready = Signal(object)  # PreflightReport
-    preflight_error = Signal(str, str)
-
-    def _guard(self, call, what: str) -> None:
-        from ventulus.api.errors import DaemonError, DaemonTimeout, DaemonUnavailable
-
-        try:
-            self.run_updated.emit(call())
-        except DaemonTimeout:
-            self.run_error.emit(
-                "unavailable",
-                f"The daemon did not answer the {what} in time. The sweep may "
-                "still be running — the daemon restores the header itself when "
-                "it ends.",
-            )
-        except DaemonUnavailable:
-            self._drop_client()
-            self.run_error.emit("unavailable", f"Daemon unavailable during {what}")
-        except DaemonError as e:
-            # Reuses the shared refusal taxonomy (`_is_soft_refusal`): `thermal_abort`
-            # and a retryable `validation_error` are protection, or a controller busy
-            # with an OpenFAN firmware update, not failure, and this endpoint returns
-            # exactly those two codes for the same reasons a verify does.
-            if _is_soft_refusal(e):
-                self.run_error.emit("unavailable", e.message)
-            else:
-                self.run_error.emit("error", e.message)
-        except (ConnectionError, OSError) as e:
-            log.warning("Characterization worker connection error: %s", e)
-            with contextlib.suppress(Exception):
-                if self._client is not None:
-                    self._client.close()
-            self._client = None
-            self.run_error.emit("unavailable", f"Connection lost during {what}")
-        except Exception as e:
-            self._backstop(e, f"the {what}", self.run_error.emit)
-
-    @Slot(str, str)
-    def do_preflight(self, header_id: str, diagnostic: str) -> None:
-        _fetch_preflight(self, header_id, diagnostic)
-
-    @Slot(str, object, object, object, object)
-    def do_start(
-        self,
-        header_id: str,
-        points: object,
-        settle: object,
-        bidirectional: object = None,
-        stability: object = None,
-    ) -> None:
-        self._guard(
-            lambda: self._ensure_client().start_characterization(
-                header_id,
-                points_pct=points if isinstance(points, list) else None,
-                settle_seconds=settle if isinstance(settle, int) else None,
-                # `None` stays `None`: it means "the daemon decides", and an
-                # older daemon must receive the request it has always received.
-                bidirectional=bidirectional if isinstance(bidirectional, bool) else None,
-                stability_seconds=stability if isinstance(stability, int) else None,
-            ),
-            "characterisation start",
-        )
-
-    @Slot()
-    def do_poll(self) -> None:
-        self._guard(lambda: self._ensure_client().characterization_status(), "status poll")
-
-    @Slot()
-    def do_cancel(self) -> None:
-        self._guard(lambda: self._ensure_client().cancel_characterization(), "cancellation")
-
-
 class _ControlPathWorker(_SocketWorker):
-    """Runs the control-path discovery calls off the UI thread (AIO Phase 8 §2).
+    """Reads the persisted control-path relationships off the UI thread (§6.3).
 
-    Same shape as :class:`_CharacterizationWorker`, and for the same reasons:
-    all four calls are short because the daemon returns ``202`` and runs the
-    sweep itself, the polling cadence is the dialog's QTimer, and a GUI that
-    dies mid-run does not strand the header because the restore is the daemon's
-    job on every exit path.
-
-    The preflight is served by this worker too rather than by one of its own: it
-    is a read-only GET against the same socket, issued immediately before a
-    start, so a second thread would buy nothing but another teardown to get
-    wrong.
+    Read-only since DEC-503: discovery itself runs from ``ventulus-diag
+    discover``, and the Hardware page only shows what the daemon has persisted
+    on each header card. A short GET, so the page asks once per capability
+    refresh rather than polling.
     """
 
     run_updated = Signal(object)  # ControlPathStatus | None
     run_error = Signal(str, str)  # category ('unavailable'|'error'), message
-    preflight_ready = Signal(object)  # PreflightReport
-    preflight_error = Signal(str, str)
 
-    def _guard(self, call, what: str) -> None:
-        from ventulus.api.errors import DaemonError, DaemonTimeout, DaemonUnavailable
+    @Slot()
+    def do_poll(self) -> None:
+        from ventulus.api.errors import DaemonError, DaemonUnavailable
 
         try:
-            self.run_updated.emit(call())
-        except DaemonTimeout:
-            self.run_error.emit(
-                "unavailable",
-                f"The daemon did not answer the {what} in time. The run may still "
-                "be going — the daemon restores the header itself when it ends.",
-            )
+            self.run_updated.emit(self._ensure_client().control_path_status())
         except DaemonUnavailable:
             self._drop_client()
-            self.run_error.emit("unavailable", f"Daemon unavailable during {what}")
+            self.run_error.emit("unavailable", "Daemon unavailable reading control paths")
         except DaemonError as e:
-            # The shared refusal taxonomy (`_is_soft_refusal`): `thermal_abort` and a
-            # retryable `validation_error` are protection, or a controller busy with
-            # an OpenFAN firmware update, not failure. This endpoint returns exactly
-            # those two codes, for the same reasons a verify does.
-            if _is_soft_refusal(e):
-                self.run_error.emit("unavailable", e.message)
-            else:
-                self.run_error.emit("error", e.message)
+            self.run_error.emit("error", e.message)
         except (ConnectionError, OSError) as e:
             log.warning("Control-path worker connection error: %s", e)
             with contextlib.suppress(Exception):
                 if self._client is not None:
                     self._client.close()
             self._client = None
-            self.run_error.emit("unavailable", f"Connection lost during {what}")
+            self.run_error.emit("unavailable", "Connection lost reading control paths")
         except Exception as e:
-            # `ROLE-g`: the case seen live is `_refresh_control_paths`' one-shot
-            # status GET still in flight when teardown closed the client.
-            self._backstop(e, f"the {what}", self.run_error.emit)
-
-    @Slot(str, str)
-    def do_preflight(self, header_id: str, diagnostic: str) -> None:
-        _fetch_preflight(self, header_id, diagnostic)
-
-    @Slot(str)
-    def do_start(self, header_id: str) -> None:
-        # No tuning arguments: the daemon owns the perturbation size, direction,
-        # cycle count and floor. A client-side duty here would be a second copy
-        # of a safety rule.
-        self._guard(
-            lambda: _as_status(self._ensure_client().start_control_path_discovery(header_id)),
-            "discovery start",
-        )
-
-    @Slot()
-    def do_poll(self) -> None:
-        self._guard(lambda: self._ensure_client().control_path_status(), "status poll")
-
-    @Slot()
-    def do_cancel(self) -> None:
-        self._guard(
-            lambda: _as_status(self._ensure_client().cancel_control_path_discovery()),
-            "cancellation",
-        )
-
-
-def _as_status(run):
-    """Wrap a bare run in a status envelope.
-
-    ``POST``/``DELETE`` return a run; ``GET`` returns ``{run, records}``. The
-    dialog renders one shape, so the two POST-shaped replies are wrapped here
-    rather than teaching the dialog to accept both — a renderer that accepts two
-    shapes eventually mis-reads one of them.
-    """
-    from ventulus.api.models import ControlPathStatus
-
-    return ControlPathStatus(run=run, records=[])
+            # `ROLE-g`: the case seen live is this one-shot GET still in flight
+            # when teardown closed the client.
+            self._backstop(e, "the control-path read", self.run_error.emit)
 
 
 class _OpenFanCalibrationWorker(_SocketWorker):
     """Runs the OpenFan calibration calls off the UI thread (DEC-452 / DEC-453).
 
-    Same shape as :class:`_CharacterizationWorker`: all three calls are short
-    because the daemon returns ``202`` and walks the channel itself, the polling
+    All three calls are short because the daemon returns ``202`` and walks the
+    channel itself, the polling
     cadence is the dialog's QTimer, and a GUI that dies mid-run does not strand
     the channel — the daemon kicks a stopped fan and restores the duty on every
     exit path.
@@ -804,7 +612,7 @@ class _OpenFanCalibrationWorker(_SocketWorker):
     run_updated = Signal(object)  # OpenFanCalibrationRun | None
     run_error = Signal(str, str)  # category ('unavailable'|'error'), message
 
-    def _guard(self, call, what: str) -> None:
+    def _guard(self, call, what: str, *, start: bool = False) -> None:
         from ventulus.api.errors import DaemonError, DaemonTimeout, DaemonUnavailable
 
         try:
@@ -823,9 +631,12 @@ class _OpenFanCalibrationWorker(_SocketWorker):
             # retryable `validation_error` are protection, or a controller busy with
             # an OpenFAN firmware update, not failure. This route returns both — the
             # retryable 400 with no fresh CPU reading included, since the predicate
-            # keys on `retryable`, not on the status.
+            # keys on `retryable`, not on the status. Only a start can meet a
+            # busy slot (DEC-503); a cancel's 409 means nothing was running.
             if _is_soft_refusal(e):
                 self.run_error.emit("unavailable", e.message)
+            elif start and (busy := slot_busy_text(e)):
+                self.run_error.emit("unavailable", busy)
             else:
                 self.run_error.emit("error", e.message)
         except (ConnectionError, OSError) as e:
@@ -848,6 +659,7 @@ class _OpenFanCalibrationWorker(_SocketWorker):
                 channel, acknowledge_below_floor=True
             ),
             "calibration start",
+            start=True,
         )
 
     @Slot()
@@ -1050,184 +862,3 @@ class _OpenFanFirmwareWorker(_SocketWorker):
             (self.run_error if cancelled else self.cancel_failed).emit(category, message)
 
         self._guard(call, "cancellation", failed)
-
-
-class _ValidationWorker(_SocketWorker):
-    """Runs a validation session's daemon calls off the UI thread.
-
-    A session is long-running (minutes to hours) and its start call can
-    orchestrate a PWM verify and a full characterisation sweep — a blocking
-    call measured in minutes. Every method here is therefore a slot on a
-    QThread, exactly like the verify and characterisation workers, and for the
-    same reason: a blocked hardware probe must not freeze the poll loop, the
-    menus or the window.
-
-    One worker serves every session verb rather than one worker per verb,
-    because they are strictly sequential on a single daemon-side session slot —
-    a second thread would buy nothing and could interleave a stop with a poll.
-    """
-
-    session_updated = Signal(object)  # ValidationSession | None
-    session_error = Signal(str, str)  # category, message
-    #: A one-shot acknowledgement for marker/measurement, so the dialog can
-    #: confirm without waiting for the next poll to show the new event.
-    action_ok = Signal(str)  # human-readable confirmation
-
-    def _run(self, category_fn, label: str) -> None:
-        """Shared error translation. Kept in one place so a safety refusal is
-        never reported as a failure on one verb and a refusal on another."""
-        from ventulus.api.errors import DaemonError, DaemonTimeout, DaemonUnavailable
-
-        try:
-            category_fn()
-        except DaemonTimeout:
-            self.session_error.emit("unavailable", f"{label} timed out.")
-        except DaemonUnavailable:
-            self._drop_client()
-            self.session_error.emit("unavailable", f"Daemon unavailable during {label.lower()}.")
-        except DaemonError as e:
-            if _is_soft_refusal(e):
-                self.session_error.emit("unavailable", e.message)
-            else:
-                self.session_error.emit("error", e.message)
-        except (ConnectionError, OSError) as e:
-            log.warning("Validation worker connection error: %s", e)
-            with contextlib.suppress(Exception):
-                if self._client is not None:
-                    self._client.close()
-            self._client = None
-            self.session_error.emit("unavailable", f"Connection lost during {label.lower()}.")
-        except Exception as e:
-            self._backstop(e, label.lower(), self.session_error.emit)
-
-    @Slot(str, str, list, list, dict, bool)
-    def do_start(
-        self,
-        device_id: str,
-        kind: str,
-        diagnostics: list,
-        sweep_members: list,
-        metadata: dict,
-        stop_when_diagnostics_complete: bool = False,
-    ) -> None:
-        def call() -> None:
-            self.session_updated.emit(
-                self._ensure_client().start_validation_session(
-                    device_id,
-                    kind=kind or None,
-                    diagnostics=list(diagnostics) or None,
-                    sweep_members=list(sweep_members) or None,
-                    metadata=dict(metadata) or None,
-                    stop_when_diagnostics_complete=bool(stop_when_diagnostics_complete),
-                )
-            )
-
-        self._run(call, "Starting the session")
-
-    @Slot()
-    def do_poll(self) -> None:
-        def call() -> None:
-            # A 404 is `None` from the client, not an error: it simply means no
-            # session is active. Emitting it lets the dialog show the finished
-            # state rather than an error the user cannot act on.
-            self.session_updated.emit(self._ensure_client().validation_session())
-
-        self._run(call, "Reading the session")
-
-    @Slot()
-    def do_stop(self) -> None:
-        def call() -> None:
-            self.session_updated.emit(self._ensure_client().stop_validation_session())
-
-        self._run(call, "Stopping the session")
-
-    @Slot()
-    def do_cancel(self) -> None:
-        def call() -> None:
-            self.session_updated.emit(self._ensure_client().cancel_validation_session())
-
-        self._run(call, "Cancelling the session")
-
-    @Slot(str, str)
-    def do_marker(self, detail: str, member_id: str) -> None:
-        def call() -> None:
-            self._ensure_client().add_validation_marker(detail or None, member_id=member_id or None)
-            self.action_ok.emit("Event marked.")
-
-        self._run(call, "Marking an event")
-
-    @Slot(str, float, str, str, str)
-    def do_measurement(self, kind: str, value: float, unit: str, member_id: str, note: str) -> None:
-        def call() -> None:
-            self._ensure_client().add_validation_measurement(
-                kind,
-                value,
-                unit=unit,
-                member_id=member_id or None,
-                note=note or None,
-            )
-            self.action_ok.emit("External measurement recorded.")
-
-        self._run(call, "Recording a measurement")
-
-
-class _PwmReportWorker(_SocketWorker):
-    """Runs the PWM Test Report's daemon calls off the UI thread (DEC-404).
-
-    **One slot, one call at a time, every answer verbatim.** The runner
-    (``services/pwm_report/runner.py``) decides what to ask for; the Qt-free
-    :class:`~ventulus.services.pwm_report.executor.ReportCallExecutor` asks, and
-    is shared with the ``ventulus-diag`` CLI (DEC-503) so both record the same
-    evidence. This worker only moves the calls off the UI thread.
-
-    Every call is short except ``verify`` (~6 s, synchronous daemon-side): the
-    three long diagnostics return ``202`` and are polled, exactly like the
-    characterisation and discovery workers, so a GUI that dies mid-run strands
-    nothing — the daemon restores its own header when its diagnostic ends.
-    """
-
-    call_done = Signal(int, object)  # req_id, CallOutcome
-
-    def __init__(self, socket_path: str) -> None:
-        super().__init__(socket_path)
-        from ventulus.services.pwm_report.executor import ReportCallExecutor
-
-        self._calls = ReportCallExecutor(
-            self._ensure_client,
-            self._drop_client,
-            on_unexpected=lambda e: self._backstop(e, "the call", None),
-        )
-
-    def _ensure_client(self) -> DaemonClient:
-        from ventulus.api.client import DaemonClient as _DaemonClient
-
-        self._refuse_after_shutdown()
-        if self._client is None:
-            self._client = _DaemonClient(
-                socket_path=self._socket_path, response_observer=self._observe
-            )
-        return self._client
-
-    def _observe(self, method: str, path: str, status: int, body: object) -> None:
-        self._calls.observe(method, path, status, body)
-
-    @Slot(int, str, object)
-    def do_call(self, req_id: int, kind: str, payload: object) -> None:
-        try:
-            outcome = self._execute(kind, payload)
-        except Exception as e:
-            # The runner waits on `call_done` for every request, so it must fire.
-            from ventulus.services.pwm_report.runner import CallOutcome
-
-            self._backstop(
-                e,
-                "the call",
-                lambda cat, msg: self.call_done.emit(
-                    req_id, CallOutcome(ok=False, category=cat, error_message=msg)
-                ),
-            )
-            return
-        self.call_done.emit(req_id, outcome)
-
-    def _execute(self, kind: str, payload: object):
-        return self._calls.execute(kind, payload)

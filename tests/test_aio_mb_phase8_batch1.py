@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtWidgets import QCheckBox, QPushButton
+from PySide6.QtWidgets import QPushButton
 
 from ventulus.api.models import (
     CONFIDENCE_HIGH,
@@ -63,7 +63,6 @@ from ventulus.services.control_path_view import (
     restore_note,
 )
 from ventulus.services.diagnostics_service import DiagnosticsService
-from ventulus.services.header_inspector_view import build_header_inspector_view
 from ventulus.services.preflight_view import build_preflight_view
 from ventulus.services.provenance import (
     UNVERIFIABLE,
@@ -71,12 +70,9 @@ from ventulus.services.provenance import (
     classify,
     from_envelope,
 )
-from ventulus.services.pump_protection import header_is_pump_protected
 from ventulus.services.validation_export import session_json
 from ventulus.ui.pages.hardware_page import HardwarePage
-from ventulus.ui.widgets.control_path_dialog import ControlPathDiscoveryDialog
 from ventulus.ui.widgets.pwm_header_card import PwmHeaderCard
-from ventulus.ui.widgets.validation_session_dialog import ValidationSessionDialog
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -580,45 +576,6 @@ class TestPreflightView:
 # ── §7: GUI exposes Discover Control Path ───────────────────────────────────
 
 
-class TestHeaderCardExposesDiscovery:
-    def test_the_card_has_a_discover_button_wired_to_the_page(self, qtbot):
-        page, _ = _page(qtbot)
-        card = next(
-            c for c in page.findChildren(PwmHeaderCard) if c.header_id() == _downgraded_pump().id
-        )
-        btn = card.findChild(QPushButton, f"HeaderCard_Btn_discover_{_slug(card.header_id())}")
-        assert btn is not None
-        assert btn.text() == "Discover Control Path"
-        assert btn.isEnabled()
-
-        seen: list[str] = []
-        card.discover_requested.connect(seen.append)
-        # `.click()`, not the handler: invoking the handler skips the connection,
-        # which is the thing most likely to be broken.
-        btn.click()
-        assert seen == [_downgraded_pump().id]
-
-    def test_the_button_is_disabled_with_a_reason_on_an_older_daemon(self, qtbot):
-        page, _ = _page(qtbot, caps=_caps(control_path_discovery=False))
-        card = next(iter(page.findChildren(PwmHeaderCard)))
-        btn = card.findChild(QPushButton, f"HeaderCard_Btn_discover_{_slug(card.header_id())}")
-        assert btn.isEnabled() is False
-        # A greyed control with no reason is indistinguishable from a broken one.
-        assert "2.39.0" in btn.toolTip()
-
-    def test_a_read_only_header_cannot_be_discovered(self):
-        view = build_header_inspector_view(_plain_fan(is_writable=False), capabilities=_caps())
-        assert view.can_discover is False
-        assert "read-only" in view.discover_disabled_reason
-
-    def test_a_header_with_no_tach_of_its_own_can_still_be_discovered(self):
-        """Degraded, not blocked: discovery watches every OTHER tach too, and
-        "this header drives fan3" is exactly what such a header most needs."""
-        view = build_header_inspector_view(_plain_fan(rpm_available=False), capabilities=_caps())
-        assert view.can_discover is True
-        assert view.discover_disabled_reason == ""
-
-
 # ── §6.3: the relationship row on the card ──────────────────────────────────
 
 
@@ -666,10 +623,10 @@ class TestRelationshipRow:
         assert "Last validated:" in text
 
     def test_unchanged_records_do_not_re_render_the_cards(self, qtbot):
-        """While the dialog polls at 1 Hz the records are identical every tick,
-        and the cooling section is already re-rendered by `fans_updated`. An
-        unconditional refresh here would double the card work every second to
-        draw bytes that had not changed."""
+        """The read repeats on every capability refresh and the records are
+        usually identical, while the cooling section is already re-rendered by
+        `fans_updated`. An unconditional refresh would redraw bytes that had not
+        changed."""
         from ventulus.api.models import ControlPathStatus
 
         page, _ = _page(qtbot)
@@ -685,31 +642,23 @@ class TestRelationshipRow:
         page._refresh_cooling_section = lambda *a, **k: (calls.append(1), original())[1]
 
         def _get(records):
-            # Only a GET carries `records` — a POST/DELETE reply is a bare run
-            # the client wraps, and the two must not be confused.
             return ControlPathStatus(records=records, from_status_endpoint=True)
 
-        page._on_discover_update(_get([record]))
+        page._on_control_paths(_get([record]))
         assert len(calls) == 1, "the first, changed batch must render"
-        page._on_discover_update(_get([record]))
+        page._on_control_paths(_get([record]))
         assert len(calls) == 1, "an identical batch must not render again"
 
         moved = ControlPathRecord(**{**record.__dict__, "confidence": "low"})
-        page._on_discover_update(_get([moved]))
+        page._on_control_paths(_get([moved]))
         assert len(calls) == 2, "a genuinely changed batch must render"
 
-        # A legitimately EMPTY GET clears the cache: the daemon holds no
-        # relationships, and a card must not keep asserting one it dropped.
-        page._on_discover_update(_get([]))
+        # An EMPTY answer clears the cache: the daemon holds no relationships
+        # (one was forgotten, or discovered again elsewhere), and a card must
+        # not keep asserting one it dropped.
+        page._on_control_paths(_get([]))
         assert len(calls) == 3
         assert page._control_paths == {}
-
-        # ...but a POST/DELETE reply, which carries no records by construction,
-        # must leave the cache alone rather than reading as "none".
-        page._control_paths = {record.header_id: record}
-        page._on_discover_update(ControlPathStatus(run=None, records=[]))
-        assert page._control_paths == {record.header_id: record}
-        assert len(calls) == 3, "a bare run reply must not re-render"
 
     def test_the_summary_line_names_extra_channels_rather_than_hiding_them(self):
         record = ControlPathRecord(
@@ -728,309 +677,7 @@ class TestRelationshipRow:
 # ── §7: the dialog's first state is the preflight ───────────────────────────
 
 
-class TestBackgroundRefreshIsolation:
-    """The page's background refresh and the dialog share one worker, and
-    therefore one error signal. A failure belonging to the background request
-    must never be delivered to the dialog as though its own poll had failed —
-    that would stop the dialog polling a run still perturbing the header, and it
-    would never render `restore_failed`."""
-
-    def test_the_background_refresh_stands_down_while_the_dialog_is_open(self, qtbot):
-        page, _ = _page(qtbot)
-        # No thread is started: the worker-ensure is stubbed, because what is
-        # under test is the suppression rule, not the worker lifecycle.
-        page._ensure_discover_worker = lambda: True
-        emitted: list[int] = []
-        page._discover_poll_request.connect(lambda: emitted.append(1))
-
-        page._refresh_control_paths()
-        before = len(emitted)
-        assert before == 1, "precondition: the refresh polls when nothing blocks it"
-
-        page._discover_dialog = object()  # a dialog owns the worker
-        try:
-            page._refresh_control_paths()
-            assert len(emitted) == before, (
-                "the background refresh must not poll while the dialog does"
-            )
-        finally:
-            page._discover_dialog = None
-
-        # ...and it resumes once the dialog has closed. Without this branch a
-        # guard that suppressed the refresh unconditionally would pass above.
-        page._refresh_control_paths()
-        assert len(emitted) == before + 1
-
-    def test_the_refresh_is_gated_on_the_capability(self, qtbot):
-        page, _ = _page(qtbot, caps=_caps(control_path_discovery=False))
-        page._ensure_discover_worker = lambda: True
-        emitted: list[int] = []
-        page._discover_poll_request.connect(lambda: emitted.append(1))
-        page._refresh_control_paths()
-        assert emitted == []
-
-
-class TestDialogPreflightGate:
-    def test_a_blocked_preflight_disables_start_and_shows_why(self, qtbot):
-        dialog = ControlPathDiscoveryDialog("h1", "AIO Pump", is_pump=True)
-        qtbot.addWidget(dialog)
-        checks = _preflight_payload()["checks"]
-        checks[7] = {
-            "check_id": "thermal_state",
-            "state": PREFLIGHT_FAIL,
-            "detail": "Thermal safety is forcing fan output (emergency)",
-        }
-        dialog.apply_preflight(
-            parse_preflight_report(
-                _preflight_payload(
-                    verdict=PREFLIGHT_BLOCKED, checks=checks, blocking=["thermal_state"]
-                )
-            )
-        )
-        assert dialog._start_btn.isEnabled() is False
-        assert "Thermal safety is forcing" in dialog._blocked_lbl.text()
-        assert dialog._blocked_lbl.isVisibleTo(dialog) is True
-
-    def test_a_ready_preflight_enables_start(self, qtbot):
-        dialog = ControlPathDiscoveryDialog("h1", "AIO Pump", is_pump=True)
-        qtbot.addWidget(dialog)
-        dialog.apply_preflight(parse_preflight_report(_preflight_payload()))
-        assert dialog._start_btn.isEnabled() is True
-        assert dialog._blocked_lbl.isVisibleTo(dialog) is False
-
-    def test_a_failed_preflight_fetch_leaves_start_available(self, qtbot):
-        dialog = ControlPathDiscoveryDialog("h1", "AIO Pump", is_pump=True)
-        qtbot.addWidget(dialog)
-        dialog.apply_preflight_error("unavailable", "This daemon has no preflight.")
-        assert dialog._start_btn.isEnabled() is True
-        assert "no preflight" in dialog._blocked_lbl.text()
-
-    def test_a_snapshot_for_another_header_is_ignored(self, qtbot):
-        """One process-global slot serves this route, so a poll can legitimately
-        return a different header's run. Rendering it under this dialog's label
-        would attribute another header's relationship to this one."""
-        dialog = ControlPathDiscoveryDialog("h1", "AIO Pump", is_pump=True)
-        qtbot.addWidget(dialog)
-        before = dialog._status_lbl.text()
-        dialog.apply_run(parse_control_path_status({"run": _run_payload(header_id="other")}))
-        assert dialog._status_lbl.text() == before
-
-    def test_a_pump_dialog_promises_the_floor_a_non_pump_one_does_not(self, qtbot):
-        pump = ControlPathDiscoveryDialog("h1", "AIO Pump", is_pump=True)
-        fan = ControlPathDiscoveryDialog("h2", "Chassis", is_pump=False)
-        qtbot.addWidget(pump)
-        qtbot.addWidget(fan)
-        assert "never be stopped" in pump._warnings.text()
-        # The opposite branch, or a predicate stuck on True passes the first.
-        assert "never be stopped" not in fan._warnings.text()
-
-
 # ── call sites: the buttons invoke the EXISTING implementation ──────────────
-
-
-class TestDiscoveryCallSite:
-    def test_the_page_opens_the_dialog_with_the_UNION_pump_predicate(self, qtbot, monkeypatch):
-        """The relationship, not the literal.
-
-        ``_downgraded_pump`` reads ``role == "chassis_fan"`` on the wire while
-        the daemon still refuses to stop it. Asserting ``is_pump is True`` would
-        also pass for a call site reading the wire ``role`` and getting it wrong
-        on a *different* header — so this asserts equality with the predicate,
-        and the opposite branch below proves the assertion can fail.
-        """
-        page, _ = _page(qtbot)
-        captured = {}
-
-        class _FakeDialog:
-            preflight_requested = _Sig()
-            start_requested = _Sig()
-            poll_requested = _Sig()
-            cancel_requested = _Sig()
-
-            def __init__(self, header_id, label, *, is_pump, name_for=None, parent=None):
-                captured["header_id"] = header_id
-                captured["is_pump"] = is_pump
-
-            def request_preflight(self):
-                captured["preflight_requested"] = True
-
-            def request_attach(self):
-                pass
-
-            cancel_sent_on_close = False
-
-            def exec(self):
-                return 0
-
-            def deleteLater(self):
-                return None
-
-            def stop_polling(self):
-                pass
-
-        monkeypatch.setattr(
-            "ventulus.ui.pages.hardware_page.ControlPathDiscoveryDialog", _FakeDialog
-        )
-        monkeypatch.setattr(page, "_ensure_discover_worker", lambda: True)
-
-        pump = _downgraded_pump()
-        page._open_control_path_discovery(pump.id)
-        assert captured["header_id"] == pump.id
-        assert captured["is_pump"] == header_is_pump_protected(pump, _caps())
-        assert captured["is_pump"] is True
-
-        fan = _plain_fan()
-        page._open_control_path_discovery(fan.id)
-        assert captured["is_pump"] == header_is_pump_protected(fan, _caps())
-        assert captured["is_pump"] is False
-
-    def test_the_preflight_is_requested_before_the_modal_blocks(self, qtbot, monkeypatch):
-        """§6.1 wants the preflight as the dialog's FIRST state. Asking after
-        ``exec()`` returns would show "Ready" until the user had already read it.
-        """
-        page, _ = _page(qtbot)
-        order: list[str] = []
-
-        class _FakeDialog:
-            preflight_requested = _Sig()
-            start_requested = _Sig()
-            poll_requested = _Sig()
-            cancel_requested = _Sig()
-
-            def __init__(self, *a, **kw):
-                pass
-
-            def request_preflight(self):
-                order.append("preflight")
-
-            def request_attach(self):
-                order.append("attach")
-
-            cancel_sent_on_close = False
-
-            def exec(self):
-                order.append("exec")
-                return 0
-
-            def deleteLater(self):
-                return None
-
-            def stop_polling(self):
-                pass
-
-        monkeypatch.setattr(
-            "ventulus.ui.pages.hardware_page.ControlPathDiscoveryDialog", _FakeDialog
-        )
-        monkeypatch.setattr(page, "_ensure_discover_worker", lambda: True)
-        page._open_control_path_discovery(_downgraded_pump().id)
-        # The open-time status read (#17) follows the preflight, both before
-        # the modal blocks.
-        assert order == ["preflight", "attach", "exec"]
-
-
-class TestWorkerWiring:
-    """Every request signal must actually reach the worker, and the worker's
-    results must reach the open dialog.
-
-    Asserted end to end through the real queued connections rather than by
-    calling the slots — the connection is the thing most likely to be broken,
-    and the page's `_ensure_discover_worker` closure is where it is made.
-    """
-
-    class _Client:
-        """No socket is ever opened — the worker's lazily-built client is
-        replaced with a fake after the thread starts, exactly as the Phase 6
-        worker tests do. Every test tears the thread down in a `finally`."""
-
-        socket_path = "/nonexistent/ventulus-worker.sock"
-
-    def test_requests_reach_the_worker_and_results_reach_the_dialog(self, qtbot):
-        page, _ = _page(qtbot, client=self._Client())
-        try:
-            assert page._ensure_discover_worker() is True
-            worker = page._discover_worker
-            assert worker is not None
-            calls: list[tuple] = []
-            status = parse_control_path_status({"run": _run_payload(), "records": []})
-
-            class _Fake:
-                def diagnostic_preflight(self, header_id, diagnostic):
-                    calls.append(("preflight", header_id, diagnostic))
-                    return parse_preflight_report(_preflight_payload())
-
-                def start_control_path_discovery(self, header_id, **kw):
-                    calls.append(("start", header_id))
-                    return status.run
-
-                def control_path_status(self):
-                    calls.append(("poll",))
-                    return status
-
-                def cancel_control_path_discovery(self):
-                    calls.append(("cancel",))
-                    return status.run
-
-            worker._client = _Fake()
-
-            dialog = ControlPathDiscoveryDialog(_downgraded_pump().id, "AIO_PUMP", is_pump=True)
-            qtbot.addWidget(dialog)
-            dialog._started = True
-            page._discover_dialog = dialog
-
-            page._discover_preflight_request.emit(_downgraded_pump().id, DIAGNOSTIC_CONTROL_PATH)
-            qtbot.waitUntil(lambda: any(c[0] == "preflight" for c in calls), timeout=3000)
-            assert calls[0][1] == _downgraded_pump().id
-            assert calls[0][2] == DIAGNOSTIC_CONTROL_PATH
-
-            page._discover_start_request.emit(_downgraded_pump().id)
-            qtbot.waitUntil(lambda: any(c[0] == "start" for c in calls), timeout=3000)
-
-            page._discover_poll_request.emit()
-            qtbot.waitUntil(lambda: any(c[0] == "poll" for c in calls), timeout=3000)
-
-            page._discover_cancel_request.emit()
-            qtbot.waitUntil(lambda: any(c[0] == "cancel" for c in calls), timeout=3000)
-
-            # ...and back: the worker's results reach the open dialog through the
-            # page's slots, which is the other half of the same closure.
-            qtbot.waitUntil(lambda: dialog._table.rowCount() > 0, timeout=3000)
-            qtbot.waitUntil(lambda: len(dialog._preflight.rows) == 11, timeout=3000)
-        finally:
-            page._discover_dialog = None
-            page.cleanup()
-        # The new worker must be in `cleanup`'s teardown loop, or its thread
-        # outlives the page.
-        assert page._discover_worker is None and page._discover_thread is None
-
-    def test_a_worker_error_reaches_the_dialog(self, qtbot):
-        from ventulus.api.errors import DaemonError
-
-        page, _ = _page(qtbot, client=self._Client())
-        try:
-            assert page._ensure_discover_worker() is True
-            worker = page._discover_worker
-
-            class _Fake:
-                def control_path_status(self):
-                    raise DaemonError(
-                        status=409, code="thermal_abort", message="Cannot run while hot"
-                    )
-
-            worker._client = _Fake()
-            dialog = ControlPathDiscoveryDialog("h1", "AIO_PUMP", is_pump=True)
-            qtbot.addWidget(dialog)
-            page._discover_dialog = dialog
-
-            page._discover_poll_request.emit()
-            # A safety refusal is protection, not failure: the daemon's own words
-            # are shown, undressed.
-            qtbot.waitUntil(
-                lambda: "Cannot run while hot" in dialog._status_lbl.text(), timeout=3000
-            )
-            assert "error" not in dialog._status_lbl.text().lower()
-        finally:
-            page._discover_dialog = None
-            page.cleanup()
 
 
 class TestClientContract:
@@ -1208,51 +855,6 @@ class TestProvenance:
 # ── the session dialog offers discovery only where the daemon has it ────────
 
 
-class TestSessionDiagnosticGating:
-    def test_the_choice_appears_when_the_daemon_supports_it(self, qtbot):
-        dialog = ValidationSessionDialog(
-            "aio0",
-            "AIO",
-            supported_diagnostics={
-                "pwm_verify",
-                "pwm_characterization",
-                VALIDATION_DIAG_CONTROL_PATH,
-            },
-        )
-        qtbot.addWidget(dialog)
-        assert dialog.findChild(QCheckBox, f"Validation_Check_{VALIDATION_DIAG_CONTROL_PATH}")
-
-    def test_the_choice_is_absent_on_an_older_daemon(self, qtbot):
-        """An unknown token makes the daemon reject the WHOLE session, so an
-        unfilterable box would break validation rather than degrade it."""
-        dialog = ValidationSessionDialog(
-            "aio0", "AIO", supported_diagnostics={"pwm_verify", "pwm_characterization"}
-        )
-        qtbot.addWidget(dialog)
-        assert (
-            dialog.findChild(QCheckBox, f"Validation_Check_{VALIDATION_DIAG_CONTROL_PATH}") is None
-        )
-        # ...and the two it does support are still offered.
-        assert dialog.findChild(QCheckBox, "Validation_Check_pwm_verify") is not None
-
-    def test_the_page_gates_the_choice_on_the_capability(self, qtbot):
-        page, _ = _page(qtbot)
-        assert VALIDATION_DIAG_CONTROL_PATH in page._supported_session_diagnostics()
-        older, _ = _page(qtbot, caps=_caps(control_path_discovery=False))
-        assert VALIDATION_DIAG_CONTROL_PATH not in older._supported_session_diagnostics()
-
-    def test_the_evidence_disclosure_exists_and_starts_collapsed(self, qtbot):
-        """§6.4: expose evidence and confidence "without overwhelming the
-        primary view" — so it is disclosure, not a fourth always-open panel."""
-        dialog = ValidationSessionDialog("aio0", "AIO")
-        qtbot.addWidget(dialog)
-        section = dialog.findChild(object, "Validation_Section_evidence")
-        assert section is not None
-        content = dialog.findChild(object, "Validation_Section_evidence_Content")
-        assert content is not None
-        assert content.isVisibleTo(section) is False
-
-
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -1274,13 +876,3 @@ def _expand_details(card) -> None:
     assert button is not None
     if not button.isChecked():
         button.click()
-
-
-class _Sig:
-    """A stand-in for a Qt signal on a fake dialog."""
-
-    def connect(self, *_a, **_kw):
-        return None
-
-    def emit(self, *_a, **_kw):
-        return None

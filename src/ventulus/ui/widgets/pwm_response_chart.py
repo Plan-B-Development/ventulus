@@ -46,9 +46,8 @@ class PwmResponseChart(QWidget):
         super().__init__(parent)
         self.setObjectName(object_name)
         # `P8-af`: the LIVE theme, not default-dark. Pinned, this chart sat on
-        # the default palette inside a correctly themed dialog. Unlike its
-        # sibling `SessionTimelineChart` this one builds no ViewBox, so
-        # `_setup_plot` is idempotent and `set_theme` was already safe to call —
+        # the default palette inside a correctly themed dialog. It builds no
+        # ViewBox, so `_setup_plot` is idempotent and `set_theme` was already safe to call —
         # there was simply never a caller. `P8-bx` added one (the hosting dialog
         # forwards), though it is latent while that dialog is `exec()`-modal.
         self._theme: ThemeTokens = active_theme()

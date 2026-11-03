@@ -1,8 +1,8 @@
 """Set a header's role (DEC-444) — a thin dialog over ``services/header_role_view``.
 
-Opened from the Hardware page's header card and from the PWM Test Report's scope
-page; both route the result through ``HardwarePage.change_header_role``, so there
-is one write path, one confirmation and one outcome message.
+Opened from the Hardware page's header card, which routes the result through
+``HardwarePage.change_header_role``, so there is one write path, one
+confirmation and one outcome message.
 
 A dialog rather than an inline combo box: the card re-renders every second, and
 a role write must come from a deliberate choice, never from a programmatic index

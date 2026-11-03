@@ -400,7 +400,7 @@ If you want to explore the interface without hardware or a running daemon:
 ventulus --demo
 ```
 
-Demo mode generates synthetic sensor temperatures and fan speeds. You can create profiles, edit curves and explore the UI, but not everything works as it does against a real daemon: the PWM Test Report will not start, hardware advisories and some checks are skipped, and Import Config and the profiles and themes folder settings are unavailable. **System State** and the Hardware page's **Voltages** table show a synthetic Gigabyte X870E AORUS MASTER, and a support bundle exported in demo carries those synthetic readings. **Profiles you create or edit in demo are not saved**: they last until demo ends. The top ribbon and the status banner read *Demo — simulated* where they would show the daemon connection, a **DEMO** badge appears in the status banner, and the footer's mode reads *Demo mode*, so you always know when synthetic data is being shown.
+Demo mode generates synthetic sensor temperatures and fan speeds. You can create profiles, edit curves and explore the UI, but not everything works as it does against a real daemon: `ventulus-diag` has no demo mode, hardware advisories and some checks are skipped, and Import Config and the profiles and themes folder settings are unavailable. **System State** and the Hardware page's **Voltages** table show a synthetic Gigabyte X870E AORUS MASTER, and a support bundle exported in demo carries those synthetic readings. **Profiles you create or edit in demo are not saved**: they last until demo ends. The top ribbon and the status banner read *Demo — simulated* where they would show the daemon connection, a **DEMO** badge appears in the status banner, and the footer's mode reads *Demo mode*, so you always know when synthetic data is being shown.
 
 You can also enable "Start in demo mode when daemon is unavailable" in Settings so the GUI falls back to demo automatically.
 
@@ -468,7 +468,7 @@ The left sidebar provides access to all of the application's pages:
 | **Overview** | Daemon health, device discovery, and live sensor and fan status |
 | **Controls** | Profile management, fan grouping, curve editing |
 | **System State** | The health report: chip and driver detection, BIOS interference, thermal and GPU limits, and advanced fan and GPU tests |
-| **Hardware** | The daemon's readiness checklist, your coolers and every PWM header (**Cooling Hardware**), the fan tests and the **PWM Test Report** (**Hardware Diagnostics**), and the Super-I/O architecture |
+| **Hardware** | The daemon's readiness checklist, your coolers and every PWM header (**Cooling Hardware**), the fan tests (**Hardware Diagnostics**, which also names the `ventulus-diag` command for the longer ones), and the Super-I/O architecture |
 | **Settings** | Application preferences and backup/restore |
 | **Theme** | Fonts, sizes, and the colour-token editor |
 | **Logs** | Event log and current alerts (the support bundle is exported from the footer) |

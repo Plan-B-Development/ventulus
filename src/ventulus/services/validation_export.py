@@ -1,9 +1,9 @@
 """Serializers for a completed validation session (AIO-MB Phase 5).
 
 Qt-free, and deliberately **not** a UI: Phase 5 owns the schema and the bytes,
-Phase 6 (DEC-318) added the Export button, the file dialog and the success
-message, in ``ui/widgets/validation_session_dialog.py`` + ``ui/pages/hardware_page.py``. There
-is no save-file call anywhere in this module — it returns text, and the caller
+its caller is ``ventulus-diag validation export`` (DEC-503; the GUI's Export
+button went with the session dialog). There is no save-file call anywhere in
+this module — it returns text, and the caller
 decides where it goes.
 
 Why the CSV lives here rather than in the daemon
