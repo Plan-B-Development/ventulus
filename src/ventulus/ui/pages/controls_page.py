@@ -2243,14 +2243,17 @@ class ControlsPage(QWidget):
         self._refresh_curve_links(profile)
 
         # DEC-233: re-apply the editing highlight after a rebuild so the card open
-        # in the editor stays "on the workbench". If that curve is gone (deleted,
-        # or a profile switch replaced the grid) close the editor fully, so its
-        # pane, title, and Test/Close actions can't strand on a curve that is no
-        # longer shown — leaving the editor open on another profile's curve would
-        # also mis-target Test Curve and Save. Idempotent; _on_delete_curve
-        # already closes before rebuilding, so the delete path is unaffected.
-        if self._editing_curve_id and self._editing_curve_id in self._curve_cards:
-            self._curve_cards[self._editing_curve_id].set_editing(True)
+        # in the editor stays "on the workbench". If that curve is not the one
+        # shown — deleted, or a profile switch or Revert replaced the grid — close
+        # the editor fully, so its pane, title, and Test/Close actions can't strand
+        # on a curve that is no longer shown. `PRF-c`: compare the curve OBJECT,
+        # not its id. Duplicate Profile copies ids, so after a switch to the copy
+        # the id still matched while the editor kept mutating the source profile's
+        # curve — edits the copy showed as Unsaved and the source's next save
+        # published. Idempotent; _on_delete_curve already closes before rebuilding.
+        shown = profile.get_curve(self._editing_curve_id) if self._editing_curve_id else None
+        if shown is not None and shown is self._curve_editor.get_curve():
+            self._curve_cards[shown.id].set_editing(True)
         elif self._editing_curve_id is not None:
             self._close_editor()
 

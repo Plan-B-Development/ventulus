@@ -13,6 +13,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
+from ventulus.api.errors import DaemonError, DaemonUnavailable
 from ventulus.api.models import FanReading, HwmonHeader
 from ventulus.services.profile_service import (
     CONTROL_ROLE_CHASSIS,
@@ -21,9 +22,11 @@ from ventulus.services.profile_service import (
     ControlMember,
     ControlMode,
     CurveConfig,
+    CurvePoint,
     CurveType,
     LogicalControl,
     Profile,
+    ProfileService,
     infer_member_role,
     remove_curve,
 )
@@ -256,3 +259,107 @@ class TestDeleteMixInput:
             remove_curve(p, "b")
         assert [c.id for c in p.curves] == ["a", "b", "c", "m"]
         assert next(c for c in p.curves if c.id == "m").mix_curve_ids == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# PRF-c — the editor and Revert reach the profile the user is looking at
+# ---------------------------------------------------------------------------
+
+
+class TestEditorFollowsTheProfile:
+    def test_switch_to_a_duplicate_closes_the_editor(self, qtbot, app_state, profile_service):
+        """Duplicate Profile keeps curve ids, so the copy has a curve with the id
+        open in the editor. The editor must not stay on the SOURCE's curve."""
+        source = profile_service.create_profile("Source")
+        source.curves.append(
+            CurveConfig(
+                id="g1", name="CPU", type=CurveType.GRAPH,
+                points=[CurvePoint(30, 20), CurvePoint(80, 100)],
+            )
+        )  # fmt: skip
+        page = _page(qtbot, app_state, profile_service)
+        page.select_profile(source.id)
+        page._on_edit_curve("g1")
+        assert page._editing_curve_id == "g1"
+        assert page._curve_editor.get_curve() is source.get_curve("g1")
+        copy = profile_service.duplicate_profile(source.id, "Copy")
+        # Precondition the defect needs: the copy has the same id, another object.
+        assert copy.get_curve("g1") is not None
+        assert copy.get_curve("g1") is not source.get_curve("g1")
+
+        page.select_profile(copy.id)
+
+        assert page._editing_curve_id is None
+        assert page._curve_editor.isHidden()
+        assert not page._editor_placeholder.isHidden()
+
+    def test_refresh_of_the_same_profile_keeps_the_editor(self, qtbot, app_state, profile_service):
+        # The opposite branch: a rebuild that shows the same curve keeps it open.
+        prof = profile_service.create_profile("Only")
+        prof.curves.append(CurveConfig(id="g1", name="CPU", type=CurveType.GRAPH))
+        page = _page(qtbot, app_state, profile_service)
+        page.select_profile(prof.id)
+        page._on_edit_curve("g1")
+
+        page._refresh_curves_grid(prof)
+
+        assert page._editing_curve_id == "g1"
+        assert page._curve_cards["g1"].is_editing is True
+        assert not page._curve_editor.isHidden()
+
+
+class _DaemonStub:
+    """A daemon that holds an older version of the profile and refuses (or
+    cannot take) the next upload."""
+
+    def __init__(self, document: dict, upload_error: Exception) -> None:
+        self.document = document
+        self.upload_error = upload_error
+        self.reads: list[str] = []
+
+    def get_profile(self, profile_id: str) -> dict:
+        self.reads.append(profile_id)
+        return self.document
+
+    def update_profile(self, _profile_id: str, _document: dict) -> dict:
+        raise self.upload_error
+
+
+class TestRevertKeepsALocalSave:
+    @pytest.mark.parametrize(
+        "upload_error",
+        [
+            DaemonUnavailable(),
+            DaemonError(code="validation_error", message="refused", status=400),
+        ],
+        ids=["offline", "refused"],
+    )
+    def test_revert_returns_to_the_local_save(self, tmp_path, monkeypatch, upload_error):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        svc = ProfileService()
+        svc.load()
+        pid = svc.active_id
+        daemon_version = svc.get_profile(pid).to_dict()
+        stub = _DaemonStub(daemon_version, upload_error)
+        svc._client = stub
+        svc._daemon_ids.add(pid)
+        assert svc.is_published(pid)  # precondition: the daemon holds it
+
+        prof = svc.get_profile(pid)
+        prof.controls.append(LogicalControl(id="saved", name="Saved", mode=ControlMode.MANUAL))
+        svc.save_profile(prof)  # stays a local draft
+        assert not svc.is_published(pid)
+        svc.get_profile(pid).controls.append(
+            LogicalControl(id="unsaved", name="Unsaved", mode=ControlMode.MANUAL)
+        )
+
+        reloaded = svc.reload_profile(pid)
+
+        assert reloaded is not None
+        ids = {c.id for c in reloaded.controls}
+        assert "saved" in ids  # the last save, not the daemon's older version
+        assert "unsaved" not in ids
+        assert stub.reads == []
+        # The local mirror was not overwritten with the daemon's version either.
+        again = svc.reload_profile(pid)
+        assert again is not None and "saved" in {c.id for c in again.controls}

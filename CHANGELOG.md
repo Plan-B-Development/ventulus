@@ -17,6 +17,14 @@ rename. Version numbers carry on from Control-OFC.
   started subtracting from its next input, and a Mix left with no inputs stopped controlling
   its fans. Ventulus now refuses the delete and names the Mix, so you remove the input or
   delete the Mix first.
+- **The curve editor closes when you switch to another profile.** A duplicated profile keeps its
+  curves' ids, so after switching to the copy the editor stayed open on the original's curve.
+  Edits then changed the original, which published them the next time it was saved or applied,
+  while the copy showed them as unsaved.
+- **Revert returns to your last save when that save stayed local.** If a profile the daemon
+  already held was last saved while the daemon was offline, or the daemon refused the save,
+  Revert loaded the daemon's older version over it and over its local copy, and still said
+  "Reverted to last saved".
 
 ## [6.0.0] — 2026-11-03
 

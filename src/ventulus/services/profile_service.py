@@ -3024,17 +3024,21 @@ class ProfileService(QObject):
         """Re-read one profile from its store, discarding in-memory edits (DEC-233).
 
         Backs the Controls page's "Revert" action. Prefers the daemon document
-        (the store of record — DEC-160) when the profile is published and a
-        client is set, falling back to the local cache on any daemon read
-        failure; with no client it reads the local cache directly. Replaces the
+        (the store of record — DEC-160) when the profile is published
+        (:meth:`is_published`: in the daemon store with no local-only save
+        pending) and a client is set, falling back to the local cache on any
+        daemon read failure; otherwise it reads the local cache directly. Replaces the
         in-memory copy and returns the reloaded profile, or ``None`` (leaving the
         in-memory copy untouched) when the profile has never been persisted or
         every read fails — so an unsaved brand-new draft is never silently
         dropped. Does not emit ``profiles_changed``; the caller refreshes its own
         view.
         """
-        # Daemon store of record, when this profile is published.
-        if self._client is not None and profile_id in self._daemon_ids:
+        # Daemon store of record, when this profile is published. `PRF-c`: a
+        # profile the daemon holds whose last save stayed local (offline, or
+        # refused) is NOT published — its saved state is the local copy, and the
+        # daemon's older version would overwrite it and its mirror.
+        if self._client is not None and self.is_published(profile_id):
             try:
                 document = self._client.get_profile(profile_id)
                 profile = Profile.from_dict(document)
