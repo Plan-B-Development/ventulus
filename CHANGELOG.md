@@ -7,6 +7,10 @@ rename. Version numbers carry on from Control-OFC.
 
 ### Fixed
 
+- **Ctrl-C no longer crashes the GUI.** Stopping Ventulus with Ctrl-C from a terminal could
+  end in a segmentation fault when the signal arrived while the dashboard chart was drawing.
+  Ctrl-C now closes the window once the current drawing has finished, the same way as the
+  window's close button, so your window layout is still saved.
 - **`ventulus-diag` exit codes tell scripts what happened.** `report run` exited 0 when the
   daemon refused or failed every step; it now exits 5 when nothing was tested and 1 when a test
   failed. `cancel` said "Nothing to cancel" and exited 0 when it could not reach the daemon; it

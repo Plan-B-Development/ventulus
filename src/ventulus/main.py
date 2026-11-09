@@ -41,6 +41,26 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def install_sigint_close(window: MainWindow) -> None:
+    """Make Ctrl+C (SIGINT) close ``window`` as the window manager would.
+
+    DEC-257: ``close()``, not ``quit()``. ``QApplication.quit()`` ends the event
+    loop without delivering a close event, so every closeEvent-driven save
+    (window geometry, splitter sizes, chart range, log filters, DEC-245) was
+    skipped. ``close()`` runs the same teardown as the close button; the app then
+    quits because it is the last window (quitOnLastWindowClosed).
+
+    SMK-a: the handler only *schedules* the close. Python runs a signal handler
+    at whatever bytecode the main thread reaches next, and that is often inside
+    a Python ``paint()`` that Qt's C++ paint code called, for example a
+    pyqtgraph axis while the timeline chart repaints. Closing from there tore
+    the chart's scene down while ``QGraphicsView::paintEvent`` was still
+    walking it, and the GUI segfaulted on Ctrl-C. A zero-delay timer runs the
+    close from the event loop instead, after the current event has finished.
+    """
+    signal.signal(signal.SIGINT, lambda *_: QTimer.singleShot(0, window.close))
+
+
 def _resolve_demo_mode(cli_demo: bool, demo_on_disconnect: bool, daemon_reachable: bool) -> bool:
     """Decide whether to start in demo mode (DEC-139).
 
@@ -355,15 +375,7 @@ def main() -> int:
     instance.activated.connect(lambda: raise_window(window))
 
     # Allow Ctrl+C to exit cleanly.
-    #
-    # DEC-257: `close()`, not `quit()`. `qt_app.quit()` tears the event loop down
-    # without ever delivering a close event, so every closeEvent-driven save —
-    # window geometry, splitter sizes, chart range, log filters (DEC-245) — was
-    # silently skipped. Ctrl+C is a normal way to stop a desktop app from a
-    # terminal, and it should not be the one exit path that loses your layout.
-    # `close()` runs the same teardown the window-manager close button does; the
-    # app then quits because it is the last window (quitOnLastWindowClosed).
-    signal.signal(signal.SIGINT, lambda *_: window.close())
+    install_sigint_close(window)
     _sigint_timer = QTimer()
     _sigint_timer.timeout.connect(lambda: None)
     _sigint_timer.start(200)

@@ -284,9 +284,10 @@ print('icons render')"
 
 # Starts the GUI offscreen, waits for <pattern> in its log, then stops it with
 # SIGINT (the window closes as from the window manager) and wants exit status 0.
+# PYTHONFAULTHANDLER puts the Python stack of a crash into the log it prints.
 gui_runs_until() {
     local pattern=$1 socket=$2 log=$work/gui-$3.log pid _
-    as_user "cd $work && QT_QPA_PLATFORM=offscreen exec ventulus --socket $socket" > "$log" 2>&1 &
+    as_user "cd $work && PYTHONFAULTHANDLER=1 QT_QPA_PLATFORM=offscreen exec ventulus --socket $socket" > "$log" 2>&1 &
     pid=$!
     for _ in $(seq 60); do
         grep -q "$pattern" "$log" && break

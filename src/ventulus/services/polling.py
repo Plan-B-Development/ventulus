@@ -162,6 +162,15 @@ class _PollWorker(QObject):
         try:
             if not self._shutting_down:
                 self._poll_once()
+        except Exception:
+            # SMK-a: `shutdown()` closes the client from the main thread while a
+            # cycle may still be running here, so the cycle's next request fails
+            # in ways it does not map (httpx raises a bare `RuntimeError` for a
+            # closed client). Nothing will read this cycle's result. Outside
+            # shutdown, an unhandled exception still propagates.
+            if not self._shutting_down:
+                raise
+            log.debug("Poll cycle ended by shutdown", exc_info=True)
         finally:
             self.cycle_done.emit()
 

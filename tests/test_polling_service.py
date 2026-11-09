@@ -526,6 +526,26 @@ class TestPollCycleGate:
             worker.poll()
         assert len(done) == 1
 
+    def test_a_cycle_cut_short_by_shutdown_ends_quietly(self, qtbot, tmp_path):
+        """SMK-a: ``shutdown()`` closes the client from the main thread while a
+        cycle runs on the worker. The cycle's next request then hits a closed
+        httpx client, which raises a bare ``RuntimeError`` the cycle does not
+        map. During shutdown that must end the cycle, not escape it as an
+        "Uncaught exception"."""
+        worker = _PollWorker(socket_path=str(tmp_path / "absent.sock"))
+        client = worker._ensure_client()
+        real_capabilities = client.capabilities
+
+        def shutdown_then_request():
+            worker.shutdown()  # what the main thread does mid-cycle
+            return real_capabilities()
+
+        client.capabilities = shutdown_then_request
+        done = _collect_signal(worker.cycle_done)
+        worker.poll()
+        assert worker._shutting_down is True
+        assert len(done) == 1
+
     def test_cycle_done_follows_a_poll_after_shutdown(self, qtbot):
         worker = _make_worker(_make_mock_client())
         done = _collect_signal(worker.cycle_done)
