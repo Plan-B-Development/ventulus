@@ -40,6 +40,7 @@ from ventulus.diag.console import (
 )
 from ventulus.diag.daemon import Daemon, start_refusal
 from ventulus.services.characterization_view import ENGINE_PAUSE_WARNING, PUMP_STARTUP_WARNING
+from ventulus.services.pump_protection import header_is_pump_protected
 from ventulus.services.pwm_report.executor import cancel_slot, poll_slot
 from ventulus.services.thermal_view import build_startup_views, build_steady_state_view
 from ventulus.services.validation_view import build_validation_session_view, format_elapsed
@@ -174,10 +175,22 @@ def start_cmd(
             [device.pump_member] if device.pump_member else []
         )
         swept = ", ".join(f"{daemon.name_of(m)} ({m})" for m in members) or "none"
-        pump_swept = device.pump_member in members if device.pump_member else False
+        # The device's pump, or any swept header the daemon protects as a pump
+        # (the union, never the display role, DEC-312).
+        headers = {h.id: h for h in daemon.headers}
+        pumps = [
+            m
+            for m in members
+            if m == device.pump_member
+            or header_is_pump_protected(headers.get(m), daemon.capabilities)
+        ]
         warnings = [ENGINE_PAUSE_WARNING]
-        if pump_swept:
-            warnings.append("The pump is swept: it is never driven below 30% and never stopped.")
+        if pumps:
+            named = ", ".join(daemon.name_of(m) for m in pumps)
+            warnings.append(
+                f"Swept as a pump: {named}. A pump is never driven below its pump floor "
+                "and never stopped."
+            )
             warnings.append(PUMP_STARTUP_WARNING)
         describe(
             console,

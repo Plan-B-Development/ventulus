@@ -84,6 +84,8 @@ be made.
 	nothing; *--dry-run* prints the plan. *--notes* reads your setup facts
 	from a JSON file (*{"cooler": {...}, "headers": {"<id>": {...}}}*);
 	without it, the answers an earlier GUI version saved are used.
+	The exit status follows the steps as well as the run: *1* if any step
+	failed, *5* if every step was refused or skipped.
 
 *characterise* _header_ [*--yes-change-fan-speeds*]
 	Walk one header across the daemon's duty points and record its RPM
@@ -115,7 +117,8 @@ be made.
 # EXIT STATUS
 
 *0*	Done.++
-*1*	The daemon reported the test failed, or a report could not be saved.++
+*1*	The daemon reported a test failed, *cancel* could not check or cancel a
+	test, or a report could not be saved.++
 *2*	Usage error.++
 *3*	The daemon could not be reached.++
 *4*	The daemon is too old for the command, or does not offer the test.++
@@ -123,7 +126,8 @@ be made.
 	protection active, or an invalid target.++
 *6*	You cancelled the test; the daemon put the header back.++
 *7*	A safety rule ended the test.++
-*8*	The daemon stopped answering; it restores the header itself.++
+*8*	The daemon stopped answering, or restarted during the test; it restores
+	the header itself.++
 *130*	Stopped at once by a second interrupt.
 
 # FILES

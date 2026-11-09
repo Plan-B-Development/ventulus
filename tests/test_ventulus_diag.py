@@ -36,6 +36,7 @@ from tests.pwm_report_fixtures import (
     header,
     new_doc,
     ok,
+    refused,
     sweep_run,
     verify_body,
 )
@@ -55,6 +56,7 @@ from ventulus.diag.confirm import ALLOW_STOP_FLAG, CONFIRM_FLAG, confirm_fan_sto
 from ventulus.diag.console import (
     EXIT_ABORTED,
     EXIT_CANCELLED,
+    EXIT_FAILED,
     EXIT_INCOMPATIBLE,
     EXIT_INTERRUPTED,
     EXIT_OK,
@@ -1063,3 +1065,181 @@ def test_a_feature_the_daemon_does_not_offer_is_refused_before_any_request():
     caps = {**CAPS, "control": {**CAPS["control"], "thermal_observation": True}}
     assert validation.start_cmd(c, make_daemon(client, caps=caps), request) == EXIT_OK
     assert client.start_kwargs is not None
+
+
+# ── Exit codes and output tell the truth (DGC-a) ─────────────────────────────
+
+
+def _err_of(run) -> str:
+    return run.console._err.getvalue()
+
+
+def _refusing(*, sweep_poll: str | None = None):
+    """Like :func:`_answers`, but the verify is refused (busy), and the sweep is
+    refused too unless *sweep_poll* gives the state its poll ends in."""
+
+    def answer(call):
+        if call.kind == "snapshot":
+            return ok(bundle(fans=[fan(CPU)], headers=[header(CPU)]))
+        if call.kind == "preflight":
+            return ok(READY)
+        if call.kind == "verify":
+            return refused(409, "busy", "another diagnostic is running")
+        if call.kind == "start_sweep":
+            if sweep_poll is None:
+                return refused(409, "busy", "another diagnostic is running")
+            return ok(sweep_run("running"))
+        if call.kind == "poll":
+            return ok(sweep_run(sweep_poll))
+        raise AssertionError(call.kind)
+
+    return answer
+
+
+def test_a_report_whose_every_step_was_refused_exits_5_not_0(tmp_path):
+    rc, _runner, worker, run, _, _out = _run(tmp_path, _refusing())
+    doc = _saved(run)
+    # The precondition the bug hid behind: the document itself still says complete.
+    assert doc["state"] == d.STATE_COMPLETE
+    assert [s["status"] for s in doc["steps"]] == [d.STEP_NOT_TESTED, d.STEP_NOT_TESTED]
+    assert {"verify", "start_sweep"} <= set(worker.kinds()), "both were asked for and refused"
+    assert rc == EXIT_REFUSED
+    assert "Nothing was tested" in _err_of(run)
+
+
+def test_a_report_with_a_failed_step_exits_1(tmp_path):
+    rc, _runner, _worker, run, _, _out = _run(tmp_path, _refusing(sweep_poll="failed"))
+    doc = _saved(run)
+    assert doc["state"] == d.STATE_COMPLETE
+    assert d.STEP_ERROR in [s["status"] for s in doc["steps"]]
+    assert rc == EXIT_FAILED
+    assert "Not every test ended normally" in _err_of(run)
+
+
+def test_a_report_with_one_step_run_and_one_refused_still_exits_0(tmp_path):
+    """The opposite branch: one refused step does not make the run a refusal."""
+    answer = _refusing(sweep_poll="complete")
+    rc, _runner, _worker, run, _, _out = _run(tmp_path, answer)
+    statuses = [s["status"] for s in _saved(run)["steps"]]
+    assert sorted(statuses) == sorted([d.STEP_NOT_TESTED, d.STEP_COMPLETE])
+    assert rc == EXIT_OK and _err_of(run) == ""
+
+
+@pytest.mark.parametrize(
+    ("state", "statuses", "expected"),
+    [
+        (d.STATE_COMPLETE, [], EXIT_OK),  # snapshot only
+        (d.STATE_COMPLETE, [d.STEP_COMPLETE, d.STEP_NOT_TESTED], EXIT_OK),
+        (d.STATE_COMPLETE, [d.STEP_NOT_TESTED, d.STEP_NOT_TESTED], EXIT_REFUSED),
+        (d.STATE_COMPLETE, [d.STEP_ABORTED, d.STEP_ERROR], EXIT_FAILED),
+        (d.STATE_COMPLETE, [d.STEP_COMPLETE, d.STEP_ABORTED], EXIT_ABORTED),
+        (d.STATE_COMPLETE, [d.STEP_INTERRUPTED], EXIT_INTERRUPTED),
+        (d.STATE_COMPLETE, [d.STEP_CANCELLED, d.STEP_NOT_TESTED], EXIT_CANCELLED),
+        (d.STATE_COMPLETE, ["a_token_from_a_newer_daemon"], EXIT_FAILED),
+        (d.STATE_CANCELLED, [d.STEP_NOT_TESTED], EXIT_CANCELLED),
+        (d.STATE_INTERRUPTED, [d.STEP_ERROR], EXIT_INTERRUPTED),
+    ],
+)
+def test_the_report_exit_follows_its_steps(state, statuses, expected):
+    doc = {"state": state, "steps": [{"status": s} for s in statuses]}
+    assert report.run_exit(doc) == expected
+
+
+def test_cancel_that_could_not_reach_a_slot_is_not_nothing_to_cancel():
+    class Unanswered(SweepClient):
+        def control_path_status(self):
+            raise DaemonTimeout("no answer")
+
+        def stall_probe_status(self):
+            return None
+
+    # Every other slot idle: before DGC-a this said "Nothing to cancel" and exited 0.
+    client = Unanswered(["complete"])
+    c, out, err = console()
+    assert cli.cancel_cmd(c, make_daemon(client)) == EXIT_FAILED
+    assert "Nothing to cancel" not in out.getvalue()
+    assert "control-path discovery" in err.getvalue() and "may still be running" in err.getvalue()
+    # A slot that was cancelled is still reported alongside the one that failed.
+    client = Unanswered(["running"])
+    c, out, err = console()
+    assert cli.cancel_cmd(c, make_daemon(client)) == EXIT_FAILED
+    assert client.cancels == 1 and "Cancelled the characterisation" in out.getvalue()
+
+
+class _VanishingRun(SweepClient):
+    """A daemon that restarts during the test: the run it confirmed is gone (the
+    characterisation answers 404 → ``None``; the control-path status keeps its
+    persisted records but no run)."""
+
+    def __init__(self, polls_before_restart: int) -> None:
+        super().__init__(["running"])
+        self.polls_left = polls_before_restart
+
+    def _alive(self) -> bool:
+        self.polls_left -= 1
+        return self.polls_left >= 0
+
+    def characterization_status(self):
+        return super().characterization_status() if self._alive() else None
+
+    def start_control_path_discovery(self, header_id):
+        self.started += 1
+        return SimpleNamespace(run_id="cp-1")
+
+    def control_path_status(self):
+        run = SimpleNamespace(run_id="cp-1", state="running") if self._alive() else None
+        return SimpleNamespace(run=run, records=[])
+
+
+@pytest.mark.parametrize("kind", [sweeps.CHARACTERISE, sweeps.DISCOVER], ids=lambda k: k.name)
+def test_a_run_the_daemon_lost_in_a_restart_ends_the_follow_interrupted(kind):
+    client = _VanishingRun(polls_before_restart=2)
+    clock = Clock()  # bounds the loop: a follow that never ends fails here
+    c, out, _ = console()
+    rc = sweeps.run_sweep(
+        c,
+        make_daemon(client),
+        CPU,
+        kind,
+        confirmed_by_flag=True,
+        clock=clock.now,
+        sleep=clock.sleep,
+    )
+    assert client.started == 1 and client.polls_left < 0, "the run was seen, then lost"
+    assert rc == EXIT_INTERRUPTED
+    assert "no longer reports this test" in out.getvalue()
+    assert client.cancels == 0
+
+
+def test_the_validation_pump_warning_follows_the_daemons_pump_protection():
+    """A swept header the daemon protects as a pump is warned about even when it
+    is not the device's pump member and its display role is not ``pump``."""
+
+    def warned_about(cpu_stop_permitted: bool) -> str:
+        client = SessionClient()
+        daemon = make_daemon(client)
+        daemon.headers = parse_hwmon_headers(
+            {
+                "headers": [
+                    header(CPU, floor=30, stop_permitted=cpu_stop_permitted),
+                    header(SYS),
+                ]
+            }
+        )
+        c, out, _ = console()
+        with pytest.raises(DiagError) as exc:  # not confirmed: refused after the plan
+            validation.start_cmd(
+                c,
+                daemon,
+                validation.StartRequest(
+                    device_id="aio", diagnostics=("characterization",), sweep_members=(CPU,)
+                ),
+            )
+        assert exc.value.code == EXIT_REFUSED and client.start_kwargs is None
+        return out.getvalue()
+
+    protected = warned_about(cpu_stop_permitted=False)
+    [line] = [ln for ln in protected.splitlines() if "Swept as a pump" in ln]
+    assert CPU.rsplit(":", 1)[-1] in line, "the warning names the protected header"
+    assert "30%" not in protected
+    assert "Swept as a pump" not in warned_about(cpu_stop_permitted=True)

@@ -7,6 +7,13 @@ rename. Version numbers carry on from Control-OFC.
 
 ### Fixed
 
+- **`ventulus-diag` exit codes tell scripts what happened.** `report run` exited 0 when the
+  daemon refused or failed every step; it now exits 5 when nothing was tested and 1 when a test
+  failed. `cancel` said "Nothing to cancel" and exited 0 when it could not reach the daemon; it
+  now names the test it could not check and exits 1. `characterise` and `discover` waited
+  forever if the daemon restarted during the test; they now stop with exit 8. The validation
+  start warning now names every swept header the daemon protects as a pump, not only the
+  cooling device's own pump.
 - **A pump header added from the Unassigned Fans menu gets the pump's 30 % minimum.** When a
   motherboard header that you had set to the pump role was added to a role from the
   Unassigned Fans menu, Ventulus saved it with the 20 % chassis minimum and no pump tag. The

@@ -292,8 +292,16 @@ def _follow(
                         "The daemon stopped answering. It puts the header back when its test ends."
                     )
                     return EXIT_INTERRUPTED
-                run = None
-            if run is not None:
+            else:
+                if run is None:
+                    # The start was confirmed, and the daemon installs the run before
+                    # it answers and holds it until it restarts: an answer with no run
+                    # means the in-memory run is gone, not that the test is still going.
+                    console.out(
+                        "The daemon no longer reports this test: it restarted while the "
+                        "test ran, so its result was lost."
+                    )
+                    return EXIT_INTERRUPTED
                 if run_id and run.run_id and run.run_id != run_id:
                     console.out("Another diagnostic took the daemon's diagnostic slot.")
                     return EXIT_INTERRUPTED

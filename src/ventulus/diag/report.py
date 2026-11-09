@@ -77,6 +77,40 @@ _STATE_EXIT = {
     d.STATE_INTERRUPTED: EXIT_INTERRUPTED,
 }
 
+#: How a step that did not complete colours a run whose document reached
+#: ``complete``, worst first. A step whose status is not listed here (an
+#: unrecognised token the runner kept, 273-i) counts as failed.
+_STEP_EXIT = {
+    d.STEP_ERROR: EXIT_FAILED,
+    d.STEP_ABORTED: EXIT_ABORTED,
+    d.STEP_INTERRUPTED: EXIT_INTERRUPTED,
+    d.STEP_CANCELLED: EXIT_CANCELLED,
+}
+_STEP_STATUSES_OK = frozenset({d.STEP_COMPLETE, d.STEP_NOT_TESTED})
+
+
+def run_exit(doc: Mapping) -> int:
+    """The exit code of a finished run, derived from its steps as well as its state.
+
+    A document reaches ``complete`` whenever the run got to its final snapshot,
+    including when the daemon refused or failed every step. Scripts read the exit
+    code, so the steps decide: any step that failed → 1, a step a safety rule,
+    lost daemon or cancel ended → that code, every step not tested → 5 (nothing
+    ran). A snapshot-only report has no steps and exits 0.
+    """
+    state = str(doc.get("state"))
+    if state != d.STATE_COMPLETE:
+        return _STATE_EXIT.get(state, EXIT_FAILED)
+    statuses = [str(s.get("status")) for s in doc.get("steps") or []]
+    if any(s not in _STEP_STATUSES_OK and s not in _STEP_EXIT for s in statuses):
+        return EXIT_FAILED
+    for status, code in _STEP_EXIT.items():
+        if status in statuses:
+            return code
+    if statuses and all(s == d.STEP_NOT_TESTED for s in statuses):
+        return EXIT_REFUSED
+    return EXIT_OK
+
 
 # ── Planning ─────────────────────────────────────────────────────────────────
 
@@ -402,7 +436,15 @@ class ReportRun:
         if self.path is not None:
             self.console.out(f"Saved: {self.path}")
             self.console.out(f"Read it with: ventulus-diag report show {view.report_id}")
-        return _STATE_EXIT.get(str(doc.get("state")), EXIT_FAILED)
+        code = run_exit(doc)
+        if doc.get("state") == d.STATE_COMPLETE:
+            if code == EXIT_REFUSED:
+                self.console.err(
+                    "Nothing was tested: every step was refused or skipped (reasons above)."
+                )
+            elif code != EXIT_OK:
+                self.console.err("Not every test ended normally; see the steps above.")
+        return code
 
 
 def run_report(console: Console, daemon: Daemon, request: RunRequest) -> int:

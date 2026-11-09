@@ -248,17 +248,27 @@ def cancel_cmd(console: Console, daemon: Daemon) -> int:
     from ventulus.diag.validation import _cancel_running
 
     sent = []
+    failed = []
     for slot in SLOTS:
+        what = _SLOT_NAMES.get(slot, slot)
         try:
             if _cancel_running(daemon.client, slot):
-                sent.append(_SLOT_NAMES.get(slot, slot))
-        except DaemonError as e:
-            console.err(f"{_SLOT_NAMES.get(slot, slot)}: {e.message}")
-    if not sent:
-        console.out("Nothing to cancel: no characterisation, discovery or probe is running.")
-        return EXIT_OK
+                sent.append(what)
+        except DaemonError as e:  # timeouts and a lost daemon included
+            failed.append(what)
+            console.err(f"{what}: {e.message}")
     for what in sent:
         console.out(f"Cancelled the {what}; the daemon puts the header back.")
+    if failed:
+        # A slot that could not be read or cancelled may still be running: never
+        # report "nothing to cancel" or success for it.
+        console.err(
+            f"Could not check or cancel the {', '.join(failed)}; it may still be running. "
+            "The daemon puts the header back when it ends."
+        )
+        return EXIT_FAILED
+    if not sent:
+        console.out("Nothing to cancel: no characterisation, discovery or probe is running.")
     return EXIT_OK
 
 
