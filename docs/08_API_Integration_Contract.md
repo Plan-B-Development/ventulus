@@ -1627,6 +1627,13 @@ reclaim.
   Monitor keeps showing the count and relabels it. The daemon reports the age
   and takes no view on what "old" means.
 
+**`hwmon.enable_revert_counts_unavailable: true` means both maps are unread
+(DEC-505, daemon > 5.5.0).** The counts live under the controller's lock, and a
+motherboard fan write that has not returned holds it. The report waits 2 s for
+the lock and is then sent without the counts: both maps are empty and say
+nothing about reclaims. Omitted when the counts were read. A client must not
+treat a report carrying it as "no reclaims".
+
 #### Expected chips
 
 Optional fields from DEC-101. Both serialise with
@@ -3903,6 +3910,11 @@ Error codes and HTTP statuses:
   (`/capabilities`, `/hwmon/headers`, `/inventory/hwmon`, identify, role and cooling-device edits)
   no longer wait on that lock at all: they answer from the headers found at start-up, which never
   change while the daemon runs.
+- 503 `internal_error` (source: `"internal"`, retryable: true) with `details.reason:
+  "request_pool_busy"` (DEC-505, daemon > 5.5.0): the same routes as `hwmon_controller_busy`
+  above, when the daemon's capped share of background threads for request work stayed fully
+  used for 2 s by other requests. Nothing was claimed or written, and nothing is wrong with
+  the hardware; retry later.
 - 503 `persistence_failed` (source: `"internal"`, retryable: true): returned by `POST /config/*` when the daemon cannot persist the runtime configuration file
 - 503 `internal_error` with `details.reason: "upload_busy"` (source: `"internal"`, retryable: true, DEC-504, daemon > 5.5.0): `POST /profiles`, `PUT /profiles/{id}` or `PUT /fans/openfan/firmware` while another upload of the same kind kept its turn for 4 s; nothing was applied, retry (General rule 10).
 
