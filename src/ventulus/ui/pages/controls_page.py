@@ -39,7 +39,6 @@ from ventulus.knowledge.memory_sensor_id import resolve_memory_sensor_id
 from ventulus.knowledge.sensor_knowledge import sensor_display_name
 from ventulus.services.app_state import AppState
 from ventulus.services.controls_view import (
-    aio_tag_for,
     assigned_elsewhere_map,
     build_member_candidates,
     build_pump_role_candidates,
@@ -50,6 +49,7 @@ from ventulus.services.controls_view import (
     default_curve_sensor_id,
     detected_hwmon_header_ids,
     divergent_gpu_output,
+    member_clean_label,
     member_rpm_map,
     missing_header_member_ids,
     override_rejection_feedback,
@@ -3627,8 +3627,8 @@ class ControlsPage(QWidget):
 
         Quick-assign covers writable hwmon + OpenFan fans only; read-only headers
         (DEC-102) and GPU fans (which use the dedicated zero-RPM flow) return
-        ``None``. Mirrors the member-building in :meth:`_on_edit_members`,
-        including the DEC-228/229 role-preserving label and the DEC-157 AIO tag.
+        ``None``. The label comes from :func:`member_clean_label`, the same rule
+        the member picker (:meth:`_on_edit_members`) uses.
         """
         if self._state is None:
             return None
@@ -3642,15 +3642,15 @@ class ControlsPage(QWidget):
             return None
         from ventulus.services.profile_service import ControlMember
 
-        label = self._state.fan_display_name(fan_id) or fan_id
-        fallback = self._state.fan_fallback_name(fan_id) if header is not None else ""
-        clean_label = _role_preserving_label(label, fallback, source)
-        # DEC-157/233: mirror _on_edit_members — an AIO header's role lives in this
-        # tag when its chip/label carry no cpu/pump/aio keyword, so quick-assign
-        # must keep it or the pump falls from the 30% floor to the 20% one (the
-        # daemon mirrors this label — DEC-162).
-        if header is not None and header.is_aio:
-            clean_label += aio_tag_for(label)
+        # PRF-b: the picker's rule, not a copy of it — the role tag (DEC-157/312)
+        # is the floor input when the label carries no cpu/pump/aio word.
+        clean_label = member_clean_label(
+            fan_id,
+            source,
+            header,
+            display_name=self._state.fan_display_name,
+            fallback_name=self._state.fan_fallback_name,
+        )
         return ControlMember(source=source, member_id=fan_id, member_label=clean_label)
 
     def _assign_member_to_control(self, control_id: str, member) -> None:

@@ -547,6 +547,45 @@ def aio_tag_for(label: str, role: str = "") -> str:
     return AIO_PUMP_TAG if "pump" in label.lower() else " (AIO radiator)"
 
 
+def header_aio_tag(header, source: str, name: str) -> str:
+    """The role tag a member on ``header`` carries, or ``""`` (DEC-157/312).
+
+    A liquid-cooler header (``is_aio``) is tagged, and so is any header the
+    daemon reports as a pump (``role == "pump"``): a pump on a motherboard
+    AIO_PUMP header is ``is_aio=False`` by construction — the chip is the
+    Super-I/O, not the cooler — so without the role term the tag never fires and
+    the persisted ``member_label`` loses the 30% pump floor the daemon
+    independently enforces. ``name`` is the undecorated display name; display
+    badges carry no role word, so they never change the answer.
+    """
+    if source != "hwmon" or header is None:
+        return ""
+    role = header.role
+    if not (header.is_aio or role == "pump"):
+        return ""
+    return aio_tag_for(name, role)
+
+
+def member_clean_label(member_id: str, source: str, header, *, display_name, fallback_name) -> str:
+    """The ``ControlMember.member_label`` to persist for one fan output.
+
+    The one rule shared by the two ways a user adds a single fan to a role —
+    the member picker (:func:`build_member_candidates`) and the Unassigned
+    quick-assign menu — so the floor input cannot depend on which one they used
+    (`PRF-b`, the DEC-276 trap: a rule private to one consumer). Configure AIO
+    builds its pump and radiator members separately
+    (``profile_service.aio_member_for_header``, ``role_preserving_label``). It is
+    :func:`role_preserving_label` plus :func:`header_aio_tag`; ``header`` is the
+    output's ``HwmonHeader`` or ``None``. ``display_name``/``fallback_name`` are
+    the ``AppState`` resolvers.
+    """
+    name = display_name(member_id) or member_id
+    # Empty for a fan with no header, so a raw daemon id can never be mistaken
+    # for a role-bearing name (DEC-229).
+    fallback = fallback_name(member_id) if header is not None else ""
+    return role_preserving_label(name, fallback, source) + header_aio_tag(header, source, name)
+
+
 def build_member_candidates(
     fans,
     headers,
@@ -599,11 +638,12 @@ def build_member_candidates(
         if fan.source in ("intel_gpu", "nvidia_gpu"):
             continue
 
-        label = display_name(fan.id)
-        # Empty for a fan with no header, so a raw daemon id can never be
-        # mistaken for a role-bearing name (DEC-229).
-        fallback = fallback_name(fan.id) if header_by_id.get(fan.id) is not None else ""
-        clean_label = role_preserving_label(label, fallback, fan.source)
+        h = header_by_id.get(fan.id)
+        name = display_name(fan.id) or fan.id
+        label = name
+        clean_label = member_clean_label(
+            fan.id, fan.source, h, display_name=display_name, fallback_name=fallback_name
+        )
 
         gpu_blocked_tip = ""
         amd_gpu = (
@@ -636,18 +676,7 @@ def build_member_candidates(
         if badge and not gpu_blocked_tip:
             label = f"{label} ({badge})"
 
-        h_aio = header_by_id.get(fan.id)
-        # DEC-312: `role == "pump"` joins `is_aio` as a reason to tag. A pump on a
-        # motherboard AIO_PUMP header is `is_aio=False` by construction — the chip
-        # is the Super-I/O, not the cooler — so without the role term the tag never
-        # fires and the persisted `member_label` loses the 30% pump floor the
-        # daemon independently enforces.
-        if fan.source == "hwmon" and h_aio is not None:
-            h_role = h_aio.role
-            if h_aio.is_aio or h_role == "pump":
-                aio_tag = aio_tag_for(label, h_role)
-                label += aio_tag
-                clean_label += aio_tag  # role-bearing — see above
+        label += header_aio_tag(h, fan.source, name)
 
         entry = {
             "id": fan.id,
@@ -674,16 +703,15 @@ def build_member_candidates(
         if any(a["id"] == header.id for a in available):
             continue
 
-        label = display_name(header.id) or header.id
-        clean_label = role_preserving_label(label, fallback_name(header.id), "hwmon")
+        name = display_name(header.id) or header.id
+        label = name
+        clean_label = member_clean_label(
+            header.id, "hwmon", header, display_name=display_name, fallback_name=fallback_name
+        )
         presence = classify_fan_presence(None, header)
         if PRESENCE_BADGE.get(presence):
             label = f"{label} ({PRESENCE_BADGE[presence]})"
-        header_role = header.role
-        if header.is_aio or header_role == "pump":
-            aio_tag = aio_tag_for(label, header_role)
-            label += aio_tag
-            clean_label += aio_tag  # role-bearing — see above
+        label += header_aio_tag(header, "hwmon", name)
 
         tip_parts = [f"ID: {header.id}"]
         if header.chip_name:

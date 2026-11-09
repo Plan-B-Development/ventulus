@@ -5,6 +5,14 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A pump header added from the Unassigned Fans menu gets the pump's 30 % minimum.** When a
+  motherboard header that you had set to the pump role was added to a role from the
+  Unassigned Fans menu, Ventulus saved it with the 20 % chassis minimum and no pump tag. The
+  daemon still held the pump at 30 %, but the role showed and saved the wrong minimum. The menu
+  and the member picker now build the member the same way.
+
 ## [6.0.0] — 2026-11-03
 
 Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.5.0 is the current daemon
