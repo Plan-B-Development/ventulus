@@ -22,6 +22,12 @@ security policy; the daemon's also lists each boundary in technical detail.
 - **What no client can do**, whoever runs it: write a fan speed directly, lower a
   safety floor, turn off the thermal emergency, stop a pump, or make the daemon read
   another user's files (a profile folder must sit in the caller's own home).
+- **A local user can slow the daemon's API down.** Holding many connections open,
+  or sending large requests, can make the app and the tray wait or stop answering.
+  It cannot use up what the daemon's fan writes need: the daemon serves a limited
+  number of connections at once, closes idle ones, keeps file handles free for its
+  fan writes, bounds the memory a request can take, and is protected from the
+  kernel's out-of-memory killer.
 - **The app, the tray and `ventulus-diag` run as your own user** and need no group,
   no `sudo` and no special permission. None of them touches hardware: every read and
   write goes through the daemon.

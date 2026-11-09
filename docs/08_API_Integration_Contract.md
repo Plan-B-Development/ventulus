@@ -95,6 +95,24 @@ field means updating it as well as this document
    dropping it hides exactly the case the newer daemon added. Where a section says how to
    weigh an unknown value (as a warning, or neutrally), follow it.
 
+10. **Connections are capped and idle ones are closed** (DEC-504, daemon > 5.5.0). The
+    daemon serves at most **64** connections at once. A client beyond that is not refused:
+    its connect succeeds and the request waits until a connection closes. A connection
+    that sends no complete request head within **10 s** is closed, whether it is new or
+    idle after a response; the timer does not run while a request is being handled, so a
+    long held-open call is unaffected. A client should therefore expect a kept-alive
+    connection to be closed by the daemon and reconnect. The GUI's HTTP client (httpx)
+    stops reusing a connection once it has been idle for 5 s and opens a new one, so it
+    never sends on a connection the daemon is about to close; the tray opens one
+    connection per request. Request bodies are capped per route (see the 413 rule under the error
+    model). The profile uploads (`POST /profiles`, `PUT /profiles/{id}`) are handled one at a
+    time, and so, separately, is `PUT /fans/openfan/firmware`. Another upload of the same
+    kind waits up to **4 s** for its turn, then answers `503 internal_error` (retryable,
+    `details.reason: "upload_busy"`) and is not applied; 4 s is under the GUI's 5 s request
+    timeout, so an upload the GUI gave up on is never applied later. Once its turn comes, an
+    upload must send its whole body within **10 s**, else `408 validation_error`
+    (`details.reason: "body_timeout"`). No other request body is timed.
+
 ## Quick reference — curl examples
 
 All endpoints use HTTP over Unix socket. The `SOCK` variable shortens examples:
@@ -3282,7 +3300,7 @@ same id ever diverge, activation applies the **local** copy, not necessarily the
   runs out of time in a user's directory answers the profiles found so far (`200`, logged).
 - **Store bounds (daemon ≥ 4.1.0).** `POST`/`PUT` store the document compact. A document whose
   stored form would exceed 4 MiB is `400 validation_error` (re-serialising can lengthen numbers, so this can
-  fire for a body under the 4 MiB request limit); a **new** id once the store holds 256 profiles is
+  fire for a body under the routes' 4 MiB request limit); a **new** id once the store holds 256 profiles is
   `400 validation_error` (replacing an existing id still works), and so is a write that would leave the
   store holding more than **64 MiB** in all. Create, delete and activation are
   serialised, so concurrent `POST`s of one id answer one `201` and `409 already_exists` for the rest,
@@ -3875,6 +3893,7 @@ Error codes and HTTP statuses:
   (§ OpenFAN firmware update).
 - 409 `session_full` (source: `"validation"`, retryable: false): `POST /validation/session/event` or `/measurement` while the recording session already holds its cap of that kind (4096 events, 512 measurements). Nothing was appended; `details.limit` is the cap. A new session is the only way to record more (DEC-426).
 - 409 `stale_fencing_token` (source: `"validation"`, retryable: false): override renew/release (DEC-163) bearing a superseded `override_token`; a newer override has been issued for that control, so the stale holder cannot re-pin (fencing)
+- 408 `validation_error` with `details.reason: "body_timeout"` (retryable: false, DEC-504, daemon > 5.5.0): a profile or firmware upload that did not send its whole body within 10 s of its turn; nothing was applied (General rule 10).
 - 500 `internal_error` (source: `"internal"`, retryable: true): among other causes, a profile read on `GET /profiles`, `GET /profiles/{id}`, `POST /profile/activate` or `POST /config/profile-search-dirs` that did not finish within 2 s (daemon ≥ 4.1.0)
 - 503 `hardware_unavailable` (source: `"hardware"`, retryable: true). With `details.reason:
   "hwmon_controller_busy"` (daemon ≥ 4.1.0): the motherboard fan controller stayed locked
@@ -3885,6 +3904,7 @@ Error codes and HTTP statuses:
   no longer wait on that lock at all: they answer from the headers found at start-up, which never
   change while the daemon runs.
 - 503 `persistence_failed` (source: `"internal"`, retryable: true): returned by `POST /config/*` when the daemon cannot persist the runtime configuration file
+- 503 `internal_error` with `details.reason: "upload_busy"` (source: `"internal"`, retryable: true, DEC-504, daemon > 5.5.0): `POST /profiles`, `PUT /profiles/{id}` or `PUT /fans/openfan/firmware` while another upload of the same kind kept its turn for 4 s; nothing was applied, retry (General rule 10).
 
 **Some rejections never reach a handler, and they are not in this envelope.** The HTTP
 framework (axum 0.8) refuses a request before the daemon's code runs when the body or path
@@ -3893,7 +3913,10 @@ cannot be extracted, and answers with a **plain-text** body:
 - a JSON route called without `Content-Type: application/json` → `415`;
 - a body that is not valid JSON → `400`; valid JSON of the wrong shape (a wrong type, a
   missing required field, or an unknown field on a request type that denies them) → `422`;
-- a body over the daemon's **4 MiB** request limit → `413`;
+- a body over the route's request limit → `413`. The limit is **4 MiB** for
+  `POST /profiles` and `PUT /profiles/{id}`, **1 MiB** for `PUT /fans/openfan/firmware`,
+  and **64 KiB** for every other route (DEC-504, daemon > 5.5.0; before it, 4 MiB
+  everywhere but the firmware upload);
 - a path segment that does not parse (for example a non-numeric OpenFAN channel) → `400`.
 
 A client must not assume every error body is JSON. The GUI's `DaemonClient` turns a
@@ -3906,6 +3929,8 @@ method, `code`, `message`, `retryable`, `source`, `details` (when present) and a
 ## Trust model
 
 The daemon listens on `/run/ventulus/ventulus.sock` with mode 0666 so a non-root GUI can connect (DEC-049). There is no authentication on the socket: any local user can issue any API call, including activating a profile or pinning a control via `POST /control/{id}/override`. This is intentional: the project assumes a trust-the-local-machine model. If the socket is ever proxied to the network, that proxy is responsible for authentication and for rejecting writes from untrusted callers.
+
+The trust extends to the API, not to the daemon's safety (DEC-504). A local user can make the API slow or unresponsive, for example by holding all 64 connections, but cannot use up what the fan writes need that way: the connection cap and the daemon's raised open-file limit keep a descriptor free for every hardware write, profile and firmware uploads are handled one at a time so their memory stays bounded, and the service runs with `OOMScoreAdjust=-900`.
 
 ## Safety behaviours to respect
 
