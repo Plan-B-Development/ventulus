@@ -299,13 +299,8 @@ sudo systemctl restart systemd-modules-load
 sudo systemctl restart ventulusd
 ```
 
-On most machines other than Gigabyte boards, the first command says that the job
-failed, and from then on `systemctl --failed` lists `systemd-modules-load.service`
-after every boot. That is a fault in the package, not in your system, and it stops
-nothing from loading: `nct6775` or `w83627ehf` found no chip on your board, and the
-package's Super-I/O guard, which loads those two, reports that as an error. Every
-other module still loads, including the drivers that match your board. To see which
-of the package's drivers loaded:
+Most boards have the chip for only some of these drivers, and the others find
+nothing to load, which is expected. To see which of the package's drivers loaded:
 
 ```bash
 lsmod | grep -E '^(nct6775|it87|w83627ehf|drivetemp) '

@@ -13,6 +13,7 @@ journalctl -u ventulusd -b                          # this boot
 journalctl -u ventulusd -f                          # follow it live
 journalctl -u ventulusd -b | grep 'hardware diagnostic'   # every test started, and the daemon's answer
 journalctl -b -t ventulus-superio-guard             # each driver the Gigabyte guard declined
+journalctl -b -u systemd-modules-load               # the same at boot where SELinux blocks it (Fedora)
 journalctl -k -b | grep -iE 'it87|nct6|w836'        # the fan drivers' kernel messages
 ```
 

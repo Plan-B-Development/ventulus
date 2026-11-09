@@ -34,12 +34,8 @@ it as `ventulus.conf.pacnew`, `.rpmnew` or `.new`; apt asks which to keep.
 No package loads the file as it installs, so the drivers arrive at the next boot.
 To load them without one, run `sudo systemctl restart systemd-modules-load` and
 then `sudo systemctl restart ventulusd`, because the daemon looks for fan headers
-only as it starts. On most boards other than Gigabyte's, the first command reports
-that the job failed, and `systemctl --failed` then lists
-`systemd-modules-load.service` after every boot. That is a fault in the package
-and stops nothing loading: `nct6775` or `w83627ehf` found no chip, and the
-Super-I/O guard below, which loads those two, passes that on as an error. Every
-other module still loads; `lsmod` shows which did.
+only as it starts. A driver whose chip your board lacks loads nothing, which is
+expected; `lsmod` shows which did load.
 
 CPU temperature modules (`coretemp` for Intel, `k10temp` for AMD) and SMBus
 adapter modules (`i2c-i801`, `i2c-piix4`) load automatically through PCI/ACPI
@@ -56,8 +52,13 @@ until the machine is powered down at the wall. The guard covers every Gigabyte
 board, and any board it lists whose firmware reports no vendor. It is
 `/usr/lib/modprobe.d/ventulus-superio.conf`, with its helper
 `/usr/lib/ventulus/ventulus-superio-guard`; on any other board it loads the module
-unchanged. Each time it declines a module it says so in the journal:
-`journalctl -b -t ventulus-superio-guard`. To turn it off, create an **empty**
+unchanged. If the module then finds no chip, or your kernel does not include it,
+`modprobe` still prints its error, but the guard reports success, so that loading
+the boot's modules does not fail; any other error is still reported as a failure.
+Each time the guard declines a module, finds no chip or finds no module, it says
+so in the journal: `journalctl -b -t ventulus-superio-guard`. Where SELinux stops
+it writing there at boot, as on Fedora, the line is under
+`journalctl -b -u systemd-modules-load` instead. To turn it off, create an **empty**
 `/etc/modprobe.d/ventulus-superio.conf`: the same name masks it. A file of any
 other name does not reliably win, because modprobe reads every directory's files
 in one name order and, for a module named twice, the first `install` line read
