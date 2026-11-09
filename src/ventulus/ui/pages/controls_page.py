@@ -89,6 +89,7 @@ from ventulus.services.profile_service import (
     apply_role_floor,
     floor_role_header_roles,
     mix_candidate_curves,
+    mix_curves_using,
     remove_curve,
     sync_candidate_controls,
     sync_curves_targeting,
@@ -2358,9 +2359,28 @@ class ControlsPage(QWidget):
         profile = self._get_current_profile()
         if not profile:
             return
-        # Unlink its fan roles (Manual, as Unlink does) and drop it from every Mix:
-        # clearing only `curve_id` left curve-mode roles with no curve, which the
-        # daemon refuses (GSA-a).
+        mixes = mix_curves_using(profile, curve_id)
+        if mixes:
+            # PRF-a: removing a Mix input changes what the Mix computes (a
+            # subtract Mix's minuend shifts; an emptied Mix controls nothing), so
+            # the user decides what each Mix does next, as role-delete does for
+            # the Sync curves that mirror a role.
+            curve = next((c for c in profile.curves if c.id == curve_id), None)
+            subject = html.escape(curve.name if curve else curve_id, quote=False)
+            names = "”, “".join(html.escape(c.name, quote=False) for c in mixes)
+            one = len(mixes) == 1
+            users = f"The Mix curve “{names}” uses" if one else f"The Mix curves “{names}” use"
+            it = "it" if one else "them"
+            # Escaped rich text: the names are the user's (see `_escaped_lines`).
+            QMessageBox.warning(
+                self,
+                "Curve not deleted",
+                f"<p>{users} “{subject}” as an input. Remove “{subject}” from {it}, "
+                f"or delete {it}, first.</p>",
+            )
+            return
+        # Unlink its fan roles (Manual, as Unlink does): clearing only `curve_id`
+        # left curve-mode roles with no curve, which the daemon refuses (GSA-a).
         remove_curve(profile, curve_id)
         # Close editor if editing the deleted curve
         editing = self._curve_editor.get_curve()

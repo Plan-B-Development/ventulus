@@ -12,6 +12,11 @@ rename. Version numbers carry on from Control-OFC.
   Unassigned Fans menu, Ventulus saved it with the 20 % chassis minimum and no pump tag. The
   daemon still held the pump at 30 %, but the role showed and saved the wrong minimum. The menu
   and the member picker now build the member the same way.
+- **A curve that a Mix curve uses can no longer be deleted out from under it.** Deleting it
+  used to drop it from the Mix silently. That changed what the Mix computed: a subtract Mix
+  started subtracting from its next input, and a Mix left with no inputs stopped controlling
+  its fans. Ventulus now refuses the delete and names the Mix, so you remove the input or
+  delete the Mix first.
 
 ## [6.0.0] — 2026-11-03
 

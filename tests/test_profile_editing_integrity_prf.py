@@ -20,8 +20,12 @@ from ventulus.services.profile_service import (
     ROLE_MINIMUM_PCT,
     ControlMember,
     ControlMode,
+    CurveConfig,
+    CurveType,
     LogicalControl,
+    Profile,
     infer_member_role,
+    remove_curve,
 )
 from ventulus.ui.pages.controls_page import ControlsPage
 
@@ -29,6 +33,14 @@ from ventulus.ui.pages.controls_page import ControlsPage
 def _page(qtbot, app_state, profile_service):
     page = ControlsPage(state=app_state, profile_service=profile_service)
     qtbot.addWidget(page)
+    return page
+
+
+def _page_on(qtbot, app_state, profile_service, profile: Profile) -> ControlsPage:
+    profile_service._profiles[profile.id] = profile
+    page = _page(qtbot, app_state, profile_service)
+    page.select_profile(profile.id)
+    assert page._get_current_profile() is profile
     return page
 
 
@@ -165,3 +177,82 @@ class TestQuickAssignMatchesPicker:
         assert any(m.member_id == _MB_PUMP_ID for m in ctrl.members)
         assert ctrl.minimum_pct == ROLE_MINIMUM_PCT[CONTROL_ROLE_CPU_PUMP]
         assert ctrl.minimum_pct > ROLE_MINIMUM_PCT[CONTROL_ROLE_CHASSIS]
+
+
+# ---------------------------------------------------------------------------
+# PRF-a — a curve that feeds a Mix is not deleted out from under it
+# ---------------------------------------------------------------------------
+
+
+def _mix_profile(mix_function: str, inputs: list[str]) -> Profile:
+    """Graph curves ``a``, ``b``, ``c`` and a Mix ``m`` of ``inputs`` driving a role."""
+    p = Profile(id="prf_a", name="PRF-a")
+    p.curves = [
+        CurveConfig(id="a", name="Package", type=CurveType.GRAPH),
+        CurveConfig(id="b", name="Ambient", type=CurveType.GRAPH),
+        CurveConfig(id="c", name="Spare", type=CurveType.GRAPH),
+        CurveConfig(
+            id="m", name="Delta", type=CurveType.MIX, mix_function=mix_function,
+            mix_curve_ids=list(inputs),
+        ),
+    ]  # fmt: skip
+    p.controls = [LogicalControl(id="r", name="Case", mode=ControlMode.CURVE, curve_id="m")]
+    return p
+
+
+class TestDeleteMixInput:
+    @pytest.fixture()
+    def warnings(self, monkeypatch) -> list[tuple[str, str]]:
+        shown: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            "ventulus.ui.pages.controls_page.QMessageBox.warning",
+            lambda _parent, title, text, *a, **k: shown.append((title, text)),
+        )
+        return shown
+
+    def test_subtract_minuend_is_not_deleted(self, qtbot, app_state, profile_service, warnings):
+        # Deleting the minuend would make `b - …` out of `a - b`.
+        p = _mix_profile("subtract", ["a", "b"])
+        page = _page_on(qtbot, app_state, profile_service, p)
+
+        page._curve_cards["a"].delete_requested.emit("a")
+
+        assert "a" in {c.id for c in p.curves}
+        assert next(c for c in p.curves if c.id == "m").mix_curve_ids == ["a", "b"]
+        assert len(warnings) == 1
+        title, text = warnings[0]
+        assert title == "Curve not deleted"
+        assert "Delta" in text and "Package" in text
+        assert page._has_unsaved is False
+
+    def test_only_input_of_a_mix_is_not_deleted(self, qtbot, app_state, profile_service, warnings):
+        # Deleting the only input would leave a Mix that controls nothing.
+        p = _mix_profile("max", ["a"])
+        page = _page_on(qtbot, app_state, profile_service, p)
+
+        page._curve_cards["a"].delete_requested.emit("a")
+
+        assert "a" in {c.id for c in p.curves}
+        assert next(c for c in p.curves if c.id == "m").mix_curve_ids == ["a"]
+        assert len(warnings) == 1
+        assert page._has_unsaved is False
+
+    def test_curve_no_mix_uses_is_deleted(self, qtbot, app_state, profile_service, warnings):
+        # The opposite branch: the refusal is about Mix inputs, not every delete.
+        p = _mix_profile("subtract", ["a", "b"])
+        page = _page_on(qtbot, app_state, profile_service, p)
+
+        page._curve_cards["c"].delete_requested.emit("c")
+
+        assert "c" not in {c.id for c in p.curves}
+        assert next(c for c in p.curves if c.id == "m").mix_curve_ids == ["a", "b"]
+        assert warnings == []
+        assert page._has_unsaved is True
+
+    def test_helper_refuses_on_its_own(self):
+        # The rule lives in `remove_curve`, not only in the page that calls it.
+        p = _mix_profile("subtract", ["a", "b"])
+        with pytest.raises(ValueError, match="Mix"):
+            remove_curve(p, "b")
+        assert [c.id for c in p.curves] == ["a", "b", "c", "m"]
+        assert next(c for c in p.curves if c.id == "m").mix_curve_ids == ["a", "b"]

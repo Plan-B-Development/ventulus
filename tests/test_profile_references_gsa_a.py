@@ -82,15 +82,17 @@ def _page_on(qtbot, app_state, profile_service, profile: Profile) -> ControlsPag
 
 
 class TestHelpers:
-    def test_remove_curve_unlinks_its_roles_and_drops_it_from_every_mix(self):
+    def test_remove_curve_unlinks_its_roles(self):
         p = _profile()
+        # A Mix input is refused (PRF-a, tests/test_profile_editing_integrity_prf.py);
+        # the user takes it out of the Mix first.
+        next(c for c in p.curves if c.id == "mix").mix_curve_ids = ["cpu"]
 
         remove_curve(p, "gpu")
 
         assert [c.id for c in p.curves] == ["cpu", "mix", "sync"]
         role = next(c for c in p.controls if c.id == "r_gpu")
         assert role.mode == ControlMode.MANUAL and role.curve_id == ""
-        assert next(c for c in p.curves if c.id == "mix").mix_curve_ids == ["cpu"]
         # The opposite branch: a role on another curve is untouched.
         assert next(c for c in p.controls if c.id == "r_cpu").curve_id == "cpu"
         assert _daemon_reference_errors(p) == []
@@ -106,6 +108,7 @@ class TestDeleteCurve:
         self, qtbot, app_state, profile_service
     ):
         p = _profile()
+        next(c for c in p.curves if c.id == "mix").mix_curve_ids = ["cpu"]  # see PRF-a
         page = _page_on(qtbot, app_state, profile_service, p)
 
         page._curve_cards["gpu"].delete_requested.emit("gpu")

@@ -1396,14 +1396,29 @@ def unlink_curve(profile: Profile, curve_id: str) -> bool:
     return changed
 
 
+def mix_curves_using(profile: Profile, curve_id: str) -> list[CurveConfig]:
+    """The Mix curves that take ``curve_id`` as an input. Deleting it would change
+    what each one computes, so the Controls page refuses and names them (`PRF-a`)."""
+    return [c for c in profile.curves if c.type == CurveType.MIX and curve_id in c.mix_curve_ids]
+
+
 def remove_curve(profile: Profile, curve_id: str) -> None:
-    """Delete ``curve_id`` and every reference to it: its controls are unlinked
-    (:func:`unlink_curve`) and each Mix curve drops it from its inputs, keeping the
-    rest. A Mix left with no inputs is still a valid profile."""
+    """Delete ``curve_id`` and unlink its controls (:func:`unlink_curve`).
+
+    Refuses (``ValueError``) while a Mix curve takes it as an input
+    (:func:`mix_curves_using`). Dropping it from the Mix's inputs instead would
+    change the fan speed the Mix produces without the user asking: the inputs are
+    positional, so a ``subtract`` Mix would take its next input as the minuend
+    (the re-indexing the daemon's positional slots exist to prevent), and a Mix
+    left with none resolves to nothing, so its fans are no longer controlled.
+    The user removes the input from the Mix, or deletes the Mix, first.
+    """
+    users = mix_curves_using(profile, curve_id)
+    if users:
+        raise ValueError(
+            f"curve {curve_id!r} is an input of Mix curve(s) {[c.id for c in users]!r}"
+        )
     unlink_curve(profile, curve_id)
-    for curve in profile.curves:
-        if curve.type == CurveType.MIX and curve_id in curve.mix_curve_ids:
-            curve.mix_curve_ids = [i for i in curve.mix_curve_ids if i != curve_id]
     profile.curves = [c for c in profile.curves if c.id != curve_id]
 
 
