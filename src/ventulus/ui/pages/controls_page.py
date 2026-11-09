@@ -91,6 +91,7 @@ from ventulus.services.profile_service import (
     mix_candidate_curves,
     mix_curves_using,
     remove_curve,
+    role_candidate_curves,
     sync_candidate_controls,
     sync_curves_targeting,
     unlink_curve,
@@ -2036,7 +2037,8 @@ class ControlsPage(QWidget):
 
         dlg = FanRoleDialog(
             control,
-            profile.curves,
+            # Only cycle-free choices (PRF-d), as the Sync editor offers.
+            role_candidate_curves(profile, control.id),
             parent=self,
             display_name=self._state.member_display_name,
         )

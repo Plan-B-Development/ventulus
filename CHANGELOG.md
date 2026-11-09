@@ -25,6 +25,10 @@ rename. Version numbers carry on from Control-OFC.
   already held was last saved while the daemon was offline, or the daemon refused the save,
   Revert loaded the daemon's older version over it and over its local copy, and still said
   "Reverted to last saved".
+- **Edit Fan Role no longer offers a Sync curve that would mirror the role back to itself.** Choosing
+  one made the daemon refuse the whole profile, so an active profile kept running its previous
+  version. The list now leaves out a Sync curve that targets this role, or a role that already
+  mirrors it, as the Sync curve editor does. A role keeps the curve it already follows.
 
 ## [6.0.0] — 2026-11-03
 

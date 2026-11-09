@@ -29,6 +29,7 @@ from ventulus.services.profile_service import (
     ProfileService,
     infer_member_role,
     remove_curve,
+    role_candidate_curves,
 )
 from ventulus.ui.pages.controls_page import ControlsPage
 
@@ -363,3 +364,71 @@ class TestRevertKeepsALocalSave:
         # The local mirror was not overwritten with the daemon's version either.
         again = svc.reload_profile(pid)
         assert again is not None and "saved" in {c.id for c in again.controls}
+
+
+# ---------------------------------------------------------------------------
+# PRF-d — the role dialog offers only curves that form no Sync cycle
+# ---------------------------------------------------------------------------
+
+
+def _sync_profile() -> Profile:
+    """Roles A, B, C; B follows Sync curve ``s_a`` (B mirrors A). Sync curves
+    target A, B and C; ``g`` is a graph curve."""
+    p = Profile(id="prf_d", name="PRF-d")
+    p.curves = [
+        CurveConfig(id="g", name="Graph", type=CurveType.GRAPH),
+        CurveConfig(id="s_a", name="Follow A", type=CurveType.SYNC, sync_control_id="A"),
+        CurveConfig(id="s_b", name="Follow B", type=CurveType.SYNC, sync_control_id="B"),
+        CurveConfig(id="s_c", name="Follow C", type=CurveType.SYNC, sync_control_id="C"),
+    ]
+    p.controls = [
+        LogicalControl(id="A", name="Role A", mode=ControlMode.CURVE, curve_id="g"),
+        LogicalControl(id="B", name="Role B", mode=ControlMode.CURVE, curve_id="s_a"),
+        LogicalControl(id="C", name="Role C", mode=ControlMode.MANUAL),
+    ]
+    return p
+
+
+def _offered_curves(qtbot, app_state, profile_service, monkeypatch, role_id: str) -> list[str]:
+    """The curve ids the real Edit Role dialog lists for ``role_id``."""
+    p = _sync_profile()
+    page = _page_on(qtbot, app_state, profile_service, p)
+    offered: list[str] = []
+
+    def _capture(dlg):
+        combo = dlg._curve_combo
+        offered.extend(combo.itemData(i) for i in range(combo.count()))
+        return False  # cancel: nothing is written
+
+    monkeypatch.setattr("ventulus.ui.pages.controls_page.exec_dialog", _capture)
+    page._on_edit_role(role_id)
+    return offered
+
+
+class TestRoleDialogOffersNoSyncCycle:
+    def test_role_a_is_not_offered_curves_that_mirror_it(
+        self, qtbot, app_state, profile_service, monkeypatch
+    ):
+        offered = _offered_curves(qtbot, app_state, profile_service, monkeypatch, "A")
+        # Presence first: the dialog lists curves, including an unrelated Sync.
+        assert "g" in offered and "s_c" in offered
+        # A → A directly, and A → B where B already mirrors A.
+        assert "s_a" not in offered
+        assert "s_b" not in offered
+
+    def test_role_b_keeps_its_current_sync_curve(
+        self, qtbot, app_state, profile_service, monkeypatch
+    ):
+        offered = _offered_curves(qtbot, app_state, profile_service, monkeypatch, "B")
+        assert "s_a" in offered  # its current curve, and no cycle (A mirrors nothing)
+        assert "g" in offered and "s_c" in offered
+        assert "s_b" not in offered  # B → B
+
+    def test_current_curve_is_kept_even_when_it_already_forms_a_cycle(self):
+        # A profile loaded with a cycle is not repaired behind the user's back:
+        # accepting the dialog unchanged must keep the role on its curve.
+        p = _sync_profile()
+        next(c for c in p.controls if c.id == "A").curve_id = "s_b"  # A ↔ B
+        ids = [c.id for c in role_candidate_curves(p, "A")]
+        assert "s_b" in ids
+        assert "s_a" not in ids

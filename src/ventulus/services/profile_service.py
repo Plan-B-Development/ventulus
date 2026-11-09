@@ -1376,6 +1376,27 @@ def sync_candidate_controls(profile: Profile, sync_curve_id: str) -> list[tuple[
     return out
 
 
+def role_candidate_curves(profile: Profile, control_id: str) -> list[CurveConfig]:
+    """The curves a fan role may follow without forming a Sync cycle (`PRF-d`).
+
+    Following a Sync curve adds the edge role → its target, so a Sync curve whose
+    target is this role, or mirrors back to it (:func:`_sync_reaches`), would
+    close a loop the daemon refuses with ``SYNC_CYCLE`` — the whole profile, so an
+    active one keeps its old version. Every other curve is offered. The role's
+    current curve is always kept, so opening the dialog and accepting it never
+    re-points the role on its own.
+    """
+    current = next((c.curve_id for c in profile.controls if c.id == control_id), "")
+    out: list[CurveConfig] = []
+    for curve in profile.curves:
+        if curve.type == CurveType.SYNC and curve.id != current:
+            target = curve.sync_control_id
+            if target == control_id or _sync_reaches(profile, target, control_id):
+                continue
+        out.append(curve)
+    return out
+
+
 # GSA-a: the daemon rejects the whole profile when any reference inside it does not
 # resolve — a curve-mode control with no curve, a Mix input or a Sync target that is
 # gone (`profile.rs` validation). The edits below keep every reference resolving, so
