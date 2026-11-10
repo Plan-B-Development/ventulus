@@ -7,6 +7,11 @@ rename. Version numbers carry on from Control-OFC.
 
 ### Fixed
 
+- **The GPU docs match a daemon that keeps every GPU fan out of the motherboard header list.**
+  The hardware compatibility guide, GPU rules, API contract and troubleshooting manual no longer
+  say a kernel patched with Intel's fan-control series makes the Arc fan appear as a motherboard
+  header. With the matching daemon it does not; nor does a fan on the legacy AMD `radeon` driver,
+  or on any other device whose PCI parent is a display controller.
 - **The update check survives a change of signing key.** Ventulus now accepts update information
   carrying more than one signature, as long as one of them is good and made by a key it trusts,
   and it can trust more than one key. From this version on, the repository key can be replaced

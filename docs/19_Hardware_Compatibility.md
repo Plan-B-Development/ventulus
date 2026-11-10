@@ -784,12 +784,14 @@ support"), adding writable `pwm1`–`pwm3` and `pwm1_enable`–`pwm3_enable`. Th
 under review, not merged, on 2026-10-15
 ([Intel on compute-runtime #885](https://github.com/intel/compute-runtime/issues/885)).
 Some users run kernels patched with them, and tools such as LACT 0.10.1 drive those
-controls. The daemon does not yet treat them as a GPU fan: on such a kernel it lists
-the Arc fan as a motherboard header on chip `xe`. Do not add that header to a profile.
+controls. The daemon does not use them: chips `xe` and `i915` are GPU-owned, so it
+never lists their `pwm` controls as motherboard headers and never writes them. Whether
+the firmware or another tool drives the fan on such a kernel is outside Ventulus; the
+hardware diagnostics note says the interface exists and is unused by Ventulus.
 
 Consequently the daemon always reports `fan_control_method` of `"read_only"`
-(fan present) or `"none"`. Intel GPU fans are never writable and are never
-offered as controllable curve members. The GPU's **temperatures** remain
+(fan present) or `"none"`. Ventulus never writes an Intel GPU fan, and never
+offers one as a controllable curve member. The GPU's **temperatures** remain
 usable as curve *sensors* to drive other fans.
 
 There is no Intel kernel parameter to enable fan control; `amdgpu.ppfeaturemask` is

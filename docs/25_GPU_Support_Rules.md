@@ -20,13 +20,20 @@ misreported as controlled, or driven when it should not be.
   workstation Navi 48: Radeon AI PRO R9700 (`0xC0`), R9700S (`0xC1`) and R9600D (`0xC8`)
   (libdrm `amdgpu.ids`; R9700S is listed on libdrm's main branch, after the 2.4.134
   release). A rule keyed on `0x7551` alone therefore covers all three.
-- Daemon hwmon discovery excludes `chip_name == "amdgpu"` (and `nouveau`) from the
-  hwmon headers (DEC-102, `is_gpu_owned_hwmon_chip`): GPU fans are reached only through
-  the `amd_gpu:` / `nvidia_gpu:` ids and the GPU endpoints, never as a motherboard
-  header. *(Safety-critical.)* `xe` and `i915` are not on that list yet, because no
-  mainline kernel gives them a `pwm` attribute; Intel's pending fan-control series for
-  `xe` would, and a kernel carrying it makes the Arc fan look like a header. Adding both
-  to the list is pending.
+- Daemon hwmon discovery never makes a GPU's hwmon `pwm` a motherboard header
+  (`is_gpu_owned_hwmon`, DEC-102/204/508). *(Safety-critical: every discovered header is
+  reachable by the profile engine and the thermal emergency, and GPU fans are outside
+  the ladder.)* A device is GPU-owned when its chip is `amdgpu`, `nouveau`, `radeon`,
+  `xe` or `i915`, **or** its parent PCI device is a display controller (class `0x03xxxx`),
+  so a GPU driver missing from the list is still excluded. `radeon` exposes a writable
+  `pwm1` on mainline; `xe` gains writable `pwm1`–`pwm3` with Intel's pending
+  fan-control series; `i915` is listed pre-emptively. The same predicate drops these
+  devices' tachometers from the monitor-only fan list and their voltages from the
+  board-rail table. AMD (`amdgpu`), NVIDIA and Intel fans are shown through the
+  `amd_gpu:` / `nvidia_gpu:` / `intel_gpu:` ids and the GPU endpoints; a `radeon` card
+  (no `fan1_input`, so only its `pwm1` duty was ever visible) and a device excluded only
+  by its PCI class have no GPU detector, so their fan is not shown at all. Their
+  temperatures still reach the sensor list.
 
 ## Write path
 

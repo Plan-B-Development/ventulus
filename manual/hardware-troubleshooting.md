@@ -819,9 +819,11 @@ card runs the fan by itself, and on a stock kernel no Linux tool can set its spe
 `ppfeaturemask`, overdrive and the GPU fan test do not apply.
 
 Intel has posted kernel patches that add fan control to `xe`; they were still under
-review in October 2026. If you run a kernel patched with them, Ventulus lists the Arc
-fan as a motherboard header on chip `xe`: do not add that header to a profile, because
-Ventulus would then drive a GPU fan with motherboard-fan rules.
+review in October 2026. If you run a kernel patched with them, Ventulus still does not
+use them: it does not list those controls as motherboard fans and never writes them,
+and the hardware diagnostics say the interface is there but unused by Ventulus. If
+another tool drives the fan through them, that tool is in charge, not the card's
+firmware.
 
 An Arc fan can read 0 RPM while it spins: one B580 owner sees this with PCIe power
 saving (ASPM) on ([drm/xe #9328](https://gitlab.freedesktop.org/drm/xe/kernel/-/issues/9328),

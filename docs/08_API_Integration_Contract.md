@@ -247,9 +247,9 @@ Notable fields:
   GPU (Arc, `xe`/`i915`). Read-only monitoring: fields are `present`,
   `model_name`, `display_label`, `pci_id`/`pci_bdf`, `pci_device_id`, `driver`
   (`"xe"`/`"i915"`), `fan_control_method` (always `"read_only"` or `"none"`:
-  there is no userspace fan write path), `fan_rpm_available`, and `is_discrete`.
+  the daemon never writes an Intel GPU fan), `fan_rpm_available`, and `is_discrete`.
   There is deliberately **no** `fan_write_supported`/PMFW/overdrive/zero-RPM/
-  kernel-warning field: Intel GPU fans are firmware-managed and never writable.
+  kernel-warning field: Intel GPU fans are firmware-managed and never written.
 - `devices.nvidia_gpu` (DEC-204) describes an NVIDIA **discrete**
   GPU (the open `nouveau` driver or the opt-in proprietary NVML backend).
   Read-only monitoring: fields are `present`, `model_name`, `display_label`,
@@ -1992,7 +1992,8 @@ Optional fields from DEC-119. All use
   diagnostics, with `pci_bdf`/`pci_id`, `pci_device_id`, `pci_revision`, `model_name`,
   `driver` (`"xe"`/`"i915"`), `fan_control_method` (`"read_only"`/`"none"`),
   `fan_rpm_available`, and `fan_control_note` (a daemon-supplied, display-ready
-  explanation of why fan control is unavailable). **Absent** (omitted, never
+  explanation of why fan control is unavailable; its wording changes when the kernel
+  exposes a `pwm1` the daemon does not use, DEC-508). **Absent** (omitted, never
   `null`) when no Intel GPU is present.
 - `nvidia_gpu: object` (optional; DEC-204): NVIDIA discrete GPU
   diagnostics, with `pci_bdf`/`pci_id`, `model_name`, `driver` (kernel module:
@@ -4007,9 +4008,13 @@ The trust extends to the API, not to the daemon's safety (DEC-504). A local user
 - Daemon restores the fan curve to automatic on shutdown
 
 ### Intel GPU (read-only, DEC-121)
-- **No write path exists.** The Linux `xe`/`i915` drivers expose only read-only
-  `fanN_input` RPM and temperatures; fan control is managed autonomously by
-  on-card firmware. There is no `/gpu/.../fan/pwm` equivalent for Intel.
+- **No write path exists.** On a mainline kernel the `xe`/`i915` drivers expose
+  only read-only `fanN_input` RPM and temperatures; fan control is managed
+  autonomously by on-card firmware. A kernel carrying Intel's fan-control series
+  adds writable `pwm1`–`pwm3` on `xe`; the daemon treats `xe`/`i915` as GPU-owned
+  (DEC-508), so those never become hwmon headers and are never written, and
+  `/diagnostics/hardware` `intel_gpu.fan_control_note` says the interface is
+  unused. There is no `/gpu/.../fan/pwm` equivalent for Intel.
 - `fan_control_method` is always `"read_only"` (fan present) or `"none"`.
 - The GUI must not offer Intel GPU fans as controllable curve members and must
   never write to an `intel_gpu:` target; the GPU's temperatures remain usable as
