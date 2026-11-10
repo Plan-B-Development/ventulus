@@ -463,6 +463,24 @@ _GPU_OUTCOMES: dict[str, GpuVerifyOutcome] = {
         "The fan curve was applied but the fan did not respond.",
         "CriticalChip",
     ),
+    # GPD-b, RDNA4 only: inconclusive, not a failure. The daemon decides from
+    # the hotspot it read during the test (shown in the evidence table) and the
+    # card's own stop temperature, so no threshold is spelled here (DEC-292).
+    # `idle_fan_stop` also covers an unreadable hotspot, so it never claims the
+    # GPU was measured cool.
+    "idle_fan_stop": GpuVerifyOutcome(
+        "Inconclusive: the fan curve was applied but the fan read 0 RPM, and the GPU was "
+        "not warm enough to rule out an idle stop (or its temperature could not be read). "
+        "This card's firmware can keep the fan stopped until the GPU warms up, even with "
+        "zero-RPM idle off. Re-test with the GPU under load.",
+        "WarningChip",
+    ),
+    "rpm_reads_zero": GpuVerifyOutcome(
+        "Inconclusive: the fan curve was applied but the fan read 0 RPM before and after "
+        "the test, with the GPU warm. Some cards of this generation report 0 RPM while "
+        "the fan spins. Look at the fan, or re-test with the GPU under load.",
+        "WarningChip",
+    ),
     "pwm_enable_reverted": GpuVerifyOutcome(
         "The GPU fan left manual mode during the test.",
         "CriticalChip",

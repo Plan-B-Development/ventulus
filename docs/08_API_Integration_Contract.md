@@ -3544,7 +3544,8 @@ firmware/driver mismatch, BIOS overdrive lock). The daemon drives a test speed
 biased **upward** (idle/low → 75%, already-high → 100%, clamped to OD_RANGE so
 cooling is never reduced), sleeps `VERIFY_WAIT_SECONDS = 6 s` (matching the
 hwmon verify), reads back the applied PMFW `fan_curve` (or legacy `pwm1`) plus
-`fan1_input` RPM and `fan_zero_rpm_enable`, then restores the prior state
+`fan1_input` RPM and `fan_zero_rpm_enable` (on the PMFW path also the hotspot,
+before and after, and `fan_zero_rpm_stop_temperature` when it exists), then restores the prior state
 (re-applies the last commanded speed if the GPU was being driven, else resets to
 auto + re-enables zero-RPM). The GUI sends a **12 s** per-call timeout
 (`verify_gpu_fan`, `client.py`); the daemon coordinates the probe with its own
@@ -3554,10 +3555,26 @@ Response (daemon `GpuVerifyResponse` ↔ GUI `GpuVerifyResult`), with **no
 `api_version`**, symmetric with `HwmonVerifyResponse`:
 - `gpu_id: str`
 - `result: str`: `"effective"`, `"curve_not_applied"`, `"no_rpm_effect"`,
-  `"zero_rpm_suppressed"`, `"rpm_unavailable"`, `"write_failed"`, or
-  `"pwm_enable_reverted"` (legacy `pwm1` path only)
+  `"zero_rpm_suppressed"`, `"rpm_unavailable"`, `"write_failed"`,
+  `"pwm_enable_reverted"` (legacy `pwm1` path only), or, on an RDNA4 card only
+  (PCI ids `0x7550`/`0x7551`/`0x7590`), one of two **inconclusive** verdicts (GPD-b).
+  Both are reached only where `no_rpm_effect` would have been: the curve applied, the
+  fan did not respond and zero-RPM was not reported on.
+  - `"idle_fan_stop"`: the fan read 0 RPM after the test, was not seen spinning
+    before it (0 or no reading), and the hotspot was below the card's idle band, or
+    unreadable. RDNA4 firmware can hold the fan stopped
+    below its zero-RPM stop temperature whatever `fan_zero_rpm_enable` says.
+  - `"rpm_reads_zero"`: 0 RPM before and after, with the hotspot at or above the
+    band. Some RDNA4 tachs read 0 while the fan spins.
+  The band is the card's `fan_zero_rpm_stop_temperature` (read when the kernel has
+  the file; a default otherwise) plus a margin, both daemon-side. A fan that read
+  non-zero after the test, or was seen spinning before it, is still `no_rpm_effect`. A client that does not know a
+  token renders it rather than dropping it (273-i).
 - `initial_state`, `final_state`: `{applied_speed_pct, rpm, pwm_enable,
-  zero_rpm_enabled}`, each sub-field optional
+  zero_rpm_enabled, hotspot_c}`, each sub-field optional. `hotspot_c` (float, °C)
+  is the amdgpu `junction` channel, read on the PMFW path by a daemon with the
+  RDNA4 verdicts; absent on the legacy path, when no `junction` channel reads, and
+  from older daemons.
 - `test_speed_pct: int`, `wait_seconds: int`, `fan_control_method: str`,
   `details: str`
 - `restore_failed: bool`: omitted when false (`skip_serializing_if`)

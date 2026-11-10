@@ -143,7 +143,7 @@ def test_the_gpu_and_hwmon_vocabularies_disagree_where_they_are_documented_to():
 
 
 def test_every_token_the_contract_documents_has_a_gpu_row():
-    """`docs/08` § GPU fan verify — the wire's seven tokens.
+    """`docs/08` § GPU fan verify — the wire's nine tokens.
 
     Pins the vocabulary across the move out of the page: an extraction that
     dropped a row would otherwise degrade that token to the unknown arm, which
@@ -157,6 +157,8 @@ def test_every_token_the_contract_documents_has_a_gpu_row():
         "rpm_unavailable",
         "write_failed",
         "pwm_enable_reverted",
+        "idle_fan_stop",
+        "rpm_reads_zero",
     }
     assert set(_GPU_OUTCOMES) == documented
 

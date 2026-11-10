@@ -680,8 +680,9 @@ def gpu_verify_problems(result: GpuVerifyResult) -> list[dict]:
 
     Returns problem dicts (same shape as :func:`detect_readiness_problems` —
     ``{key, label, fix, doc_url, doc_title, severity}``) for the failing
-    verdicts; an empty list when control verified or the result is purely
-    informational (``effective`` / ``zero_rpm_suppressed`` / ``rpm_unavailable``).
+    verdicts (``critical``) and the inconclusive RDNA4 ones (``warn``, GPD-b);
+    an empty list when control verified or the result is purely informational
+    (``effective`` / ``zero_rpm_suppressed`` / ``rpm_unavailable``).
     Every string is GUI-authored — the daemon's ``details`` are never rendered
     (DEC-106). These are the *behavioural* failures the static readiness pass
     cannot see: writes accepted but silently ignored, the fan not spinning, or a
@@ -701,14 +702,36 @@ def gpu_verify_problems(result: GpuVerifyResult) -> list[dict]:
                 "version' message some cards log is not itself a fault."
             ),
         },
+        "idle_fan_stop": {
+            "key": "gpu_verify_idle_fan_stop",
+            "label": "GPU fan stayed stopped at idle",
+            "severity": "warn",
+            "fix": (
+                "Run something that loads the GPU (a game or a benchmark) and test "
+                "again while it runs. RX 9000 and Radeon AI PRO firmware can keep the "
+                "fan stopped while the GPU is cool, even with zero-RPM idle off "
+                "(drm/amd #5905)."
+            ),
+        },
+        "rpm_reads_zero": {
+            "key": "gpu_verify_rpm_reads_zero",
+            "label": "GPU fan reads 0 RPM",
+            "severity": "warn",
+            "fix": (
+                "Check whether the fan is actually turning. Some RX 9000 cards report "
+                "0 RPM while the fan spins (drm/amd #5514), so the reading alone does "
+                "not prove a stopped fan. If it is not turning, check it is connected "
+                "and test again under load."
+            ),
+        },
         "no_rpm_effect": {
             "key": "gpu_verify_no_rpm_effect",
             "label": "GPU fan did not respond",
             "fix": (
                 "The fan curve was applied but the fan RPM did not change. On an "
                 "RX 9000 card at idle, re-test with the GPU under load first: its "
-                "firmware can keep the fan stopped below about 50 °C hotspot even "
-                "with zero-RPM idle off (drm/amd #5905), and some RX 9070 XTs "
+                "firmware can keep the fan stopped below its zero-RPM stop temperature "
+                "even with zero-RPM idle off (drm/amd #5905), and some RX 9070 XTs "
                 "report 0 RPM while the fan spins (drm/amd #5514). Otherwise confirm "
                 "the fan is physically connected, and check the advisories above. "
                 "A few cards have per-unit fan faults (e.g. some R9700s, ROCm "
@@ -744,7 +767,7 @@ def gpu_verify_problems(result: GpuVerifyResult) -> list[dict]:
     spec = specs.get(result.result)
     if spec is None:
         return []
-    return [{**spec, "doc_url": arch_url, "doc_title": arch_title, "severity": "critical"}]
+    return [{"severity": "critical", **spec, "doc_url": arch_url, "doc_title": arch_title}]
 
 
 def readiness_verdict(

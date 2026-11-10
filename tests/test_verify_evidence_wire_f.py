@@ -43,6 +43,7 @@ from ventulus.services.verify_evidence import (
     ROW_APPLIED_SPEED,
     ROW_DUTY,
     ROW_FAN_MODE,
+    ROW_HOTSPOT,
     ROW_RPM,
     ROW_ZERO_RPM,
     UNKNOWN_TEXT,
@@ -274,6 +275,23 @@ def test_a_pmfw_result_has_a_zero_rpm_row_and_no_fan_mode_row():
     assert _row(ev, ROW_APPLIED_SPEED).after == "60%"
     assert _row(ev, ROW_ZERO_RPM).after == "enabled"
     assert ev.summary == "Test: set 60% through the PMFW fan curve and waited 8 s; RPM 0 → 1400"
+
+
+def test_a_hotspot_reading_adds_a_hotspot_row_with_the_measured_values():
+    """GPD-b: the RDNA4 idle verdicts rest on the hotspot the test measured,
+    so it is shown; a result without one (above) has no such row."""
+    ev = gpu_verify_evidence(
+        _pmfw_result(
+            result="idle_fan_stop",
+            initial_state=GpuVerifyState(rpm=0, zero_rpm_enabled=False, hotspot_c=41.4),
+            final_state=GpuVerifyState(
+                applied_speed_pct=60, rpm=0, zero_rpm_enabled=False, hotspot_c=None
+            ),
+        )
+    )
+    assert [r.label for r in ev.rows][-1] == ROW_HOTSPOT
+    assert _row(ev, ROW_HOTSPOT).before == "41 °C"
+    assert _row(ev, ROW_HOTSPOT).after == UNKNOWN_TEXT
 
 
 def test_a_legacy_pwm1_result_has_a_fan_mode_row_and_no_zero_rpm_row():

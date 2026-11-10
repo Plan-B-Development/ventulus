@@ -1821,20 +1821,24 @@ class GpuVerifyState:
     path-dependent: ``zero_rpm_enabled`` is set on the PMFW path,
     ``pwm_enable`` on the legacy ``pwm1`` path. ``applied_speed_pct`` is the
     read-back commanded speed (flat curve value for PMFW, ``pwm1`` percent for
-    legacy)."""
+    legacy). ``hotspot_c`` is the GPU hotspot (``junction``) in °C, read on
+    the PMFW path by a daemon with the RDNA4 idle verdicts (GPD-b); older
+    daemons omit it."""
 
     applied_speed_pct: int | None = None
     rpm: int | None = None
     pwm_enable: int | None = None
     zero_rpm_enabled: bool | None = None
+    hotspot_c: float | None = None
 
 
 @dataclass
 class GpuVerifyResult:
     """Result of ``POST /gpu/{gpu_id}/fan/verify`` (DEC-120). ``result`` is one
     of: ``effective``, ``curve_not_applied``, ``no_rpm_effect``,
-    ``zero_rpm_suppressed``, ``rpm_unavailable``, ``write_failed``, or
-    ``pwm_enable_reverted`` (legacy path)."""
+    ``zero_rpm_suppressed``, ``rpm_unavailable``, ``write_failed``,
+    ``pwm_enable_reverted`` (legacy path), or the RDNA4-only inconclusive
+    ``idle_fan_stop`` / ``rpm_reads_zero`` (GPD-b)."""
 
     gpu_id: str = ""
     result: str = ""

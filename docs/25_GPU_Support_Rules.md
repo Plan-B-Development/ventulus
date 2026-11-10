@@ -140,7 +140,14 @@ misreported as controlled, or driven when it should not be.
   AMD's `fan_zero_rpm_stop_temperature` patch (`9e3854634bfa`, expected in 7.4). So
   never read 0 RPM on an idle RDNA4 card under a curve as a failed write or a dead fan;
   RDNA4 `fan1_input` can also read 0 while the fan spins
-  ([drm/amd #5514](https://gitlab.freedesktop.org/drm/amd/-/issues/5514)).
+  ([drm/amd #5514](https://gitlab.freedesktop.org/drm/amd/-/issues/5514)). The GPU fan
+  test follows this rule (GPD-b): on an RDNA4 card (`is_rdna4`) with zero-RPM not
+  reported on, a fan at 0 RPM is `idle_fan_stop` below the idle band (or with no
+  hotspot reading) and `rpm_reads_zero` at 0 before and after above it, both
+  inconclusive. The band is the card's `fan_zero_rpm_stop_temperature` when the kernel
+  exposes the file (SMU 14.0.2 on torvalds master does), else 50 °C, plus 10 °C, the
+  spin-up seen in #5905 (`GPU_RDNA4_*` in daemon `constants.rs`). The daemon only reads
+  the stop temperature; setting it is a separate decision (DEC-053).
 - **RDNA4 fan curves want kernel 6.18.32, 7.0.9, 7.1 or later.** `504f0098ebd0`
   ("fix incorrect FeatureCtrlMask setting on smu v14.0.x", Cc stable) fixes the
   fan-curve edit, fan-curve restore and `fan_minimum_pwm` paths; its message says the

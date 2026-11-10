@@ -170,6 +170,42 @@ def test_gpu_verify_problems_for_failures(verdict, key, must_contain):
     assert prob["doc_url"].startswith("https://")
 
 
+@pytest.mark.parametrize(
+    "verdict,key,must_contain",
+    [
+        ("idle_fan_stop", "gpu_verify_idle_fan_stop", "#5905"),
+        ("rpm_reads_zero", "gpu_verify_rpm_reads_zero", "#5514"),
+    ],
+)
+def test_rdna4_inconclusive_verdicts_are_warnings_not_failures(verdict, key, must_contain):
+    """GPD-b: the RDNA4 idle verdicts get guidance at warning level; the
+    opposite branch, `no_rpm_effect`, stays critical."""
+    (prob,) = gpu_verify_problems(GpuVerifyResult(result=verdict))
+    assert prob["key"] == key
+    assert prob["severity"] == "warn"
+    assert must_contain in prob["fix"]
+    assert prob["doc_url"].startswith("https://")
+    assert gpu_verify_problems(GpuVerifyResult(result="no_rpm_effect"))[0]["severity"] == (
+        "critical"
+    )
+
+
+def test_parse_hotspot_and_its_absence():
+    """GPD-b: `hotspot_c` is parsed when the daemon sends it and `None` from an
+    older daemon that does not."""
+    res = parse_gpu_verify_result(
+        {
+            "result": "idle_fan_stop",
+            "initial_state": {"rpm": 0, "hotspot_c": 41.5},
+            "final_state": {"applied_speed_pct": 75, "rpm": 0, "hotspot_c": 42.0},
+        }
+    )
+    assert res.initial_state.hotspot_c == 41.5
+    assert res.final_state.hotspot_c == 42.0
+    old = parse_gpu_verify_result({"result": "effective", "final_state": {"rpm": 1600}})
+    assert old.final_state.hotspot_c is None
+
+
 def test_no_rpm_effect_fix_sends_an_idle_rx9000_back_under_load():
     # Curator GPD-04/05 (2026-10-15): an RDNA4 card's firmware can hold the fan
     # stopped below ~50 °C hotspot with zero-RPM off (drm/amd #5905), and some
@@ -273,6 +309,8 @@ class TestGpuVerifyResultRendering:
             ("no_rpm_effect", "CriticalChip", "did not respond"),
             ("pwm_enable_reverted", "CriticalChip", "left manual mode"),
             ("write_failed", "CriticalChip", "rejected"),
+            ("idle_fan_stop", "WarningChip", "under load"),
+            ("rpm_reads_zero", "WarningChip", "0 rpm"),
         ],
     )
     def test_show_result_sets_class_and_text(self, qtbot, verdict, css, needle):

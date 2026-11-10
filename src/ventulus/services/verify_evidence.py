@@ -31,6 +31,7 @@ ROW_DUTY = "Duty read back"
 ROW_RPM = "RPM"
 ROW_APPLIED_SPEED = "Applied fan speed"
 ROW_ZERO_RPM = "Zero-RPM idle"
+ROW_HOTSPOT = "GPU hotspot"
 
 #: `GpuVerifyResult.fan_control_method` → how the summary names the write path.
 #: An unrecognised token is shown as itself (273-i).
@@ -82,6 +83,10 @@ def _duty(pct: int | None, raw: int | None) -> str:
 def _mode(mode: int | None) -> str:
     text = pwm_enable_with_value(mode)
     return UNKNOWN_TEXT if text is None else text
+
+
+def _celsius(value: float | None) -> str:
+    return UNKNOWN_TEXT if value is None else f"{value:.0f} °C"
 
 
 def _zero_rpm(enabled: bool | None) -> str:
@@ -185,9 +190,10 @@ def gpu_verify_evidence(result: GpuVerifyResult) -> VerifyEvidence:
     """Evidence for one ``POST /gpu/{id}/fan/verify`` result.
 
     The fan-mode row appears only where either state carries ``pwm_enable`` (the
-    legacy ``pwm1`` path), and the zero-RPM row only where either carries
-    ``zero_rpm_enabled`` (the PMFW path): a row of two unknowns would suggest the
-    card should have reported something it has no way to report.
+    legacy ``pwm1`` path), the zero-RPM row only where either carries
+    ``zero_rpm_enabled`` (the PMFW path), and the hotspot row only where either
+    carries ``hotspot_c`` (GPD-b): a row of two unknowns would suggest the card
+    should have reported something it has no way to report.
     """
     init, final = result.initial_state, result.final_state
     rows = [
@@ -202,6 +208,8 @@ def gpu_verify_evidence(result: GpuVerifyResult) -> VerifyEvidence:
                 ROW_ZERO_RPM, _zero_rpm(init.zero_rpm_enabled), _zero_rpm(final.zero_rpm_enabled)
             )
         )
+    if init.hotspot_c is not None or final.hotspot_c is not None:
+        rows.append(EvidenceRow(ROW_HOTSPOT, _celsius(init.hotspot_c), _celsius(final.hotspot_c)))
     method = result.fan_control_method
     via = _GPU_METHOD_TEXT.get(method, method)
     if result.result == "write_failed":

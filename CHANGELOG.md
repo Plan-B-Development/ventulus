@@ -7,6 +7,11 @@ rename. Version numbers carry on from Control-OFC.
 
 ### Fixed
 
+- **Test GPU Fan Control no longer calls an idle RX 9000 fan broken.** With the matching daemon, a
+  stopped fan on a cool RX 9000 card is shown as an inconclusive warning that asks you to test
+  again under load, and a fan reading 0 RPM on a warm card as a warning to look at the fan,
+  instead of a critical "Fan did not respond". The evidence table shows the GPU hotspot the test
+  measured. With an older daemon the result is as before.
 - **The GPU docs match a daemon that keeps every GPU fan out of the motherboard header list.**
   The hardware compatibility guide, GPU rules, API contract and troubleshooting manual no longer
   say a kernel patched with Intel's fan-control series makes the Arc fan appear as a motherboard
