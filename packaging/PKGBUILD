@@ -5,7 +5,7 @@ pkgbase=ventulus
 # diagnostics without the Qt stack; ventulus adds the GUI and depends on the
 # ventulus-diag of the same build, so `pacman -Syu` brings it in on upgrade.
 pkgname=(ventulus-diag ventulus)
-pkgver=6.0.0
+pkgver=6.1.0
 pkgrel=1
 arch=('any')
 url="https://github.com/Plan-B-Development/ventulus"

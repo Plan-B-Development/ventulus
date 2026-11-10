@@ -5,6 +5,11 @@ rename. Version numbers carry on from Control-OFC.
 
 ## [Unreleased]
 
+## [6.1.0] — 2026-11-10
+
+Pairs with `ventulusd` >= v3.0.0, which the package requires; ventulusd 5.6.0 is the current daemon
+release, and its GPU fan test gives the RX 9000 idle verdicts this release shows as warnings.
+
 ### Fixed
 
 - **Test GPU Fan Control no longer calls an idle RX 9000 fan broken.** With the matching daemon, a
