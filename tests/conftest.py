@@ -650,7 +650,8 @@ class UpdateSigner:
     """Test-only OpenPGP keys standing in for the repository key (DEC-499).
 
     ``key_file``/``fingerprint`` replace the bundled key and the pin;
-    ``other_*`` is a second key whose signatures must be refused.
+    ``other_*`` is a second key: refused unless pinned, and the successor key in
+    the rotation tests (UPD-a).
     """
 
     home: object
@@ -660,10 +661,19 @@ class UpdateSigner:
     other_fingerprint: str
     both_keys_file: object
 
-    def sign(self, data: bytes, *, other: bool = False, detached: bool = True) -> bytes:
+    def sign(
+        self, data: bytes, *, other: bool = False, both: bool = False, detached: bool = True
+    ) -> bytes:
+        """Sign *data*; *both* makes one file carrying a signature by each key."""
         import subprocess
 
-        user = "other@invalid" if other else "test@invalid"
+        users = (
+            ("test@invalid", "other@invalid")
+            if both
+            else ("other@invalid",)
+            if other
+            else ("test@invalid",)
+        )
         proc = subprocess.run(
             [
                 "gpg",
@@ -671,8 +681,7 @@ class UpdateSigner:
                 str(self.home),
                 "--batch",
                 "--no-tty",
-                "--local-user",
-                user,
+                *(arg for user in users for arg in ("--local-user", user)),
                 "--detach-sign" if detached else "--sign",
                 "--output",
                 "-",

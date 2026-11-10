@@ -92,7 +92,7 @@ def run_check(server: Server, cache: Path, state: CheckState | None = None, **kw
             cache=cache,
             now=kw.pop("now", NOW),
             key_file=server.signer.key_file,
-            fingerprint=server.signer.fingerprint,
+            fingerprints=(server.signer.fingerprint,),
         )
     return report, state
 
@@ -394,7 +394,7 @@ def test_the_request_carries_nothing_but_the_user_agent(update_signer, cache, mo
             cache=cache,
             now=NOW,
             key_file=update_signer.key_file,
-            fingerprint=update_signer.fingerprint,
+            fingerprints=(update_signer.fingerprint,),
         )
     assert [(r.method, str(r.url)) for r in server.requests] == [
         ("GET", MANIFEST_URL),
@@ -424,7 +424,7 @@ def test_a_cancelled_check_verifies_nothing(update_signer, cache):
             cache=cache,
             now=NOW,
             key_file=update_signer.key_file,
-            fingerprint=update_signer.fingerprint,
+            fingerprints=(update_signer.fingerprint,),
             cancel=cancel,
         )
     assert report.outcome is Outcome.UNREACHABLE and report.components == ()

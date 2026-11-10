@@ -255,12 +255,16 @@ reports_version() {
 ships_update_key() {
     gui_python "
 import subprocess, tempfile
-from ventulus.services.signature import REPOSITORY_KEY_FINGERPRINT, SignatureError, bundled_key_path, verify_detached
+from ventulus.services.signature import REPOSITORY_KEY_FINGERPRINTS, SignatureError, bundled_key_path, verify_detached
 with tempfile.TemporaryDirectory() as home:
     out = subprocess.run(['gpg', '--homedir', home, '--batch', '--with-colons', '--show-keys',
                           str(bundled_key_path())], capture_output=True, text=True, check=True).stdout
-fprs = [line.split(':')[9] for line in out.splitlines() if line.startswith('fpr:')]
-assert fprs and fprs[0] == REPOSITORY_KEY_FINGERPRINT, fprs
+lines = out.splitlines()
+# A primary key's fpr: record follows its pub: record; subkeys' follow sub:.
+primaries = [lines[i + 1].split(':')[9] for i, line in enumerate(lines)
+             if line.startswith('pub:') and i + 1 < len(lines) and lines[i + 1].startswith('fpr:')]
+assert len(primaries) == sum(line.startswith('pub:') for line in lines), primaries
+assert set(primaries) == REPOSITORY_KEY_FINGERPRINTS, primaries
 try:
     verify_detached(b'probe', b'not a signature')
 except SignatureError as exc:

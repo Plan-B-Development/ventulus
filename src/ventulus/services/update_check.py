@@ -4,8 +4,8 @@ Off by default. A check is one HTTPS GET of the signed manifest on Pages (and of
 its signature when the manifest changed), sent with no header beyond what httpx
 always sends and ``User-Agent: Ventulus/<version>``. Nothing reaches the daemon.
 
-Trust: the signature is checked against the bundled key and the pinned
-fingerprint (``services/signature.py``) before the manifest is parsed
+Trust: the signature is checked against the bundled keys and the pinned
+fingerprints (``services/signature.py``) before the manifest is parsed
 (``services/update_manifest.py``), and a manifest older than the newest one this
 user has already accepted is refused, so a replayed old manifest cannot hide a
 release. Any failure is reported as a failure and never as a result.
@@ -30,6 +30,7 @@ import os
 import shlex
 import tempfile
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -301,13 +302,13 @@ def check(
     cache: Path | None = None,
     now: datetime.datetime | None = None,
     key_file: Path | None = None,
-    fingerprint: str = signature.REPOSITORY_KEY_FINGERPRINT,
+    fingerprints: Iterable[str] = signature.REPOSITORY_KEY_FINGERPRINTS,
     cancel: threading.Event | None = None,
 ) -> UpdateReport:
     """Run one check. Updates *state* in place; the caller saves it.
 
     *cancel* (set when the window closes) stops it between its steps.
-    *key_file* and *fingerprint* exist for the tests (a test-only key).
+    *key_file* and *fingerprints* exist for the tests (a test-only key).
     """
     cache = cache or state_dir()
     now = now or datetime.datetime.now(datetime.UTC)
@@ -357,7 +358,7 @@ def check(
     if cancel is not None and cancel.is_set():
         return failed(Outcome.UNREACHABLE, "The check was cancelled.")
     try:
-        signature.verify_detached(raw, sig, key_file=key_file, fingerprint=fingerprint)
+        signature.verify_detached(raw, sig, key_file=key_file, fingerprints=fingerprints)
     except signature.SignatureError as exc:
         return failed(Outcome.UNVERIFIED, f"Could not verify the update information: {exc}.")
     try:

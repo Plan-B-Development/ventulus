@@ -7,6 +7,10 @@ rename. Version numbers carry on from Control-OFC.
 
 ### Fixed
 
+- **The update check survives a change of signing key.** Ventulus now accepts update information
+  carrying more than one signature, as long as one of them is good and made by a key it trusts,
+  and it can trust more than one key. From this version on, the repository key can be replaced
+  before it expires in 2028 without breaking the update check.
 - **Ctrl-C no longer crashes the GUI.** Stopping Ventulus with Ctrl-C from a terminal could
   end in a segmentation fault when the signal arrived while the dashboard chart was drawing.
   Ctrl-C now closes the window once the current drawing has finished, the same way as the

@@ -36,7 +36,7 @@ The file lists the latest stable version of each component, the SHA-256 and size
 
 Ventulus ships that key and checks the signature against it, and against that fingerprint, **before it reads anything in the file**. It refuses, and says *Could not verify the update information*, when:
 
-- the signature is missing, bad, or made by another key;
+- the signature is missing or bad, or no signature in it is by that key;
 - the file is malformed, in a format this version does not know, or names a pre-release;
 - the file is older than one this Ventulus has already accepted. An old file replayed by someone in the middle would otherwise hide a newer release.
 
