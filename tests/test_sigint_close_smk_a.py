@@ -66,8 +66,13 @@ _IN_PAINT_SCRIPT = textwrap.dedent(
     import faulthandler
     faulthandler.enable()
 
-    import pyqtgraph as pg
+    # PySide6 first, as ventulus.main does: pyqtgraph uses the binding already
+    # imported, and with none it tries PyQt6 first. Distribution Python
+    # installs can have PyQt6, and a PyQt6 chart inside a PySide6 application
+    # crashes for reasons unrelated to SIGINT.
     from PySide6.QtWidgets import QApplication
+    import pyqtgraph as pg
+    assert pg.Qt.QT_LIB == "PySide6", f"pyqtgraph bound {pg.Qt.QT_LIB}, not PySide6"
 
     app = QApplication([])
 
